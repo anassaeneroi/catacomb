@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod config;
+mod database;
 mod downloader;
 mod library;
+mod tray;
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {

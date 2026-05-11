@@ -4,6 +4,7 @@ use std::process::Command;
 
 use eframe::egui;
 
+use crate::config::Config;
 use crate::downloader::{Downloader, JobState};
 use crate::library::{self, Channel, Video};
 
@@ -29,6 +30,7 @@ pub struct App {
     show_downloads: bool,
     dl_url: String,
     dl_dir: String,
+    player_command: String,
     /// Decoded thumbnails. `None` means "tried and failed / not loadable".
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
     /// How many new thumbnails we're still allowed to decode this frame.
@@ -41,8 +43,18 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let channels_root = cwd.join("channels");
+        let config_path = cwd.join("config.toml");
+
+        let (channels_root, player_command) = match Config::load(&config_path) {
+            Ok(config) => (config.backup.directory.clone(), config.player.command),
+            Err(e) => {
+                eprintln!("Warning: failed to load config.toml: {e}. Using default channels directory.");
+                (cwd.join("channels"), "mpv".to_string())
+            }
+        };
+
         let _ = std::fs::create_dir_all(&channels_root);
+        let _db_path = channels_root.parent().map(|p| p.join("backup.db"));
         let library = library::scan_channels(&channels_root);
         let status = format!(
             "{} channels, {} videos",
@@ -59,6 +71,7 @@ impl App {
             show_downloads: false,
             dl_url: String::new(),
             dl_dir: String::new(),
+            player_command,
             textures: HashMap::new(),
             decode_budget: 0,
             desc_cache: HashMap::new(),
@@ -137,7 +150,7 @@ impl App {
     }
 
     fn play(&mut self, path: &Path) {
-        match Command::new("mpv").arg(path).spawn() {
+        match Command::new(&self.player_command).arg(path).spawn() {
             Ok(_) => self.status = format!("Playing {}", file_label(path)),
             Err(_) => match Command::new("xdg-open").arg(path).spawn() {
                 Ok(_) => self.status = format!("Opened {} in default player", file_label(path)),

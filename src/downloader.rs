@@ -67,14 +67,24 @@ impl Downloader {
         let _ = std::fs::create_dir_all(&target_dir);
 
         let url_for_thread = url.clone();
+        let archive_path = self.channels_root.join("archive.txt");
         thread::spawn(move || {
             let out_template = format!("{}/%(title)s [%(id)s].%(ext)s", target_dir.display());
             let spawn_result = Command::new("yt-dlp")
                 .arg("--newline")
                 .arg("--no-color")
                 .arg("--no-progress-bar")
-                .arg("--write-description")
+                .arg("--write-subs")
                 .arg("--write-thumbnail")
+                .arg("--write-description")
+                .arg("-f")
+                .arg("mkv")
+                .arg("--embed-metadata")
+                .arg("--break-on-existing")
+                .arg("--cookies-from-browser")
+                .arg("firefox")
+                .arg("--download-archive")
+                .arg(archive_path.display().to_string())
                 .arg("--ignore-errors")
                 .arg("-o")
                 .arg(&out_template)
