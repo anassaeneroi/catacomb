@@ -1,0 +1,16 @@
+[package]
+name = "youtube-backup"
+version = "0.1.0"
+edition = "2021"
+description = "A small yt-dlp front-end: browse downloaded channels and queue new downloads"
+
+[dependencies]
+eframe = "0.29"
+image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png"] }
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+tray-icon = "0.13"
+
+[profile.release]
+opt-level = 2

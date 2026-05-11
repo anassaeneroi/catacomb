@@ -1,0 +1,8 @@
+[backup]
+# Directory where channel backups are stored
+directory = "/mnt/InannaBeloved/youtube-backup/channels"
+
+[player]
+# Video player command (default: mpv)
+# Examples: "mpv", "vlc", "ffplay"
+command = "mpv"

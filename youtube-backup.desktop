@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=YouTube Backup
+Comment=Download and manage YouTube channel backups
+Exec=youtube-backup
+Icon=youtube-backup
+Categories=Utility;Video;
+StartupNotify=true
+Terminal=false

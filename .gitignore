@@ -1,0 +1,10 @@
+# Downloaded channel archives (videos, thumbnails, descriptions)
+/channels/
+
+# Rust build artifacts
+/target/
+
+# Editor / OS cruft
+*.swp
+.DS_Store
+.claude/
