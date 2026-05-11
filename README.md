@@ -1,173 +1,203 @@
-# YouTube Backup
+# yt-offline
 
-A modern desktop application for archiving YouTube channels using [yt-dlp](https://github.com/yt-dlp/yt-dlp). Browse your downloaded channels, manage downloads, and play videos with your preferred media player—all from a clean, user-friendly GUI.
+A desktop app for archiving YouTube channels using [yt-dlp](https://github.com/yt-dlp/yt-dlp). Browse your downloaded channels, manage downloads, and play videos — all from a native GUI.
 
 ## Features
 
-- **Channel Browser**: Browse downloaded YouTube channels and videos with thumbnails
-- **Download Queue**: Queue new channels or videos for download with a simple interface
-- **Video Playback**: Play videos directly using your preferred video player (mpv, VLC, etc.)
-- **Live Chat Archives**: Identify and manage downloaded live chat archives
-- **Search**: Search across your entire video library
-- **System Tray**: Minimize to system tray for quick access
-- **Configurable**: Customize backup location and video player via `config.toml`
-- **SQLite Database**: Efficient metadata storage and retrieval
+- **Channel Browser** — Browse downloaded channels and videos with thumbnails
+- **Smart Download Routing** — Paste any YouTube URL; channels, playlists, and single videos are automatically routed to the right folder
+- **Playlist View** — Channels with playlist subdirectories show them in the sidebar
+- **Themes** — Dark, Light, Dracula, Trans, and three Emo/Scene themes
+- **Settings GUI** — Configure everything from inside the app
+- **Video Playback** — Launch videos in mpv, VLC, or any player
+- **Search** — Filter across your entire library in real time
+- **System Tray** — Minimize to tray
 
-## Requirements
+## Building
 
-- **Rust** 1.70+ (for building from source)
-- **yt-dlp**: Required for downloading videos. Install via:
-  - `pip install yt-dlp` (Python)
-  - `apt install yt-dlp` (Debian/Ubuntu)
-  - `brew install yt-dlp` (macOS)
-  - Or [build from source](https://github.com/yt-dlp/yt-dlp#installation)
-- **Video Player**: A command-line compatible player like:
-  - mpv (default)
-  - VLC
-  - ffplay
-  - Any player accepting a file path as argument
+### Arch Linux / Manjaro
 
-## Installation
-
-### From Source
+A `PKGBUILD` is included:
 
 ```bash
-git clone https://codeberg.org/your-username/youtube-backup
-cd youtube-backup
+git clone https://codeberg.org/anassaeneroi/yt-offline
+cd yt-offline
+makepkg -si
+```
+
+Or build manually:
+
+```bash
+sudo pacman -S --needed rust yt-dlp mpv
+cargo build --release
+sudo install -Dm755 target/release/yt-offline /usr/bin/yt-offline
+```
+
+---
+
+### Debian / Ubuntu / Linux Mint
+
+Install build dependencies:
+
+```bash
+sudo apt install \
+  build-essential pkg-config curl git \
+  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libxkbcommon-dev libssl-dev \
+  libgtk-3-dev libayatana-appindicator3-dev
+```
+
+Install Rust (if not already installed):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Install runtime dependencies:
+
+```bash
+sudo apt install yt-dlp mpv
+```
+
+Build and install:
+
+```bash
+git clone https://codeberg.org/anassaeneroi/yt-offline
+cd yt-offline
+cargo build --release
+sudo install -Dm755 target/release/yt-offline /usr/bin/yt-offline
+cp youtube-backup.desktop ~/.local/share/applications/yt-offline.desktop
+```
+
+---
+
+### macOS
+
+Install Xcode command line tools and Homebrew dependencies:
+
+```bash
+xcode-select --install
+brew install yt-dlp mpv
+```
+
+Install Rust:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Build:
+
+```bash
+git clone https://codeberg.org/anassaeneroi/yt-offline
+cd yt-offline
 cargo build --release
 ```
 
-The compiled binary will be at `target/release/youtube-backup`.
+The binary is at `target/release/yt-offline`. Copy it wherever you like, or run it in place.
 
-### Linux Desktop Integration
+---
 
-A `.desktop` file is included for easy launcher integration:
+### Windows
 
-```bash
-cp youtube-backup.desktop ~/.local/share/applications/
-```
+1. Install [Rust](https://rustup.rs) — accept the default MSVC toolchain when prompted
+2. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **Desktop development with C++** workload
+3. Install yt-dlp and mpv:
+
+   ```powershell
+   winget install yt-dlp.yt-dlp
+   winget install mpv.net
+   ```
+
+4. Clone and build:
+
+   ```powershell
+   git clone https://codeberg.org/anassaeneroi/yt-offline
+   cd yt-offline
+   cargo build --release
+   ```
+
+The binary is at `target\release\yt-offline.exe`. Copy it wherever you like and run it.
+
+> **Note:** The first build takes a while — Rust compiles all dependencies from scratch.
+
+---
 
 ## Configuration
 
-Create a `config.toml` file in the same directory as the binary:
+On first run, create a `config.toml` next to the binary (or edit it from the Settings button inside the app):
 
 ```toml
 [backup]
 directory = "/path/to/your/video/library"
 
 [player]
-command = "mpv"  # or "vlc", "ffplay", etc.
+command = "mpv"
+
+[ui]
+theme = "dark"
 ```
 
-### Configuration Options
+### Options
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `backup.directory` | string | `./channels` | Where downloaded videos are stored |
-| `player.command` | string | `mpv` | Command to launch video player |
+| Setting | Default | Description |
+| ------- | ------- | ----------- |
+| `backup.directory` | `./channels` | Where downloaded videos are stored |
+| `player.command` | `mpv` | Command used to launch the video player |
+| `ui.theme` | `dark` | `dark`, `light`, `dracula`, `trans`, `emo-nocturnal`, `emo-coffin`, `emo-scene-queen` |
+
+---
 
 ## Usage
 
-### Running the Application
+1. **Download a channel/video/playlist** — click **⬇ Downloads**, paste a YouTube URL. The app detects the URL type and routes it automatically:
+   - Channel URL → `channels/<handle>/`
+   - Single video → `channels/<channel-name>/`
+   - Playlist → `channels/<channel-name>/<playlist-name>/`
 
-```bash
-./youtube-backup
-```
+2. **Browse your library** — channels appear in the left sidebar. If a channel has playlist subdirectories they show as collapsible sub-items.
 
-Or from your application launcher after installing the `.desktop` file.
+3. **Play a video** — click **▶ Play** on any video card, or double-click the thumbnail.
 
-### Workflow
+4. **Change settings** — click **⚙ Settings** to change the backup directory, player, or theme without editing the file.
 
-1. **Add a Channel**: 
-   - Click the "Download" tab
-   - Enter the YouTube channel URL (e.g., `https://www.youtube.com/@channelname`)
-   - Optionally specify a custom directory
-   - Click "Queue Download"
-
-2. **Browse Downloads**:
-   - Videos are automatically organized by channel
-   - Browse channels in the left sidebar
-   - Click a channel to view its videos
-   - Videos display with thumbnails and metadata
-
-3. **Play a Video**:
-   - Click any video card
-   - Select "Play" to launch it in your configured player
-
-4. **Search**:
-   - Use the search bar to find videos by title
-   - Results update in real-time across your entire library
-
-5. **View Downloads**:
-   - Toggle the "Show Downloads" button to monitor active downloads
-   - Tracks download progress for queued jobs
-
-## Project Structure
-
-```
-youtube-backup/
-├── src/
-│   ├── main.rs          # Application entry point
-│   ├── app.rs           # Main GUI and event loop
-│   ├── downloader.rs    # yt-dlp integration
-│   ├── library.rs       # Channel and video scanning
-│   ├── config.rs        # Configuration loading
-│   ├── database.rs      # SQLite metadata storage
-│   └── tray.rs          # System tray integration
-├── config.toml          # Configuration template
-├── Cargo.toml           # Rust dependencies
-└── youtube-backup.desktop # Linux launcher entry
-```
-
-## Dependencies
-
-- **eframe/egui**: Fast, native GUI framework for Rust
-- **rusqlite**: SQLite database bindings (bundled)
-- **serde/toml**: Configuration file parsing
-- **image**: Thumbnail decoding (JPEG, PNG, WebP)
-- **tray-icon**: System tray integration
-
-## Building and Packaging
-
-### Release Build
-
-```bash
-cargo build --release
-```
-
-### AUR (Arch Linux)
-
-A `PKGBUILD` is included for Arch Linux:
-
-```bash
-makepkg -si
-```
+---
 
 ## Troubleshooting
 
-### yt-dlp Not Found
-Ensure `yt-dlp` is installed and in your `$PATH`:
-```bash
-which yt-dlp
+**`yt-dlp` not found**
+Make sure it's installed and on your `$PATH`. On Windows, restart your terminal after install.
+
+**Build fails on Debian/Ubuntu with missing headers**
+Make sure you installed all packages in the build dependencies block above, especially `libayatana-appindicator3-dev` and `libgtk-3-dev`.
+
+**Build fails on Windows with linker errors**
+Make sure Visual Studio Build Tools are installed with the C++ workload selected, not just the base tools.
+
+**Videos won't play**
+Check `player.command` in `config.toml` (or Settings). The command must accept a file path as its last argument.
+
+**Thumbnails not loading**
+Supported formats: JPEG, PNG, WebP. Other formats are silently skipped.
+
+---
+
+## Project Structure
+
+```text
+src/
+  main.rs        entry point
+  app.rs         UI and main loop
+  downloader.rs  yt-dlp integration and URL detection
+  library.rs     channel/playlist/video scanner
+  config.rs      config file loading and saving
+  theme.rs       all colour themes
+  database.rs    SQLite (reserved for future use)
+  tray.rs        system tray
 ```
-
-### Videos Won't Play
-Check that your configured player command is correct in `config.toml` and installed on your system.
-
-### Thumbnails Not Loading
-Verify the image dependencies are compiled correctly. Supported formats: JPEG, PNG, WebP.
-
-### Database Issues
-Delete `backup.db` (in the parent directory of your video library) and rescan:
-```bash
-rm backup.db
-```
-Restart the application to rebuild the index.
 
 ## License
 
-See [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions welcome! Feel free to open issues or submit pull requests.
+See [LICENSE](LICENSE).
