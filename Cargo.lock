@@ -4813,7 +4813,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "youtube-backup"
+name = "yt-offline"
 version = "0.1.0"
 dependencies = [
  "eframe",
