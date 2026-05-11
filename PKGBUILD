@@ -4,20 +4,20 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="A small yt-dlp front-end: browse downloaded channels and queue new downloads"
 arch=('x86_64' 'aarch64')
-url="https://github.com/InannaBeloved/youtube-backup"
+url="https://codeberg.org/anassaeneroi/yt-offline"
 license=('GPL3')
 depends=('yt-dlp' 'mpv' 'sqlite' 'libxcb')
 makedepends=('cargo' 'rustup')
-source=("$pkgname-$pkgver.tar.gz")
+source=("git+https://codeberg.org/anassaeneroi/yt-offline.git")
 sha256sums=('SKIP')
 
 build() {
-    cd "$pkgname-$pkgver"
+    cd "$pkgname"
     cargo build --release --locked
 }
 
 package() {
-    cd "$pkgname-$pkgver"
+    cd "$pkgname"
 
     # Install binary
     install -Dm755 target/release/youtube-backup "$pkgdir/usr/bin/youtube-backup"
