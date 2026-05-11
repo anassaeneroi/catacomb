@@ -6,6 +6,42 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
+pub enum UrlKind {
+    Channel { handle: String },
+    Playlist,
+    Video,
+    Unknown,
+}
+
+/// Detects the kind of YouTube URL from a string.
+pub fn detect_url_kind(url: &str) -> UrlKind {
+    if url.contains("playlist?list=") {
+        return UrlKind::Playlist;
+    }
+    if let Some(h) = extract_after(url, "/@") {
+        return UrlKind::Channel { handle: h.to_string() };
+    }
+    if let Some(h) = extract_after(url, "/channel/") {
+        return UrlKind::Channel { handle: h.to_string() };
+    }
+    if let Some(h) = extract_after(url, "/c/") {
+        return UrlKind::Channel { handle: h.to_string() };
+    }
+    if url.contains("watch?v=") || url.contains("youtu.be/") {
+        return UrlKind::Video;
+    }
+    UrlKind::Unknown
+}
+
+fn extract_after<'a>(url: &'a str, marker: &str) -> Option<&'a str> {
+    let start = url.find(marker)? + marker.len();
+    let rest = &url[start..];
+    let end = rest
+        .find(|c| c == '/' || c == '?' || c == '&' || c == '#')
+        .unwrap_or(rest.len());
+    if end == 0 { None } else { Some(&rest[..end]) }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
     Running,
@@ -21,7 +57,7 @@ enum Msg {
 
 pub struct Job {
     pub url: String,
-    pub dir_name: String,
+    pub label: String,
     pub state: JobState,
     pub progress: f32,
     pub log: Vec<String>,
@@ -50,26 +86,39 @@ impl Job {
 
 pub struct Downloader {
     pub jobs: Vec<Job>,
-    channels_root: PathBuf,
+    pub channels_root: PathBuf,
 }
 
 impl Downloader {
     pub fn new(channels_root: PathBuf) -> Self {
-        Self {
-            jobs: Vec::new(),
-            channels_root,
-        }
+        Self { jobs: Vec::new(), channels_root }
     }
 
-    pub fn start(&mut self, url: String, dir_name: String) {
+    pub fn start(&mut self, url: String, kind: &UrlKind) {
         let (tx, rx) = channel();
-        let target_dir = self.channels_root.join(&dir_name);
-        let _ = std::fs::create_dir_all(&target_dir);
+        let archive_path = self.channels_root.join("archive.txt");
+
+        let (out_arg, label) = match kind {
+            UrlKind::Channel { handle } => {
+                let dir = self.channels_root.join(handle);
+                let _ = std::fs::create_dir_all(&dir);
+                (
+                    format!("{}/%(title)s [%(id)s].%(ext)s", dir.display()),
+                    format!("channels/{}/", handle),
+                )
+            }
+            UrlKind::Playlist => (
+                format!("{}/%(channel)s/%(playlist_title)s/%(title)s [%(id)s].%(ext)s", self.channels_root.display()),
+                "channels/<channel>/<playlist>/".to_string(),
+            ),
+            UrlKind::Video | UrlKind::Unknown => (
+                format!("{}/%(channel)s/%(title)s [%(id)s].%(ext)s", self.channels_root.display()),
+                "channels/<channel>/".to_string(),
+            ),
+        };
 
         let url_for_thread = url.clone();
-        let archive_path = self.channels_root.join("archive.txt");
         thread::spawn(move || {
-            let out_template = format!("{}/%(title)s [%(id)s].%(ext)s", target_dir.display());
             let spawn_result = Command::new("yt-dlp")
                 .arg("--newline")
                 .arg("--no-color")
@@ -87,7 +136,7 @@ impl Downloader {
                 .arg(archive_path.display().to_string())
                 .arg("--ignore-errors")
                 .arg("-o")
-                .arg(&out_template)
+                .arg(&out_arg)
                 .arg(&url_for_thread)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -103,7 +152,6 @@ impl Downloader {
                 }
             };
 
-            // Forward stderr on its own thread so a full pipe can't deadlock stdout.
             if let Some(stderr) = child.stderr.take() {
                 let tx = tx.clone();
                 thread::spawn(move || {
@@ -128,7 +176,7 @@ impl Downloader {
 
         self.jobs.push(Job {
             url,
-            dir_name,
+            label,
             state: JobState::Running,
             progress: 0.0,
             log: Vec::new(),
@@ -147,7 +195,6 @@ impl Downloader {
     }
 }
 
-/// Parses the percentage out of a yt-dlp `[download]  12.3% of ...` line.
 fn parse_progress(line: &str) -> Option<f32> {
     let rest = line.trim_start().strip_prefix("[download]")?.trim_start();
     let pct_end = rest.find('%')?;

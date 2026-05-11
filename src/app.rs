@@ -5,13 +5,11 @@ use std::process::Command;
 use eframe::egui;
 
 use crate::config::Config;
-use crate::downloader::{Downloader, JobState};
-use crate::library::{self, Channel, Video};
+use crate::downloader::{detect_url_kind, Downloader, JobState, UrlKind};
+use crate::library::{self, Video};
+use crate::theme;
 
-/// Flattened, cheap-to-clone view of one video for a single frame of rendering.
 struct Card {
-    channel_idx: usize,
-    video_idx: usize,
     channel_name: String,
     title: String,
     id: String,
@@ -21,105 +19,160 @@ struct Card {
 }
 
 pub struct App {
+    config: Config,
+    config_path: PathBuf,
     channels_root: PathBuf,
-    library: Vec<Channel>,
+    library: Vec<library::Channel>,
     selected_channel: Option<usize>,
-    selected_video: Option<(usize, usize)>,
+    selected_playlist: Option<(usize, usize)>,
+    selected_video: Option<String>,
     search: String,
     downloader: Downloader,
     show_downloads: bool,
+    show_settings: bool,
     dl_url: String,
-    dl_dir: String,
-    player_command: String,
-    /// Decoded thumbnails. `None` means "tried and failed / not loadable".
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
-    /// How many new thumbnails we're still allowed to decode this frame.
     decode_budget: u32,
     desc_cache: HashMap<PathBuf, String>,
     status: String,
+    settings_dir: String,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let config_path = cwd.join("config.toml");
 
-        let (channels_root, player_command) = match Config::load(&config_path) {
-            Ok(config) => (config.backup.directory.clone(), config.player.command),
+        let config = match Config::load(&config_path) {
+            Ok(c) => c,
             Err(e) => {
-                eprintln!("Warning: failed to load config.toml: {e}. Using default channels directory.");
-                (cwd.join("channels"), "mpv".to_string())
+                eprintln!("Warning: failed to load config.toml: {e}. Using defaults.");
+                Config::default_with_dir(cwd.join("channels"))
             }
         };
 
+        theme::apply(&cc.egui_ctx, &config.ui.theme);
+
+        let channels_root = config.backup.directory.clone();
+        let settings_dir = channels_root.display().to_string();
         let _ = std::fs::create_dir_all(&channels_root);
-        let _db_path = channels_root.parent().map(|p| p.join("backup.db"));
         let library = library::scan_channels(&channels_root);
         let status = format!(
             "{} channels, {} videos",
             library.len(),
-            library.iter().map(|c| c.videos.len()).sum::<usize>()
+            library.iter().map(|c| c.total_videos()).sum::<usize>()
         );
+
         Self {
+            config,
+            config_path,
             channels_root: channels_root.clone(),
             library,
             selected_channel: None,
+            selected_playlist: None,
             selected_video: None,
             search: String::new(),
             downloader: Downloader::new(channels_root),
             show_downloads: false,
+            show_settings: false,
             dl_url: String::new(),
-            dl_dir: String::new(),
-            player_command,
             textures: HashMap::new(),
             decode_budget: 0,
             desc_cache: HashMap::new(),
             status,
+            settings_dir,
         }
     }
 
     fn rescan(&mut self) {
         self.library = library::scan_channels(&self.channels_root);
         self.selected_channel = None;
+        self.selected_playlist = None;
         self.selected_video = None;
         self.desc_cache.clear();
+        self.textures.clear();
         self.status = format!(
             "Rescanned: {} channels, {} videos",
             self.library.len(),
-            self.library.iter().map(|c| c.videos.len()).sum::<usize>()
+            self.library.iter().map(|c| c.total_videos()).sum::<usize>()
         );
     }
 
     fn cards(&self) -> Vec<Card> {
         let query = self.search.trim().to_lowercase();
+
+        let channel_indices: Vec<usize> = if let Some(ci) = self.selected_channel {
+            vec![ci]
+        } else {
+            (0..self.library.len()).collect()
+        };
+
         let mut cards = Vec::new();
-        for (ci, channel) in self.library.iter().enumerate() {
-            if let Some(sel) = self.selected_channel {
-                if sel != ci {
-                    continue;
+        for ci in channel_indices {
+            let Some(channel) = self.library.get(ci) else { continue };
+
+            let playlist_filter = match self.selected_playlist {
+                Some((pci, pi)) if pci == ci => Some(pi),
+                _ => None,
+            };
+
+            if let Some(pi) = playlist_filter {
+                let Some(playlist) = channel.playlists.get(pi) else { continue };
+                for v in &playlist.videos {
+                    if !query.is_empty()
+                        && !v.title.to_lowercase().contains(&query)
+                        && !v.id.to_lowercase().contains(&query)
+                    {
+                        continue;
+                    }
+                    cards.push(Card {
+                        channel_name: channel.name.clone(),
+                        title: v.title.clone(),
+                        id: v.id.clone(),
+                        video_path: v.video_path.clone(),
+                        thumb_path: v.thumb_path.clone(),
+                        has_live_chat: v.has_live_chat,
+                    });
                 }
-            }
-            for (vi, v) in channel.videos.iter().enumerate() {
-                if !query.is_empty()
-                    && !v.title.to_lowercase().contains(&query)
-                    && !v.id.to_lowercase().contains(&query)
-                {
-                    continue;
+            } else {
+                let all_videos: Vec<&library::Video> = channel
+                    .videos
+                    .iter()
+                    .chain(channel.playlists.iter().flat_map(|p| p.videos.iter()))
+                    .collect();
+                for v in all_videos {
+                    if !query.is_empty()
+                        && !v.title.to_lowercase().contains(&query)
+                        && !v.id.to_lowercase().contains(&query)
+                    {
+                        continue;
+                    }
+                    cards.push(Card {
+                        channel_name: channel.name.clone(),
+                        title: v.title.clone(),
+                        id: v.id.clone(),
+                        video_path: v.video_path.clone(),
+                        thumb_path: v.thumb_path.clone(),
+                        has_live_chat: v.has_live_chat,
+                    });
                 }
-                cards.push(Card {
-                    channel_idx: ci,
-                    video_idx: vi,
-                    channel_name: channel.name.clone(),
-                    title: v.title.clone(),
-                    id: v.id.clone(),
-                    video_path: v.video_path.clone(),
-                    thumb_path: v.thumb_path.clone(),
-                    has_live_chat: v.has_live_chat,
-                });
             }
         }
         cards
+    }
+
+    fn find_video_by_id(&self, id: &str) -> Option<(Video, String)> {
+        for channel in &self.library {
+            if let Some(v) = channel.videos.iter().find(|v| v.id == id) {
+                return Some((v.clone(), channel.name.clone()));
+            }
+            for playlist in &channel.playlists {
+                if let Some(v) = playlist.videos.iter().find(|v| v.id == id) {
+                    return Some((v.clone(), channel.name.clone()));
+                }
+            }
+        }
+        None
     }
 
     fn texture(&mut self, ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle> {
@@ -150,7 +203,8 @@ impl App {
     }
 
     fn play(&mut self, path: &Path) {
-        match Command::new(&self.player_command).arg(path).spawn() {
+        let cmd = self.config.player.command.clone();
+        match Command::new(&cmd).arg(path).spawn() {
             Ok(_) => self.status = format!("Playing {}", file_label(path)),
             Err(_) => match Command::new("xdg-open").arg(path).spawn() {
                 Ok(_) => self.status = format!("Opened {} in default player", file_label(path)),
@@ -160,14 +214,9 @@ impl App {
     }
 
     fn open_in_file_manager(&mut self, path: &Path) {
-        let target = if path.is_dir() {
-            path
-        } else {
-            path.parent().unwrap_or(path)
-        };
-        match Command::new("xdg-open").arg(target).spawn() {
-            Ok(_) => {}
-            Err(e) => self.status = format!("Couldn't open folder: {e}"),
+        let target = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+        if let Err(e) = Command::new("xdg-open").arg(target).spawn() {
+            self.status = format!("Couldn't open folder: {e}");
         }
     }
 
@@ -175,7 +224,7 @@ impl App {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.heading("YouTube Backup");
+                ui.heading("yt-offline");
                 ui.separator();
                 ui.label("🔍");
                 ui.add(
@@ -190,13 +239,15 @@ impl App {
                 if ui.button("⟳ Rescan").clicked() {
                     self.rescan();
                 }
-                let dl_label = if self.show_downloads {
-                    "⬇ Downloads ▸"
-                } else {
-                    "⬇ Downloads"
-                };
+                let dl_label = if self.show_downloads { "⬇ Downloads ▸" } else { "⬇ Downloads" };
                 if ui.selectable_label(self.show_downloads, dl_label).clicked() {
                     self.show_downloads = !self.show_downloads;
+                }
+                if ui.selectable_label(self.show_settings, "⚙ Settings").clicked() {
+                    self.show_settings = !self.show_settings;
+                    if self.show_settings {
+                        self.settings_dir = self.channels_root.display().to_string();
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(&self.status).weak());
@@ -215,24 +266,50 @@ impl App {
                 ui.heading("Channels");
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let total: usize = self.library.iter().map(|c| c.videos.len()).sum();
+                    let total: usize = self.library.iter().map(|c| c.total_videos()).sum();
                     if ui
-                        .selectable_label(self.selected_channel.is_none(), format!("⊞ All  ({total})"))
+                        .selectable_label(
+                            self.selected_channel.is_none(),
+                            format!("⊞ All  ({total})"),
+                        )
                         .clicked()
                     {
                         self.selected_channel = None;
+                        self.selected_playlist = None;
                         self.selected_video = None;
                     }
                     ui.separator();
-                    for (i, channel) in self.library.iter().enumerate() {
-                        let label = format!("{}  ({})", channel.name, channel.videos.len());
+                    for i in 0..self.library.len() {
+                        let is_selected = self.selected_channel == Some(i);
+                        let (name, total, has_playlists) = {
+                            let ch = &self.library[i];
+                            (ch.name.clone(), ch.total_videos(), !ch.playlists.is_empty())
+                        };
+                        let label = format!("{}  ({})", name, total);
                         if ui
-                            .selectable_label(self.selected_channel == Some(i), label)
-                            .on_hover_text(channel.path.display().to_string())
+                            .selectable_label(is_selected && self.selected_playlist.is_none(), label)
+                            .on_hover_text(self.library[i].path.display().to_string())
                             .clicked()
                         {
                             self.selected_channel = Some(i);
+                            self.selected_playlist = None;
                             self.selected_video = None;
+                        }
+                        if is_selected && has_playlists {
+                            let playlist_count = self.library[i].playlists.len();
+                            for pi in 0..playlist_count {
+                                let (pl_name, pl_len) = {
+                                    let pl = &self.library[i].playlists[pi];
+                                    (pl.name.clone(), pl.videos.len())
+                                };
+                                let is_pl = self.selected_playlist == Some((i, pi));
+                                let pl_label =
+                                    format!("    └ {}  ({})", pl_name, pl_len);
+                                if ui.selectable_label(is_pl, pl_label).clicked() {
+                                    self.selected_playlist = Some((i, pi));
+                                    self.selected_video = None;
+                                }
+                            }
                         }
                     }
                 });
@@ -252,24 +329,35 @@ impl App {
                         .hint_text("https://www.youtube.com/…")
                         .desired_width(f32::INFINITY),
                 );
-                ui.horizontal(|ui| {
-                    ui.label("Save into  channels/");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.dl_dir)
-                            .hint_text("folder_name")
-                            .desired_width(170.0),
-                    );
-                });
-                let ready = !self.dl_url.trim().is_empty() && !self.dl_dir.trim().is_empty();
-                if ui
-                    .add_enabled(ready, egui::Button::new("⬇  Start download"))
-                    .clicked()
-                {
-                    let url = self.dl_url.trim().to_string();
-                    let dir = self.dl_dir.trim().to_string();
-                    self.downloader.start(url, dir.clone());
-                    self.status = format!("Downloading into channels/{dir}");
+
+                let kind = detect_url_kind(self.dl_url.trim());
+                let (type_label, dest_preview) = match &kind {
+                    UrlKind::Channel { handle } => {
+                        ("Channel", format!("→ channels/{}/", handle))
+                    }
+                    UrlKind::Playlist => ("Playlist", "→ channels/<channel>/<playlist>/".to_string()),
+                    UrlKind::Video => ("Video", "→ channels/<channel>/".to_string()),
+                    UrlKind::Unknown => ("—", String::new()),
+                };
+
+                if !self.dl_url.trim().is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label("Type:");
+                        ui.strong(type_label);
+                    });
+                    if !dest_preview.is_empty() {
+                        ui.label(egui::RichText::new(&dest_preview).small().weak());
+                    }
                 }
+
+                let ready = !self.dl_url.trim().is_empty();
+                if ui.add_enabled(ready, egui::Button::new("⬇  Start download")).clicked() {
+                    let url = self.dl_url.trim().to_string();
+                    let dest = dest_preview.clone();
+                    self.downloader.start(url, &kind);
+                    self.status = format!("Downloading: {dest}");
+                }
+
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.heading("Jobs");
@@ -277,9 +365,7 @@ impl App {
                         && !self.downloader.any_running()
                         && ui.button("Clear finished").clicked()
                     {
-                        self.downloader
-                            .jobs
-                            .retain(|j| j.state == JobState::Running);
+                        self.downloader.jobs.retain(|j| j.state == JobState::Running);
                     }
                 });
                 if self.downloader.jobs.is_empty() {
@@ -295,7 +381,7 @@ impl App {
                         ui.group(|ui| {
                             ui.horizontal(|ui| {
                                 ui.colored_label(color, text);
-                                ui.label(format!("→ channels/{}", job.dir_name));
+                                ui.label(&job.label);
                             });
                             ui.label(egui::RichText::new(&job.url).small().weak());
                             if job.state == JobState::Running {
@@ -312,9 +398,7 @@ impl App {
                                     .stick_to_bottom(true)
                                     .show(ui, |ui| {
                                         for line in &job.log {
-                                            ui.label(
-                                                egui::RichText::new(line).small().monospace(),
-                                            );
+                                            ui.label(egui::RichText::new(line).small().monospace());
                                         }
                                     });
                             });
@@ -324,11 +408,93 @@ impl App {
             });
     }
 
-    fn detail_panel(&mut self, ctx: &egui::Context) {
-        let Some((ci, vi)) = self.selected_video else {
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
             return;
+        }
+        let mut open = self.show_settings;
+        egui::Window::new("⚙ Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                egui::Grid::new("settings_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Backup directory:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.settings_dir)
+                                .desired_width(280.0)
+                                .hint_text("/path/to/channels"),
+                        );
+                        ui.end_row();
+
+                        ui.label("Player command:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.config.player.command)
+                                .desired_width(280.0)
+                                .hint_text("mpv"),
+                        );
+                        ui.end_row();
+
+                        ui.label("Theme:");
+                        egui::ComboBox::from_id_salt("theme_combo")
+                            .selected_text(
+                                theme::THEMES
+                                    .iter()
+                                    .find(|(id, _)| *id == self.config.ui.theme)
+                                    .map(|(_, label)| *label)
+                                    .unwrap_or("Dark"),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (id, label) in theme::THEMES {
+                                    if ui
+                                        .selectable_label(self.config.ui.theme == *id, *label)
+                                        .clicked()
+                                    {
+                                        self.config.ui.theme = id.to_string();
+                                        theme::apply(ctx, id);
+                                    }
+                                }
+                            });
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Apply & Save").clicked() {
+                        let new_dir = PathBuf::from(&self.settings_dir);
+                        let dir_changed = new_dir != self.config.backup.directory;
+                        self.config.backup.directory = new_dir.clone();
+                        match self.config.save(&self.config_path) {
+                            Ok(_) => self.status = "Settings saved.".to_string(),
+                            Err(e) => self.status = format!("Error saving config: {e}"),
+                        }
+                        if dir_changed {
+                            self.channels_root = new_dir.clone();
+                            self.downloader.channels_root = new_dir;
+                            let _ = std::fs::create_dir_all(&self.channels_root);
+                            self.rescan();
+                        }
+                    }
+                    ui.label(egui::RichText::new("Theme previews immediately; other changes apply on save.").weak().small());
+                });
+            });
+        self.show_settings = open;
+    }
+
+    fn detail_panel(&mut self, ctx: &egui::Context) {
+        let selected_id = match &self.selected_video {
+            Some(id) => id.clone(),
+            None => return,
         };
-        let Some(video) = self.library.get(ci).and_then(|c| c.videos.get(vi)).cloned() else {
+        let Some((video, _channel_name)) = self.find_video_by_id(&selected_id) else {
             self.selected_video = None;
             return;
         };
@@ -354,7 +520,9 @@ impl App {
                         ui.label(egui::RichText::new("💬 has live chat").small().weak());
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(format!("id: {}", video.id)).monospace().weak());
+                        ui.label(
+                            egui::RichText::new(format!("id: {}", video.id)).monospace().weak(),
+                        );
                         if ui.button("✖ close").clicked() {
                             self.selected_video = None;
                         }
@@ -362,9 +530,11 @@ impl App {
                 });
                 ui.separator();
                 let description = self.description(&video);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.add(egui::Label::new(description).wrap());
-                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add(egui::Label::new(description).wrap());
+                    });
             });
     }
 
@@ -374,7 +544,9 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(format!("{} videos", cards.len()));
             if !self.search.trim().is_empty() {
-                ui.label(egui::RichText::new(format!("(filtered by \"{}\")", self.search.trim())).weak());
+                ui.label(
+                    egui::RichText::new(format!("(filtered by \"{}\")", self.search.trim())).weak(),
+                );
             }
         });
         ui.separator();
@@ -395,11 +567,12 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let thumb_size = egui::vec2(176.0, 99.0);
             for card in &cards {
-                let selected = self.selected_video == Some((card.channel_idx, card.video_idx));
+                let selected = self.selected_video.as_deref() == Some(card.id.as_str());
                 let mut clicked_card = false;
                 let mut play_card = false;
                 ui.horizontal(|ui| {
-                    let (rect, resp) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
+                    let (rect, resp) =
+                        ui.allocate_exact_size(thumb_size, egui::Sense::click());
                     let texture = card
                         .thumb_path
                         .as_ref()
@@ -411,7 +584,11 @@ impl App {
                                 .paint_at(ui, rect);
                         }
                         None => {
-                            ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(38));
+                            ui.painter().rect_filled(
+                                rect,
+                                4.0,
+                                egui::Color32::from_gray(38),
+                            );
                             ui.painter().text(
                                 rect.center(),
                                 egui::Align2::CENTER_CENTER,
@@ -437,14 +614,19 @@ impl App {
 
                     ui.vertical(|ui| {
                         if ui
-                            .selectable_label(selected, egui::RichText::new(&card.title).strong())
+                            .selectable_label(
+                                selected,
+                                egui::RichText::new(&card.title).strong(),
+                            )
                             .clicked()
                         {
                             clicked_card = true;
                         }
                         ui.horizontal(|ui| {
                             if show_channel {
-                                ui.label(egui::RichText::new(&card.channel_name).small().weak());
+                                ui.label(
+                                    egui::RichText::new(&card.channel_name).small().weak(),
+                                );
                                 ui.label(egui::RichText::new("·").weak());
                             }
                             ui.label(egui::RichText::new(&card.id).small().monospace().weak());
@@ -473,9 +655,9 @@ impl App {
                     if let Some(p) = card.video_path.clone() {
                         self.play(&p);
                     }
-                    self.selected_video = Some((card.channel_idx, card.video_idx));
+                    self.selected_video = Some(card.id.clone());
                 } else if clicked_card {
-                    self.selected_video = Some((card.channel_idx, card.video_idx));
+                    self.selected_video = Some(card.id.clone());
                 }
                 ui.separator();
             }
@@ -489,7 +671,6 @@ impl eframe::App for App {
         if self.downloader.any_running() {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
-        // Decode at most a few thumbnails per frame so scrolling stays smooth.
         self.decode_budget = 6;
 
         self.top_bar(ctx);
@@ -497,6 +678,7 @@ impl eframe::App for App {
         if self.show_downloads {
             self.downloads_panel(ctx);
         }
+        self.settings_window(ctx);
         self.detail_panel(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             self.video_list(ctx, ui);
@@ -510,11 +692,7 @@ fn decode_thumbnail(ctx: &egui::Context, path: &Path) -> Option<egui::TextureHan
     let rgba = image.to_rgba8();
     let (w, h) = (rgba.width() as usize, rgba.height() as usize);
     let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
-    Some(ctx.load_texture(
-        path.to_string_lossy(),
-        color_image,
-        egui::TextureOptions::LINEAR,
-    ))
+    Some(ctx.load_texture(path.to_string_lossy(), color_image, egui::TextureOptions::LINEAR))
 }
 
 fn file_label(path: &Path) -> String {

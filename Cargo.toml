@@ -1,8 +1,8 @@
 [package]
-name = "youtube-backup"
+name = "yt-offline"
 version = "0.1.0"
 edition = "2021"
-description = "A small yt-dlp front-end: browse downloaded channels and queue new downloads"
+description = "A desktop app for archiving YouTube channels with yt-dlp"
 
 [dependencies]
 eframe = "0.29"

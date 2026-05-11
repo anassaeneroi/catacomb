@@ -6,6 +6,8 @@ pub struct Config {
     pub backup: BackupSection,
     #[serde(default)]
     pub player: PlayerSection,
+    #[serde(default)]
+    pub ui: UiSection,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -19,13 +21,43 @@ pub struct PlayerSection {
     pub command: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UiSection {
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+impl Default for UiSection {
+    fn default() -> Self {
+        Self { theme: default_theme() }
+    }
+}
+
 fn default_player() -> String {
     "mpv".to_string()
+}
+
+fn default_theme() -> String {
+    "dark".to_string()
 }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         toml::from_str(&contents).map_err(|e| e.into())
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let contents = toml::to_string_pretty(self)?;
+        std::fs::write(path, contents)?;
+        Ok(())
+    }
+
+    pub fn default_with_dir(dir: PathBuf) -> Self {
+        Self {
+            backup: BackupSection { directory: dir },
+            player: PlayerSection::default(),
+            ui: UiSection::default(),
+        }
     }
 }
