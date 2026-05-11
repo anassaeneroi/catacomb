@@ -1,0 +1,12 @@
+[package]
+name = "youtube-backup"
+version = "0.1.0"
+edition = "2021"
+description = "A small yt-dlp front-end: browse downloaded channels and queue new downloads"
+
+[dependencies]
+eframe = "0.29"
+image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png"] }
+
+[profile.release]
+opt-level = 2

@@ -1,8 +1,9 @@
-# Downloaded channel archives
+# Downloaded channel archives (videos, thumbnails, descriptions)
 /channels/
 
-# Node
-node_modules/
-dist/
-*.log
+# Rust build artifacts
+/target/
+
+# Editor / OS cruft
+*.swp
 .DS_Store
