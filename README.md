@@ -1,5 +1,7 @@
 # yt-offline
 
+![yt-offline icon](icon.png)
+
 A desktop app for archiving YouTube channels using [yt-dlp](https://github.com/yt-dlp/yt-dlp). Browse your downloaded channels, manage downloads, and play videos — all from a native GUI.
 
 ## Features
