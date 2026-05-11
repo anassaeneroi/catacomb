@@ -1,13 +1,34 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::Receiver;
 
 use eframe::egui;
 
 use crate::config::Config;
+use crate::database::Database;
 use crate::downloader::{detect_url_kind, Downloader, JobState, UrlKind};
 use crate::library::{self, Video};
 use crate::theme;
+
+const BROWSERS: &[(&str, &str)] = &[
+    ("firefox", "Firefox"),
+    ("chromium", "Chromium"),
+    ("chrome", "Chrome"),
+    ("opera", "Opera"),
+    ("brave", "Brave"),
+    ("vivaldi", "Vivaldi"),
+    ("none", "None (no cookies)"),
+];
+
+#[derive(Clone, PartialEq)]
+enum SortMode {
+    Title,
+    DurationAsc,
+    DurationDesc,
+    SizeAsc,
+    SizeDesc,
+}
 
 struct Card {
     channel_name: String,
@@ -16,6 +37,10 @@ struct Card {
     video_path: Option<PathBuf>,
     thumb_path: Option<PathBuf>,
     has_live_chat: bool,
+    duration_secs: Option<f64>,
+    file_size: Option<u64>,
+    watched: bool,
+    resume_pos: Option<f64>,
 }
 
 pub struct App {
@@ -36,6 +61,14 @@ pub struct App {
     desc_cache: HashMap<PathBuf, String>,
     status: String,
     settings_dir: String,
+    db: Database,
+    card_density: f32,
+    sort_mode: SortMode,
+    watched: HashSet<String>,
+    resume_positions: HashMap<String, f64>,
+    prev_any_running: bool,
+    currently_playing: Option<String>,
+    mpv_rx: Option<Receiver<(String, f64)>>,
 }
 
 impl App {
@@ -63,6 +96,14 @@ impl App {
             library.iter().map(|c| c.total_videos()).sum::<usize>()
         );
 
+        let db_path = channels_root.join("yt-offline.db");
+        let db = Database::open(&db_path)
+            .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
+        let watched = db.get_watched().unwrap_or_default();
+        let resume_positions = db.get_positions().unwrap_or_default();
+
+        let browser = config.player.browser.clone();
+
         Self {
             config,
             config_path,
@@ -72,7 +113,7 @@ impl App {
             selected_playlist: None,
             selected_video: None,
             search: String::new(),
-            downloader: Downloader::new(channels_root),
+            downloader: Downloader::new(channels_root, browser),
             show_downloads: false,
             show_settings: false,
             dl_url: String::new(),
@@ -81,6 +122,14 @@ impl App {
             desc_cache: HashMap::new(),
             status,
             settings_dir,
+            db,
+            card_density: 1.0,
+            sort_mode: SortMode::Title,
+            watched,
+            resume_positions,
+            prev_any_running: false,
+            currently_playing: None,
+            mpv_rx: None,
         }
     }
 
@@ -116,48 +165,58 @@ impl App {
                 _ => None,
             };
 
-            if let Some(pi) = playlist_filter {
+            let videos_iter: Box<dyn Iterator<Item = &library::Video>> = if let Some(pi) = playlist_filter {
                 let Some(playlist) = channel.playlists.get(pi) else { continue };
-                for v in &playlist.videos {
-                    if !query.is_empty()
-                        && !v.title.to_lowercase().contains(&query)
-                        && !v.id.to_lowercase().contains(&query)
-                    {
-                        continue;
-                    }
-                    cards.push(Card {
-                        channel_name: channel.name.clone(),
-                        title: v.title.clone(),
-                        id: v.id.clone(),
-                        video_path: v.video_path.clone(),
-                        thumb_path: v.thumb_path.clone(),
-                        has_live_chat: v.has_live_chat,
-                    });
-                }
+                Box::new(playlist.videos.iter())
             } else {
-                let all_videos: Vec<&library::Video> = channel
-                    .videos
-                    .iter()
-                    .chain(channel.playlists.iter().flat_map(|p| p.videos.iter()))
-                    .collect();
-                for v in all_videos {
-                    if !query.is_empty()
-                        && !v.title.to_lowercase().contains(&query)
-                        && !v.id.to_lowercase().contains(&query)
-                    {
-                        continue;
-                    }
-                    cards.push(Card {
-                        channel_name: channel.name.clone(),
-                        title: v.title.clone(),
-                        id: v.id.clone(),
-                        video_path: v.video_path.clone(),
-                        thumb_path: v.thumb_path.clone(),
-                        has_live_chat: v.has_live_chat,
-                    });
+                Box::new(
+                    channel.videos.iter()
+                        .chain(channel.playlists.iter().flat_map(|p| p.videos.iter()))
+                )
+            };
+
+            for v in videos_iter {
+                if !query.is_empty()
+                    && !v.title.to_lowercase().contains(&query)
+                    && !v.id.to_lowercase().contains(&query)
+                {
+                    continue;
                 }
+                let resume_pos = self.resume_positions.get(&v.id).copied();
+                cards.push(Card {
+                    channel_name: channel.name.clone(),
+                    title: v.title.clone(),
+                    id: v.id.clone(),
+                    video_path: v.video_path.clone(),
+                    thumb_path: v.thumb_path.clone(),
+                    has_live_chat: v.has_live_chat,
+                    duration_secs: v.duration_secs,
+                    file_size: v.file_size,
+                    watched: self.watched.contains(&v.id),
+                    resume_pos,
+                });
             }
         }
+
+        match self.sort_mode {
+            SortMode::Title => cards.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+            SortMode::DurationAsc => cards.sort_by(|a, b| {
+                a.duration_secs.unwrap_or(0.0)
+                    .partial_cmp(&b.duration_secs.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            SortMode::DurationDesc => cards.sort_by(|a, b| {
+                b.duration_secs.unwrap_or(0.0)
+                    .partial_cmp(&a.duration_secs.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            SortMode::SizeAsc => cards.sort_by_key(|c| c.file_size.unwrap_or(0)),
+            SortMode::SizeDesc => {
+                cards.sort_by_key(|c| c.file_size.unwrap_or(0));
+                cards.reverse();
+            }
+        }
+
         cards
     }
 
@@ -202,21 +261,76 @@ impl App {
         text
     }
 
-    fn play(&mut self, path: &Path) {
+    fn play_with_tracking(&mut self, path: &Path, video_id: String) {
         let cmd = self.config.player.command.clone();
-        match Command::new(&cmd).arg(path).spawn() {
-            Ok(_) => self.status = format!("Playing {}", file_label(path)),
-            Err(_) => match Command::new("xdg-open").arg(path).spawn() {
-                Ok(_) => self.status = format!("Opened {} in default player", file_label(path)),
-                Err(e) => self.status = format!("Couldn't open {}: {e}", file_label(path)),
-            },
+        let use_mpv_ipc = cmd.contains("mpv");
+
+        #[cfg(unix)]
+        let sock_path = format!("/tmp/yt-offline-{video_id}.sock");
+
+        let mut child_cmd = Command::new(&cmd);
+
+        #[cfg(unix)]
+        if use_mpv_ipc {
+            child_cmd.arg(format!("--input-ipc-server={sock_path}"));
+        }
+
+        if let Some(&pos) = self.resume_positions.get(&video_id) {
+            if pos > 5.0 && use_mpv_ipc {
+                child_cmd.arg(format!("--start={}", pos as u64));
+            }
+        }
+
+        child_cmd.arg(path);
+
+        match child_cmd.spawn() {
+            Ok(_) => {
+                self.status = format!("Playing {}", file_label(path));
+                self.currently_playing = Some(video_id.clone());
+
+                #[cfg(unix)]
+                if use_mpv_ipc {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.mpv_rx = Some(rx);
+                    let id = video_id.clone();
+                    std::thread::spawn(move || {
+                        spawn_mpv_tracker(sock_path, id, tx);
+                    });
+                }
+            }
+            Err(_) => {
+                #[cfg(target_os = "macos")]
+                let fallback = "open";
+                #[cfg(not(target_os = "macos"))]
+                let fallback = "xdg-open";
+
+                match Command::new(fallback).arg(path).spawn() {
+                    Ok(_) => self.status = format!("Opened {} in default player", file_label(path)),
+                    Err(e) => self.status = format!("Couldn't open {}: {e}", file_label(path)),
+                }
+            }
         }
     }
 
     fn open_in_file_manager(&mut self, path: &Path) {
         let target = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
-        if let Err(e) = Command::new("xdg-open").arg(target).spawn() {
+        #[cfg(target_os = "macos")]
+        let cmd = "open";
+        #[cfg(not(target_os = "macos"))]
+        let cmd = "xdg-open";
+        if let Err(e) = Command::new(cmd).arg(target).spawn() {
             self.status = format!("Couldn't open folder: {e}");
+        }
+    }
+
+    fn toggle_watched(&mut self, video_id: &str) {
+        let now_watched = !self.watched.contains(video_id);
+        if let Ok(()) = self.db.set_watched(video_id, now_watched) {
+            if now_watched {
+                self.watched.insert(video_id.to_string());
+            } else {
+                self.watched.remove(video_id);
+            }
         }
     }
 
@@ -230,11 +344,18 @@ impl App {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search)
                         .hint_text("filter by title or id")
-                        .desired_width(260.0),
+                        .desired_width(200.0),
                 );
                 if !self.search.is_empty() && ui.button("✖").on_hover_text("clear").clicked() {
                     self.search.clear();
                 }
+                ui.separator();
+                ui.label("Size:");
+                ui.add(
+                    egui::Slider::new(&mut self.card_density, 0.5_f32..=2.0_f32)
+                        .show_value(false)
+                        .step_by(0.1),
+                );
                 ui.separator();
                 if ui.button("⟳ Rescan").clicked() {
                     self.rescan();
@@ -303,8 +424,7 @@ impl App {
                                     (pl.name.clone(), pl.videos.len())
                                 };
                                 let is_pl = self.selected_playlist == Some((i, pi));
-                                let pl_label =
-                                    format!("    └ {}  ({})", pl_name, pl_len);
+                                let pl_label = format!("    └ {}  ({})", pl_name, pl_len);
                                 if ui.selectable_label(is_pl, pl_label).clicked() {
                                     self.selected_playlist = Some((i, pi));
                                     self.selected_video = None;
@@ -417,7 +537,7 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(440.0)
+            .default_width(460.0)
             .show(ctx, |ui| {
                 egui::Grid::new("settings_grid")
                     .num_columns(2)
@@ -427,7 +547,7 @@ impl App {
                         ui.label("Backup directory:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.settings_dir)
-                                .desired_width(280.0)
+                                .desired_width(300.0)
                                 .hint_text("/path/to/channels"),
                         );
                         ui.end_row();
@@ -435,9 +555,31 @@ impl App {
                         ui.label("Player command:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.config.player.command)
-                                .desired_width(280.0)
+                                .desired_width(300.0)
                                 .hint_text("mpv"),
                         );
+                        ui.end_row();
+
+                        ui.label("Cookie browser:");
+                        let current_browser = self.config.player.browser.clone();
+                        let display = BROWSERS
+                            .iter()
+                            .find(|(id, _)| *id == current_browser)
+                            .map(|(_, label)| *label)
+                            .unwrap_or(current_browser.as_str());
+                        egui::ComboBox::from_id_salt("browser_combo")
+                            .selected_text(display)
+                            .show_ui(ui, |ui| {
+                                for (id, label) in BROWSERS {
+                                    if ui
+                                        .selectable_label(self.config.player.browser == *id, *label)
+                                        .clicked()
+                                    {
+                                        self.config.player.browser = id.to_string();
+                                        self.downloader.browser = id.to_string();
+                                    }
+                                }
+                            });
                         ui.end_row();
 
                         ui.label("Theme:");
@@ -483,7 +625,11 @@ impl App {
                             self.rescan();
                         }
                     }
-                    ui.label(egui::RichText::new("Theme previews immediately; other changes apply on save.").weak().small());
+                    ui.label(
+                        egui::RichText::new("Theme previews immediately; other changes apply on save.")
+                            .weak()
+                            .small(),
+                    );
                 });
             });
         self.show_settings = open;
@@ -498,6 +644,10 @@ impl App {
             self.selected_video = None;
             return;
         };
+
+        let is_watched = self.watched.contains(&selected_id);
+        let resume_pos = self.resume_positions.get(&selected_id).copied();
+
         egui::TopBottomPanel::bottom("detail")
             .resizable(true)
             .default_height(220.0)
@@ -506,29 +656,68 @@ impl App {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.heading(&video.title);
-                    if video.video_path.is_some() && ui.button("▶ Play").clicked() {
-                        if let Some(p) = video.video_path.clone() {
-                            self.play(&p);
+
+                    if video.video_path.is_some() {
+                        if ui.button("▶ Play").clicked() {
+                            if let Some(p) = video.video_path.clone() {
+                                self.play_with_tracking(&p, selected_id.clone());
+                            }
+                        }
+                        if let Some(pos) = resume_pos {
+                            if pos > 5.0 {
+                                let label = format!("⏩ Resume ({})", format_duration(pos));
+                                if ui.button(label).clicked() {
+                                    if let Some(p) = video.video_path.clone() {
+                                        self.play_with_tracking(&p, selected_id.clone());
+                                    }
+                                }
+                                if ui.small_button("✖ clear position").clicked() {
+                                    let _ = self.db.clear_position(&selected_id);
+                                    self.resume_positions.remove(&selected_id);
+                                }
+                            }
                         }
                     }
+
                     if let Some(p) = video.video_path.clone() {
                         if ui.button("📁 Show file").clicked() {
                             self.open_in_file_manager(&p);
                         }
                     }
-                    if video.has_live_chat {
-                        ui.label(egui::RichText::new("💬 has live chat").small().weak());
+
+                    let watched_label = if is_watched { "✓ Watched" } else { "○ Mark watched" };
+                    if ui.button(watched_label).clicked() {
+                        self.toggle_watched(&selected_id);
                     }
+
+                    if video.has_live_chat {
+                        ui.label(egui::RichText::new("💬 live chat").small().weak());
+                    }
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("id: {}", video.id)).monospace().weak(),
-                        );
                         if ui.button("✖ close").clicked() {
                             self.selected_video = None;
                         }
+                        ui.label(
+                            egui::RichText::new(format!("id: {}", video.id))
+                                .monospace()
+                                .weak(),
+                        );
                     });
                 });
+
+                ui.horizontal(|ui| {
+                    if let Some(secs) = video.duration_secs {
+                        ui.label(egui::RichText::new(format_duration(secs)).small().weak());
+                        ui.label(egui::RichText::new("·").weak());
+                    }
+                    if let Some(bytes) = video.file_size {
+                        ui.label(egui::RichText::new(format_size(bytes)).small().weak());
+                    }
+                });
+
                 ui.separator();
+
                 let description = self.description(&video);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -541,6 +730,32 @@ impl App {
     fn video_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let cards = self.cards();
         let show_channel = self.selected_channel.is_none();
+
+        // Channel metadata banner
+        if let Some(ci) = self.selected_channel {
+            if let Some(ch) = self.library.get(ci) {
+                if let Some(meta) = &ch.meta {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            if let Some(name) = &meta.uploader {
+                                ui.strong(name);
+                            }
+                            if let Some(subs) = meta.subscriber_count {
+                                ui.label(
+                                    egui::RichText::new(format!("{} subscribers", format_subs(subs)))
+                                        .weak(),
+                                );
+                            }
+                            if let Some(url) = &meta.channel_url {
+                                ui.hyperlink_to("Open on YouTube", url);
+                            }
+                        });
+                    });
+                }
+            }
+        }
+
+        // Sort controls
         ui.horizontal(|ui| {
             ui.label(format!("{} videos", cards.len()));
             if !self.search.trim().is_empty() {
@@ -548,8 +763,18 @@ impl App {
                     egui::RichText::new(format!("(filtered by \"{}\")", self.search.trim())).weak(),
                 );
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.selectable_value(&mut self.sort_mode, SortMode::SizeDesc, "Size ↓");
+                ui.selectable_value(&mut self.sort_mode, SortMode::SizeAsc, "Size ↑");
+                ui.selectable_value(&mut self.sort_mode, SortMode::DurationDesc, "Dur ↓");
+                ui.selectable_value(&mut self.sort_mode, SortMode::DurationAsc, "Dur ↑");
+                ui.selectable_value(&mut self.sort_mode, SortMode::Title, "Title");
+                ui.label(egui::RichText::new("Sort:").weak());
+            });
         });
+
         ui.separator();
+
         if cards.is_empty() {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
@@ -564,19 +789,23 @@ impl App {
             });
             return;
         }
+
+        let density = self.card_density;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            let thumb_size = egui::vec2(176.0, 99.0);
+            let thumb_w = (176.0 * density).round();
+            let thumb_h = (99.0 * density).round();
+            let thumb_size = egui::vec2(thumb_w, thumb_h);
+
             for card in &cards {
                 let selected = self.selected_video.as_deref() == Some(card.id.as_str());
+                let is_playing = self.currently_playing.as_deref() == Some(card.id.as_str());
                 let mut clicked_card = false;
                 let mut play_card = false;
+                let mut toggle_watched_card = false;
+
                 ui.horizontal(|ui| {
-                    let (rect, resp) =
-                        ui.allocate_exact_size(thumb_size, egui::Sense::click());
-                    let texture = card
-                        .thumb_path
-                        .as_ref()
-                        .and_then(|p| self.texture(ctx, p));
+                    let (rect, resp) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
+                    let texture = card.thumb_path.as_ref().and_then(|p| self.texture(ctx, p));
                     match &texture {
                         Some(handle) => {
                             egui::Image::new(handle)
@@ -584,20 +813,17 @@ impl App {
                                 .paint_at(ui, rect);
                         }
                         None => {
-                            ui.painter().rect_filled(
-                                rect,
-                                4.0,
-                                egui::Color32::from_gray(38),
-                            );
+                            ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(38));
                             ui.painter().text(
                                 rect.center(),
                                 egui::Align2::CENTER_CENTER,
                                 "▶",
-                                egui::FontId::proportional(26.0),
+                                egui::FontId::proportional(26.0 * density),
                                 egui::Color32::from_gray(110),
                             );
                         }
                     }
+
                     if selected {
                         ui.painter().rect_stroke(
                             rect,
@@ -605,6 +831,32 @@ impl App {
                             egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 170, 230)),
                         );
                     }
+                    if is_playing {
+                        ui.painter().rect_stroke(
+                            rect,
+                            4.0,
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 200, 110)),
+                        );
+                    }
+                    // Watched overlay
+                    if card.watched {
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(
+                                rect.min,
+                                egui::vec2(rect.width(), rect.height() * 0.18),
+                            ),
+                            0.0,
+                            egui::Color32::from_rgba_premultiplied(30, 140, 60, 200),
+                        );
+                        ui.painter().text(
+                            rect.min + egui::vec2(4.0, 2.0),
+                            egui::Align2::LEFT_TOP,
+                            "✓ watched",
+                            egui::FontId::proportional(10.0 * density),
+                            egui::Color32::WHITE,
+                        );
+                    }
+
                     if resp.clicked() {
                         clicked_card = true;
                     }
@@ -613,10 +865,17 @@ impl App {
                     }
 
                     ui.vertical(|ui| {
+                        let title_color = if card.watched {
+                            egui::Color32::from_gray(140)
+                        } else {
+                            ui.visuals().text_color()
+                        };
                         if ui
                             .selectable_label(
                                 selected,
-                                egui::RichText::new(&card.title).strong(),
+                                egui::RichText::new(&card.title)
+                                    .strong()
+                                    .color(title_color),
                             )
                             .clicked()
                         {
@@ -624,12 +883,18 @@ impl App {
                         }
                         ui.horizontal(|ui| {
                             if show_channel {
-                                ui.label(
-                                    egui::RichText::new(&card.channel_name).small().weak(),
-                                );
+                                ui.label(egui::RichText::new(&card.channel_name).small().weak());
                                 ui.label(egui::RichText::new("·").weak());
                             }
                             ui.label(egui::RichText::new(&card.id).small().monospace().weak());
+                            if let Some(secs) = card.duration_secs {
+                                ui.label(egui::RichText::new("·").weak());
+                                ui.label(egui::RichText::new(format_duration(secs)).small().weak());
+                            }
+                            if let Some(bytes) = card.file_size {
+                                ui.label(egui::RichText::new("·").weak());
+                                ui.label(egui::RichText::new(format_size(bytes)).small().weak());
+                            }
                             if card.has_live_chat {
                                 ui.label(egui::RichText::new("· 💬").small().weak());
                             }
@@ -645,20 +910,36 @@ impl App {
                             if card.video_path.is_some() && ui.small_button("▶ Play").clicked() {
                                 play_card = true;
                             }
+                            if let Some(pos) = card.resume_pos {
+                                if pos > 5.0 && ui.small_button(format!("⏩ {}", format_duration(pos))).clicked() {
+                                    play_card = true;
+                                }
+                            }
                             if ui.small_button("Details").clicked() {
                                 clicked_card = true;
+                            }
+                            let w_label = if card.watched { "✓" } else { "○" };
+                            if ui.small_button(w_label).on_hover_text("Toggle watched").clicked() {
+                                toggle_watched_card = true;
                             }
                         });
                     });
                 });
+
                 if play_card {
                     if let Some(p) = card.video_path.clone() {
-                        self.play(&p);
+                        let id = card.id.clone();
+                        self.play_with_tracking(&p, id);
                     }
                     self.selected_video = Some(card.id.clone());
                 } else if clicked_card {
                     self.selected_video = Some(card.id.clone());
                 }
+                if toggle_watched_card {
+                    let id = card.id.clone();
+                    self.toggle_watched(&id);
+                }
+
                 ui.separator();
             }
         });
@@ -668,9 +949,25 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.downloader.poll();
-        if self.downloader.any_running() {
+
+        let any_running = self.downloader.any_running();
+        if self.prev_any_running && !any_running && !self.downloader.jobs.is_empty() {
+            self.rescan();
+        }
+        self.prev_any_running = any_running;
+
+        if any_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
+
+        // Poll mpv position updates from background tracker thread
+        if let Some(rx) = &self.mpv_rx {
+            while let Ok((video_id, pos)) = rx.try_recv() {
+                let _ = self.db.set_position(&video_id, pos);
+                self.resume_positions.insert(video_id, pos);
+            }
+        }
+
         self.decode_budget = 6;
 
         self.top_bar(ctx);
@@ -683,6 +980,61 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.video_list(ctx, ui);
         });
+    }
+}
+
+#[cfg(unix)]
+fn spawn_mpv_tracker(sock_path: String, video_id: String, tx: std::sync::mpsc::Sender<(String, f64)>) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    // Wait for mpv to create the socket (up to 10 seconds)
+    let mut stream = None;
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(500));
+        if let Ok(s) = UnixStream::connect(&sock_path) {
+            stream = Some(s);
+            break;
+        }
+    }
+    let mut stream = match stream {
+        Some(s) => s,
+        None => return,
+    };
+
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+
+    let mut buf = [0u8; 4096];
+    loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let query = b"{\"command\":[\"get_property\",\"time-pos\"]}\n";
+        if stream.write_all(query).is_err() {
+            break;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                for chunk in buf[..n].split(|&b| b == b'\n').filter(|c| !c.is_empty()) {
+                    if let Ok(s) = std::str::from_utf8(chunk) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
+                            if let Some(pos) = val.get("data").and_then(|v| v.as_f64()) {
+                                if tx.send((video_id.clone(), pos)).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // no response yet, mpv may be paused — keep polling
+            }
+            Err(_) => break,
+        }
     }
 }
 
@@ -699,4 +1051,36 @@ fn file_label(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+fn format_duration(secs: f64) -> String {
+    let secs = secs as u64;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.0} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1_024.0)
+    }
+}
+
+fn format_subs(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }

@@ -15,10 +15,18 @@ pub struct BackupSection {
     pub directory: PathBuf,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlayerSection {
     #[serde(default = "default_player")]
     pub command: String,
+    #[serde(default = "default_browser")]
+    pub browser: String,
+}
+
+impl Default for PlayerSection {
+    fn default() -> Self {
+        Self { command: default_player(), browser: default_browser() }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -33,13 +41,9 @@ impl Default for UiSection {
     }
 }
 
-fn default_player() -> String {
-    "mpv".to_string()
-}
-
-fn default_theme() -> String {
-    "dark".to_string()
-}
+fn default_player() -> String { "mpv".to_string() }
+fn default_browser() -> String { "firefox".to_string() }
+fn default_theme() -> String { "dark".to_string() }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {

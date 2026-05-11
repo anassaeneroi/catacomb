@@ -13,7 +13,6 @@ pub enum UrlKind {
     Unknown,
 }
 
-/// Detects the kind of YouTube URL from a string.
 pub fn detect_url_kind(url: &str) -> UrlKind {
     if url.contains("playlist?list=") {
         return UrlKind::Playlist;
@@ -36,9 +35,7 @@ pub fn detect_url_kind(url: &str) -> UrlKind {
 fn extract_after<'a>(url: &'a str, marker: &str) -> Option<&'a str> {
     let start = url.find(marker)? + marker.len();
     let rest = &url[start..];
-    let end = rest
-        .find(|c| c == '/' || c == '?' || c == '&' || c == '#')
-        .unwrap_or(rest.len());
+    let end = rest.find(|c| c == '/' || c == '?' || c == '&' || c == '#').unwrap_or(rest.len());
     if end == 0 { None } else { Some(&rest[..end]) }
 }
 
@@ -87,16 +84,18 @@ impl Job {
 pub struct Downloader {
     pub jobs: Vec<Job>,
     pub channels_root: PathBuf,
+    pub browser: String,
 }
 
 impl Downloader {
-    pub fn new(channels_root: PathBuf) -> Self {
-        Self { jobs: Vec::new(), channels_root }
+    pub fn new(channels_root: PathBuf, browser: String) -> Self {
+        Self { jobs: Vec::new(), channels_root, browser }
     }
 
     pub fn start(&mut self, url: String, kind: &UrlKind) {
         let (tx, rx) = channel();
         let archive_path = self.channels_root.join("archive.txt");
+        let browser = self.browser.clone();
 
         let (out_arg, label) = match kind {
             UrlKind::Channel { handle } => {
@@ -119,31 +118,33 @@ impl Downloader {
 
         let url_for_thread = url.clone();
         thread::spawn(move || {
-            let spawn_result = Command::new("yt-dlp")
-                .arg("--newline")
+            let mut cmd = Command::new("yt-dlp");
+            cmd.arg("--newline")
                 .arg("--no-color")
-                .arg("--no-progress-bar")
                 .arg("--write-subs")
                 .arg("--write-thumbnail")
                 .arg("--write-description")
+                .arg("--write-info-json")
                 .arg("-f")
                 .arg("mkv")
                 .arg("--embed-metadata")
                 .arg("--break-on-existing")
-                .arg("--cookies-from-browser")
-                .arg("firefox")
                 .arg("--download-archive")
                 .arg(archive_path.display().to_string())
                 .arg("--ignore-errors")
                 .arg("-o")
-                .arg(&out_arg)
-                .arg(&url_for_thread)
+                .arg(&out_arg);
+
+            if !browser.is_empty() && browser != "none" {
+                cmd.arg("--cookies-from-browser").arg(&browser);
+            }
+
+            cmd.arg(&url_for_thread)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
+                .stderr(Stdio::piped());
 
-            let mut child = match spawn_result {
+            let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(err) => {
                     let _ = tx.send(Msg::Line(format!("could not launch yt-dlp: {err}")));
@@ -174,14 +175,7 @@ impl Downloader {
             let _ = tx.send(Msg::Finished(ok));
         });
 
-        self.jobs.push(Job {
-            url,
-            label,
-            state: JobState::Running,
-            progress: 0.0,
-            log: Vec::new(),
-            rx,
-        });
+        self.jobs.push(Job { url, label, state: JobState::Running, progress: 0.0, log: Vec::new(), rx });
     }
 
     pub fn poll(&mut self) {
