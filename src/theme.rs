@@ -67,7 +67,7 @@ fn trans() -> egui::Visuals {
     v.selection.bg_fill = hex(0x55cdfc);
     v.selection.stroke = Stroke::new(1.0, hex(0x2288cc));
     v.hyperlink_color = hex(0x0055aa);
-    v.override_text_color = Some(hex(0x222222));
+    v.override_text_color = Some(hex(0xcc0066)); // hot pink text throughout
     v.widgets.noninteractive.bg_fill = hex(0xfce8f2);
     v.widgets.noninteractive.weak_bg_fill = hex(0xfdf4f8);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, hex(0x444444));
@@ -161,7 +161,7 @@ fn emo_scene_queen() -> egui::Visuals {
     v.selection.bg_fill = hex(0x39ff14);
     v.selection.stroke = Stroke::new(1.0, hex(0x66ff44));
     v.hyperlink_color = hex(0xff00ff);
-    v.override_text_color = Some(hex(0xd0d0ff));
+    v.override_text_color = None; // let widget fg_stroke handle per-state text color
     v.widgets.noninteractive.bg_fill = hex(0x111128);
     v.widgets.noninteractive.weak_bg_fill = hex(0x0d0d20);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, hex(0xc8c8ff));

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 use eframe::egui;
 
@@ -30,6 +31,14 @@ enum SortMode {
     SizeDesc,
 }
 
+#[derive(Clone, PartialEq)]
+enum SidebarView {
+    All,
+    Channel(usize),
+    Playlist(usize, usize),
+    ContinueWatching,
+}
+
 struct Card {
     channel_name: String,
     title: String,
@@ -48,8 +57,7 @@ pub struct App {
     config_path: PathBuf,
     channels_root: PathBuf,
     library: Vec<library::Channel>,
-    selected_channel: Option<usize>,
-    selected_playlist: Option<(usize, usize)>,
+    sidebar_view: SidebarView,
     selected_video: Option<String>,
     search: String,
     downloader: Downloader,
@@ -66,9 +74,14 @@ pub struct App {
     sort_mode: SortMode,
     watched: HashSet<String>,
     resume_positions: HashMap<String, f64>,
-    prev_any_running: bool,
+    prev_job_states: HashMap<usize, JobState>,
     currently_playing: Option<String>,
     mpv_rx: Option<Receiver<(String, f64)>>,
+    // Bulk selection
+    bulk_mode: bool,
+    bulk_selected: HashSet<String>,
+    // Scheduler
+    last_scheduled_check: Option<Instant>,
 }
 
 impl App {
@@ -109,8 +122,7 @@ impl App {
             config_path,
             channels_root: channels_root.clone(),
             library,
-            selected_channel: None,
-            selected_playlist: None,
+            sidebar_view: SidebarView::All,
             selected_video: None,
             search: String::new(),
             downloader: Downloader::new(channels_root, browser),
@@ -127,16 +139,18 @@ impl App {
             sort_mode: SortMode::Title,
             watched,
             resume_positions,
-            prev_any_running: false,
+            prev_job_states: HashMap::new(),
             currently_playing: None,
             mpv_rx: None,
+            bulk_mode: false,
+            bulk_selected: HashSet::new(),
+            last_scheduled_check: None,
         }
     }
 
     fn rescan(&mut self) {
         self.library = library::scan_channels(&self.channels_root);
-        self.selected_channel = None;
-        self.selected_playlist = None;
+        self.sidebar_view = SidebarView::All;
         self.selected_video = None;
         self.desc_cache.clear();
         self.textures.clear();
@@ -150,51 +164,68 @@ impl App {
     fn cards(&self) -> Vec<Card> {
         let query = self.search.trim().to_lowercase();
 
-        let channel_indices: Vec<usize> = if let Some(ci) = self.selected_channel {
-            vec![ci]
-        } else {
-            (0..self.library.len()).collect()
+        let mut cards = Vec::new();
+
+        let add_video = |cards: &mut Vec<Card>, ch_name: &str, v: &library::Video| {
+            if !query.is_empty()
+                && !v.title.to_lowercase().contains(&query)
+                && !v.id.to_lowercase().contains(&query)
+            {
+                return;
+            }
+            let resume_pos = self.resume_positions.get(&v.id).copied();
+            cards.push(Card {
+                channel_name: ch_name.to_string(),
+                title: v.title.clone(),
+                id: v.id.clone(),
+                video_path: v.video_path.clone(),
+                thumb_path: v.thumb_path.clone(),
+                has_live_chat: v.has_live_chat,
+                duration_secs: v.duration_secs,
+                file_size: v.file_size,
+                watched: self.watched.contains(&v.id),
+                resume_pos,
+            });
         };
 
-        let mut cards = Vec::new();
-        for ci in channel_indices {
-            let Some(channel) = self.library.get(ci) else { continue };
-
-            let playlist_filter = match self.selected_playlist {
-                Some((pci, pi)) if pci == ci => Some(pi),
-                _ => None,
-            };
-
-            let videos_iter: Box<dyn Iterator<Item = &library::Video>> = if let Some(pi) = playlist_filter {
-                let Some(playlist) = channel.playlists.get(pi) else { continue };
-                Box::new(playlist.videos.iter())
-            } else {
-                Box::new(
-                    channel.videos.iter()
-                        .chain(channel.playlists.iter().flat_map(|p| p.videos.iter()))
-                )
-            };
-
-            for v in videos_iter {
-                if !query.is_empty()
-                    && !v.title.to_lowercase().contains(&query)
-                    && !v.id.to_lowercase().contains(&query)
-                {
-                    continue;
+        match &self.sidebar_view {
+            SidebarView::ContinueWatching => {
+                for ch in &self.library {
+                    for v in ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter())) {
+                        if self.resume_positions.contains_key(&v.id) {
+                            add_video(&mut cards, &ch.name, v);
+                        }
+                    }
                 }
-                let resume_pos = self.resume_positions.get(&v.id).copied();
-                cards.push(Card {
-                    channel_name: channel.name.clone(),
-                    title: v.title.clone(),
-                    id: v.id.clone(),
-                    video_path: v.video_path.clone(),
-                    thumb_path: v.thumb_path.clone(),
-                    has_live_chat: v.has_live_chat,
-                    duration_secs: v.duration_secs,
-                    file_size: v.file_size,
-                    watched: self.watched.contains(&v.id),
-                    resume_pos,
+                cards.sort_by(|a, b| {
+                    b.resume_pos.unwrap_or(0.0)
+                        .partial_cmp(&a.resume_pos.unwrap_or(0.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
+                return cards;
+            }
+            SidebarView::All => {
+                for ch in &self.library {
+                    for v in ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter())) {
+                        add_video(&mut cards, &ch.name, v);
+                    }
+                }
+            }
+            SidebarView::Channel(ci) => {
+                if let Some(ch) = self.library.get(*ci) {
+                    for v in ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter())) {
+                        add_video(&mut cards, &ch.name, v);
+                    }
+                }
+            }
+            SidebarView::Playlist(ci, pi) => {
+                if let Some(ch) = self.library.get(*ci) {
+                    if let Some(pl) = ch.playlists.get(*pi) {
+                        for v in &pl.videos {
+                            add_video(&mut cards, &ch.name, v);
+                        }
+                    }
+                }
             }
         }
 
@@ -334,6 +365,76 @@ impl App {
         }
     }
 
+    fn bulk_mark_watched(&mut self, watched: bool) {
+        let ids: Vec<String> = self.bulk_selected.iter().cloned().collect();
+        for id in &ids {
+            if let Ok(()) = self.db.set_watched(id, watched) {
+                if watched {
+                    self.watched.insert(id.clone());
+                } else {
+                    self.watched.remove(id);
+                }
+            }
+        }
+        self.bulk_selected.clear();
+        self.status = format!(
+            "{} {} as {}watched",
+            ids.len(),
+            if ids.len() == 1 { "video" } else { "videos" },
+            if watched { "" } else { "un" }
+        );
+    }
+
+    fn run_scheduled_check(&mut self) {
+        let mut count = 0;
+        let urls: Vec<String> = self.library.iter()
+            .filter_map(|ch| ch.meta.as_ref()?.channel_url.clone())
+            .collect();
+        for url in urls {
+            let kind = detect_url_kind(&url);
+            self.downloader.start(url, &kind);
+            count += 1;
+        }
+        self.status = format!("Scheduled check: started {} channel downloads", count);
+    }
+
+    fn check_notifications(&mut self) {
+        let jobs = &self.downloader.jobs;
+        let mut finished: Vec<(String, bool)> = Vec::new();
+
+        for (i, job) in jobs.iter().enumerate() {
+            let prev = self.prev_job_states.get(&i).copied();
+            if prev == Some(JobState::Running) && job.state != JobState::Running {
+                finished.push((job.label.clone(), job.state == JobState::Done));
+            }
+        }
+
+        // Rebuild snapshot
+        self.prev_job_states = jobs.iter().enumerate()
+            .map(|(i, j)| (i, j.state))
+            .collect();
+
+        for (label, ok) in finished {
+            let summary = if ok {
+                format!("Download complete: {label}")
+            } else {
+                format!("Download failed: {label}")
+            };
+            let _ = notify_rust::Notification::new()
+                .summary("yt-offline")
+                .body(&summary)
+                .timeout(notify_rust::Timeout::Milliseconds(4000))
+                .show();
+        }
+    }
+
+    fn channel_total_size(ch: &library::Channel) -> u64 {
+        ch.videos.iter()
+            .chain(ch.playlists.iter().flat_map(|p| p.videos.iter()))
+            .filter_map(|v| v.file_size)
+            .sum()
+    }
+
     fn top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(2.0);
@@ -388,45 +489,76 @@ impl App {
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let total: usize = self.library.iter().map(|c| c.total_videos()).sum();
+                    let resume_count = self.resume_positions.len();
+
                     if ui
                         .selectable_label(
-                            self.selected_channel.is_none(),
+                            self.sidebar_view == SidebarView::All,
                             format!("⊞ All  ({total})"),
                         )
                         .clicked()
                     {
-                        self.selected_channel = None;
-                        self.selected_playlist = None;
+                        self.sidebar_view = SidebarView::All;
                         self.selected_video = None;
                     }
-                    ui.separator();
-                    for i in 0..self.library.len() {
-                        let is_selected = self.selected_channel == Some(i);
-                        let (name, total, has_playlists) = {
-                            let ch = &self.library[i];
-                            (ch.name.clone(), ch.total_videos(), !ch.playlists.is_empty())
-                        };
-                        let label = format!("{}  ({})", name, total);
+
+                    if resume_count > 0 {
                         if ui
-                            .selectable_label(is_selected && self.selected_playlist.is_none(), label)
+                            .selectable_label(
+                                self.sidebar_view == SidebarView::ContinueWatching,
+                                format!("▶ Continue Watching  ({resume_count})"),
+                            )
+                            .clicked()
+                        {
+                            self.sidebar_view = SidebarView::ContinueWatching;
+                            self.selected_video = None;
+                        }
+                    }
+
+                    ui.separator();
+
+                    for i in 0..self.library.len() {
+                        let (name, total, has_playlists, size_bytes) = {
+                            let ch = &self.library[i];
+                            (
+                                ch.name.clone(),
+                                ch.total_videos(),
+                                !ch.playlists.is_empty(),
+                                Self::channel_total_size(ch),
+                            )
+                        };
+
+                        let is_ch_selected = matches!(self.sidebar_view, SidebarView::Channel(ci) if ci == i)
+                            || matches!(self.sidebar_view, SidebarView::Playlist(ci, _) if ci == i);
+
+                        let size_str = if size_bytes > 0 {
+                            format!(" · {}", format_size(size_bytes))
+                        } else {
+                            String::new()
+                        };
+                        let label = format!("{}  ({}{})", name, total, size_str);
+
+                        let ch_selected_no_pl = matches!(self.sidebar_view, SidebarView::Channel(ci) if ci == i);
+                        if ui
+                            .selectable_label(ch_selected_no_pl, label)
                             .on_hover_text(self.library[i].path.display().to_string())
                             .clicked()
                         {
-                            self.selected_channel = Some(i);
-                            self.selected_playlist = None;
+                            self.sidebar_view = SidebarView::Channel(i);
                             self.selected_video = None;
                         }
-                        if is_selected && has_playlists {
+
+                        if is_ch_selected && has_playlists {
                             let playlist_count = self.library[i].playlists.len();
                             for pi in 0..playlist_count {
                                 let (pl_name, pl_len) = {
                                     let pl = &self.library[i].playlists[pi];
                                     (pl.name.clone(), pl.videos.len())
                                 };
-                                let is_pl = self.selected_playlist == Some((i, pi));
+                                let is_pl = matches!(self.sidebar_view, SidebarView::Playlist(ci, pli) if ci == i && pli == pi);
                                 let pl_label = format!("    └ {}  ({})", pl_name, pl_len);
                                 if ui.selectable_label(is_pl, pl_label).clicked() {
-                                    self.selected_playlist = Some((i, pi));
+                                    self.sidebar_view = SidebarView::Playlist(i, pi);
                                     self.selected_video = None;
                                 }
                             }
@@ -486,6 +618,7 @@ impl App {
                         && ui.button("Clear finished").clicked()
                     {
                         self.downloader.jobs.retain(|j| j.state == JobState::Running);
+                        self.prev_job_states.clear();
                     }
                 });
                 if self.downloader.jobs.is_empty() {
@@ -537,7 +670,7 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(460.0)
+            .default_width(480.0)
             .show(ctx, |ui| {
                 egui::Grid::new("settings_grid")
                     .num_columns(2)
@@ -602,6 +735,25 @@ impl App {
                                     }
                                 }
                             });
+                        ui.end_row();
+
+                        ui.label("Auto-check channels:");
+                        ui.checkbox(&mut self.config.scheduler.enabled, "enabled");
+                        ui.end_row();
+
+                        ui.label("Check interval (hours):");
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.scheduler.interval_hours)
+                                .range(1..=168)
+                                .suffix("h"),
+                        );
+                        ui.end_row();
+
+                        ui.label("Web UI port:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.web.port)
+                                .range(1024..=65535),
+                        );
                         ui.end_row();
                     });
 
@@ -729,10 +881,10 @@ impl App {
 
     fn video_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let cards = self.cards();
-        let show_channel = self.selected_channel.is_none();
+        let show_channel = !matches!(self.sidebar_view, SidebarView::Channel(_) | SidebarView::Playlist(_, _));
 
         // Channel metadata banner
-        if let Some(ci) = self.selected_channel {
+        if let SidebarView::Channel(ci) = self.sidebar_view {
             if let Some(ch) = self.library.get(ci) {
                 if let Some(meta) = &ch.meta {
                     ui.group(|ui| {
@@ -755,14 +907,44 @@ impl App {
             }
         }
 
-        // Sort controls
+        // Bulk mode toolbar
         ui.horizontal(|ui| {
-            ui.label(format!("{} videos", cards.len()));
+            let label_text = if self.bulk_mode {
+                format!("{} videos", cards.len())
+            } else {
+                format!("{} videos", cards.len())
+            };
+            ui.label(label_text);
+
             if !self.search.trim().is_empty() {
                 ui.label(
                     egui::RichText::new(format!("(filtered by \"{}\")", self.search.trim())).weak(),
                 );
             }
+
+            ui.separator();
+
+            if ui.selectable_label(self.bulk_mode, "☑ Select").clicked() {
+                self.bulk_mode = !self.bulk_mode;
+                if !self.bulk_mode {
+                    self.bulk_selected.clear();
+                }
+            }
+
+            if self.bulk_mode && !self.bulk_selected.is_empty() {
+                ui.separator();
+                let n = self.bulk_selected.len();
+                ui.label(format!("{n} selected"));
+                if ui.button("✓ Mark watched").clicked() {
+                    self.bulk_mark_watched(true);
+                    self.bulk_mode = false;
+                }
+                if ui.button("○ Mark unwatched").clicked() {
+                    self.bulk_mark_watched(false);
+                    self.bulk_mode = false;
+                }
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.selectable_value(&mut self.sort_mode, SortMode::SizeDesc, "Size ↓");
                 ui.selectable_value(&mut self.sort_mode, SortMode::SizeAsc, "Size ↑");
@@ -779,13 +961,15 @@ impl App {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("Nothing here.").weak());
-                ui.label(
-                    egui::RichText::new(
-                        "Drop a yt-dlp download into channels/<name>/, or use the Downloads panel.",
-                    )
-                    .small()
-                    .weak(),
-                );
+                if !matches!(self.sidebar_view, SidebarView::ContinueWatching) {
+                    ui.label(
+                        egui::RichText::new(
+                            "Drop a yt-dlp download into channels/<name>/, or use the Downloads panel.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
             });
             return;
         }
@@ -799,6 +983,7 @@ impl App {
             for card in &cards {
                 let selected = self.selected_video.as_deref() == Some(card.id.as_str());
                 let is_playing = self.currently_playing.as_deref() == Some(card.id.as_str());
+                let bulk_checked = self.bulk_selected.contains(&card.id);
                 let mut clicked_card = false;
                 let mut play_card = false;
                 let mut toggle_watched_card = false;
@@ -838,7 +1023,13 @@ impl App {
                             egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 200, 110)),
                         );
                     }
-                    // Watched overlay
+                    if bulk_checked {
+                        ui.painter().rect_stroke(
+                            rect,
+                            4.0,
+                            egui::Stroke::new(3.0, egui::Color32::from_rgb(180, 130, 240)),
+                        );
+                    }
                     if card.watched {
                         ui.painter().rect_filled(
                             egui::Rect::from_min_size(
@@ -866,7 +1057,7 @@ impl App {
 
                     ui.vertical(|ui| {
                         let title_color = if card.watched {
-                            egui::Color32::from_gray(140)
+                            ui.visuals().weak_text_color()
                         } else {
                             ui.visuals().text_color()
                         };
@@ -907,26 +1098,42 @@ impl App {
                             }
                         });
                         ui.horizontal(|ui| {
-                            if card.video_path.is_some() && ui.small_button("▶ Play").clicked() {
-                                play_card = true;
-                            }
-                            if let Some(pos) = card.resume_pos {
-                                if pos > 5.0 && ui.small_button(format!("⏩ {}", format_duration(pos))).clicked() {
+                            if self.bulk_mode {
+                                let chk_label = if bulk_checked { "☑" } else { "☐" };
+                                if ui.small_button(chk_label).clicked() {
+                                    clicked_card = true; // handled below
+                                }
+                            } else {
+                                if card.video_path.is_some() && ui.small_button("▶ Play").clicked() {
                                     play_card = true;
                                 }
-                            }
-                            if ui.small_button("Details").clicked() {
-                                clicked_card = true;
-                            }
-                            let w_label = if card.watched { "✓" } else { "○" };
-                            if ui.small_button(w_label).on_hover_text("Toggle watched").clicked() {
-                                toggle_watched_card = true;
+                                if let Some(pos) = card.resume_pos {
+                                    if pos > 5.0 && ui.small_button(format!("⏩ {}", format_duration(pos))).clicked() {
+                                        play_card = true;
+                                    }
+                                }
+                                if ui.small_button("Details").clicked() {
+                                    clicked_card = true;
+                                }
+                                let w_label = if card.watched { "✓" } else { "○" };
+                                if ui.small_button(w_label).on_hover_text("Toggle watched").clicked() {
+                                    toggle_watched_card = true;
+                                }
                             }
                         });
                     });
                 });
 
-                if play_card {
+                if self.bulk_mode {
+                    if clicked_card {
+                        let id = card.id.clone();
+                        if self.bulk_selected.contains(&id) {
+                            self.bulk_selected.remove(&id);
+                        } else {
+                            self.bulk_selected.insert(id);
+                        }
+                    }
+                } else if play_card {
                     if let Some(p) = card.video_path.clone() {
                         let id = card.id.clone();
                         self.play_with_tracking(&p, id);
@@ -949,18 +1156,33 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.downloader.poll();
+        self.check_notifications();
 
         let any_running = self.downloader.any_running();
-        if self.prev_any_running && !any_running && !self.downloader.jobs.is_empty() {
+        // Auto-rescan when all downloads finish
+        let was_running = self.prev_job_states.values().any(|&s| s == JobState::Running);
+        if was_running && !any_running {
             self.rescan();
         }
-        self.prev_any_running = any_running;
 
         if any_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
 
-        // Poll mpv position updates from background tracker thread
+        // Scheduled channel checks
+        if self.config.scheduler.enabled && !any_running {
+            let interval = std::time::Duration::from_secs(
+                self.config.scheduler.interval_hours as u64 * 3600,
+            );
+            let due = self.last_scheduled_check
+                .map_or(true, |t| t.elapsed() >= interval);
+            if due {
+                self.last_scheduled_check = Some(Instant::now());
+                self.run_scheduled_check();
+            }
+        }
+
+        // Poll mpv position updates
         if let Some(rx) = &self.mpv_rx {
             while let Ok((video_id, pos)) = rx.try_recv() {
                 let _ = self.db.set_position(&video_id, pos);
@@ -989,7 +1211,6 @@ fn spawn_mpv_tracker(sock_path: String, video_id: String, tx: std::sync::mpsc::S
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
-    // Wait for mpv to create the socket (up to 10 seconds)
     let mut stream = None;
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(500));
@@ -1002,7 +1223,6 @@ fn spawn_mpv_tracker(sock_path: String, video_id: String, tx: std::sync::mpsc::S
         Some(s) => s,
         None => return,
     };
-
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
 
     let mut buf = [0u8; 4096];
@@ -1029,10 +1249,7 @@ fn spawn_mpv_tracker(sock_path: String, video_id: String, tx: std::sync::mpsc::S
             }
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                // no response yet, mpv may be paused — keep polling
-            }
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(_) => break,
         }
     }
@@ -1058,11 +1275,7 @@ fn format_duration(secs: f64) -> String {
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
     let s = secs % 60;
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }
 
 fn format_size(bytes: u64) -> String {

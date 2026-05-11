@@ -8,6 +8,10 @@ pub struct Config {
     pub player: PlayerSection,
     #[serde(default)]
     pub ui: UiSection,
+    #[serde(default)]
+    pub scheduler: SchedulerSection,
+    #[serde(default)]
+    pub web: WebSection,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -41,9 +45,37 @@ impl Default for UiSection {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SchedulerSection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_interval_hours")]
+    pub interval_hours: u32,
+}
+
+impl Default for SchedulerSection {
+    fn default() -> Self {
+        Self { enabled: false, interval_hours: default_interval_hours() }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WebSection {
+    #[serde(default = "default_web_port")]
+    pub port: u16,
+}
+
+impl Default for WebSection {
+    fn default() -> Self {
+        Self { port: default_web_port() }
+    }
+}
+
 fn default_player() -> String { "mpv".to_string() }
 fn default_browser() -> String { "firefox".to_string() }
 fn default_theme() -> String { "dark".to_string() }
+fn default_interval_hours() -> u32 { 24 }
+fn default_web_port() -> u16 { 8080 }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -62,6 +94,8 @@ impl Config {
             backup: BackupSection { directory: dir },
             player: PlayerSection::default(),
             ui: UiSection::default(),
+            scheduler: SchedulerSection::default(),
+            web: WebSection::default(),
         }
     }
 }
