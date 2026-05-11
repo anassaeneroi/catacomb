@@ -1,8 +1,8 @@
 # Maintainer: InannaBeloved <anassaeneroi@pm.me>
-pkgname=youtube-backup
+pkgname=yt-offline
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="A small yt-dlp front-end: browse downloaded channels and queue new downloads"
+pkgdesc="A desktop app for archiving YouTube channels with yt-dlp"
 arch=('x86_64' 'aarch64')
 url="https://codeberg.org/anassaeneroi/yt-offline"
 license=('GPL3')
@@ -19,20 +19,13 @@ build() {
 package() {
     cd "$pkgname"
 
-    # Install binary
-    install -Dm755 target/release/youtube-backup "$pkgdir/usr/bin/youtube-backup"
+    install -Dm755 target/release/yt-offline "$pkgdir/usr/bin/yt-offline"
+    install -Dm644 youtube-backup.desktop "$pkgdir/usr/share/applications/yt-offline.desktop"
 
-    # Install desktop file
-    install -Dm644 youtube-backup.desktop "$pkgdir/usr/share/applications/youtube-backup.desktop"
-
-    # Install icon (if it exists)
     if [ -f "icon.png" ]; then
-        install -Dm644 icon.png "$pkgdir/usr/share/pixmaps/youtube-backup.png"
+        install -Dm644 icon.png "$pkgdir/usr/share/pixmaps/yt-offline.png"
     fi
 
-    # Install license
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-
-    # Install config template
-    install -Dm644 config.toml "$pkgdir/etc/youtube-backup/config.toml.example"
+    install -Dm644 config.toml "$pkgdir/etc/yt-offline/config.toml.example"
 }
