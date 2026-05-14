@@ -8,6 +8,7 @@ url="https://codeberg.org/anassaeneroi/yt-offline"
 license=('AGPL-3.0-only')
 depends=('yt-dlp' 'mpv' 'sqlite' 'libxcb')
 makedepends=('rust' 'cargo')
+options=('!lto')  # rusqlite bundled sqlite cannot be LTO-linked with rust-lld
 source=("git+https://codeberg.org/anassaeneroi/yt-offline.git")
 sha256sums=('SKIP')
 
