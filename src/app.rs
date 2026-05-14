@@ -517,14 +517,18 @@ impl App {
 
                     ui.separator();
 
+                    // Collect any right-click download action outside the loop
+                    let mut pending_ch_download: Option<(String, String)> = None; // (url, channel_name)
+
                     for i in 0..self.library.len() {
-                        let (name, total, has_playlists, size_bytes) = {
+                        let (name, total, has_playlists, size_bytes, channel_url) = {
                             let ch = &self.library[i];
                             (
                                 ch.name.clone(),
                                 ch.total_videos(),
                                 !ch.playlists.is_empty(),
                                 Self::channel_total_size(ch),
+                                ch.meta.as_ref().and_then(|m| m.channel_url.clone()),
                             )
                         };
 
@@ -539,14 +543,34 @@ impl App {
                         let label = format!("{}  ({}{})", name, total, size_str);
 
                         let ch_selected_no_pl = matches!(self.sidebar_view, SidebarView::Channel(ci) if ci == i);
-                        if ui
+                        let resp = ui
                             .selectable_label(ch_selected_no_pl, label)
-                            .on_hover_text(self.library[i].path.display().to_string())
-                            .clicked()
-                        {
+                            .on_hover_text(self.library[i].path.display().to_string());
+                        if resp.clicked() {
                             self.sidebar_view = SidebarView::Channel(i);
                             self.selected_video = None;
                         }
+                        // Right-click context menu
+                        let url_for_menu = channel_url.clone();
+                        let name_for_menu = name.clone();
+                        resp.context_menu(|ui| {
+                            if let Some(ref url) = url_for_menu {
+                                if ui.button("⬇ Check for new videos").clicked() {
+                                    pending_ch_download = Some((url.clone(), name_for_menu.clone()));
+                                    ui.close_menu();
+                                }
+                            } else {
+                                ui.add_enabled(false, egui::Button::new("⬇ Check for new videos"))
+                                    .on_hover_text("Download this channel first to store its URL");
+                            }
+                            if ui.button("📁 Open folder").clicked() {
+                                let path = self.library[i].path.clone();
+                                if let Err(e) = std::process::Command::new("xdg-open").arg(&path).spawn() {
+                                    eprintln!("xdg-open: {e}");
+                                }
+                                ui.close_menu();
+                            }
+                        });
 
                         if is_ch_selected && has_playlists {
                             let playlist_count = self.library[i].playlists.len();
@@ -563,6 +587,13 @@ impl App {
                                 }
                             }
                         }
+                    }
+
+                    // Process deferred right-click download action
+                    if let Some((url, ch_name)) = pending_ch_download {
+                        let kind = detect_url_kind(&url);
+                        self.downloader.start(url, &kind);
+                        self.status = format!("Checking {} for new videos…", ch_name);
                     }
                 });
             });
@@ -946,10 +977,10 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.selectable_value(&mut self.sort_mode, SortMode::SizeDesc, "Size ↓");
-                ui.selectable_value(&mut self.sort_mode, SortMode::SizeAsc, "Size ↑");
-                ui.selectable_value(&mut self.sort_mode, SortMode::DurationDesc, "Dur ↓");
-                ui.selectable_value(&mut self.sort_mode, SortMode::DurationAsc, "Dur ↑");
+                ui.selectable_value(&mut self.sort_mode, SortMode::SizeDesc, "Largest");
+                ui.selectable_value(&mut self.sort_mode, SortMode::SizeAsc, "Smallest");
+                ui.selectable_value(&mut self.sort_mode, SortMode::DurationDesc, "Longest");
+                ui.selectable_value(&mut self.sort_mode, SortMode::DurationAsc, "Shortest");
                 ui.selectable_value(&mut self.sort_mode, SortMode::Title, "Title");
                 ui.label(egui::RichText::new("Sort:").weak());
             });

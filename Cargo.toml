@@ -15,7 +15,6 @@ tray-icon = "0.13"
 notify-rust = { version = "4", default-features = false, features = ["z"] }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.5", features = ["cors"] }
 
 [profile.release]
