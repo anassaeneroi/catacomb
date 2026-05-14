@@ -12,7 +12,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tray-icon = "0.13"
-notify-rust = { version = "4", default-features = false, features = ["d"] }
+notify-rust = { version = "4", default-features = false, features = ["z"] }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

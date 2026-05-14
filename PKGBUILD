@@ -5,9 +5,9 @@ pkgrel=1
 pkgdesc="A desktop app for archiving YouTube channels with yt-dlp"
 arch=('x86_64' 'aarch64')
 url="https://codeberg.org/anassaeneroi/yt-offline"
-license=('GPL3')
+license=('AGPL-3.0-only')
 depends=('yt-dlp' 'mpv' 'sqlite' 'libxcb')
-makedepends=('cargo' 'rustup')
+makedepends=('rust' 'cargo')
 source=("git+https://codeberg.org/anassaeneroi/yt-offline.git")
 sha256sums=('SKIP')
 
