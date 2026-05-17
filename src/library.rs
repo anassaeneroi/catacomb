@@ -1,4 +1,23 @@
 //! Scanning the `channels/` directory tree into channels, playlists, and videos.
+//!
+//! # Directory layout expected
+//!
+//! ```text
+//! channels/
+//!   <channel-name>/
+//!     Title [VIDEO_ID].mkv
+//!     Title [VIDEO_ID].webp          ← thumbnail
+//!     Title [VIDEO_ID].description
+//!     Title [VIDEO_ID].info.json
+//!     Title [VIDEO_ID].en.vtt        ← subtitle (lang = "en")
+//!     <playlist-name>/
+//!       Title [VIDEO_ID].mkv
+//!       …
+//! ```
+//!
+//! Files that don't match the `Title [ID].ext` naming convention are silently
+//! ignored.  Hidden directories (name starts with `.`) and directories that
+//! contain no recognisable video files are skipped.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -6,8 +25,18 @@ use std::path::{Path, PathBuf};
 const VIDEO_EXTS: &[&str] = &["mkv", "mp4", "webm", "m4v", "mov", "avi"];
 const THUMB_EXTS: &[&str] = &["webp", "jpg", "jpeg", "png"];
 
+/// A single WebVTT subtitle track discovered alongside a video file.
+#[derive(Clone, Debug)]
+pub struct Subtitle {
+    /// ISO 639-1/2 language code extracted from the `.lang.vtt` filename suffix.
+    pub lang: String,
+    pub path: PathBuf,
+}
+
+/// A fully enriched video entry, ready to serve to the UI.
 #[derive(Clone, Debug)]
 pub struct Video {
+    /// yt-dlp video ID (the part inside `[…]` in the filename).
     pub id: String,
     pub title: String,
     #[allow(dead_code)]
@@ -15,11 +44,17 @@ pub struct Video {
     pub video_path: Option<PathBuf>,
     pub thumb_path: Option<PathBuf>,
     pub description_path: Option<PathBuf>,
+    /// Path to the `.info.json` sidecar — used to read duration, chapters, etc.
+    pub info_path: Option<PathBuf>,
+    pub subtitles: Vec<Subtitle>,
     pub has_live_chat: bool,
+    /// Duration read from `info.json`; `None` if the sidecar is missing.
     pub duration_secs: Option<f64>,
+    /// Size of the video file on disk; `None` if the video file is missing.
     pub file_size: Option<u64>,
 }
 
+/// A sub-directory inside a channel that contains videos (treated as a playlist).
 #[derive(Clone, Debug)]
 pub struct Playlist {
     pub name: String,
@@ -28,6 +63,7 @@ pub struct Playlist {
     pub videos: Vec<Video>,
 }
 
+/// Channel-level metadata pulled from the first available `info.json`.
 #[derive(Clone, Debug)]
 pub struct ChannelMeta {
     pub subscriber_count: Option<u64>,
@@ -35,21 +71,32 @@ pub struct ChannelMeta {
     pub uploader: Option<String>,
 }
 
+/// A top-level channel directory with all its videos and playlists.
 #[derive(Clone, Debug)]
 pub struct Channel {
     pub name: String,
     pub path: PathBuf,
+    /// Videos stored directly inside the channel directory (not in a sub-folder).
     pub videos: Vec<Video>,
+    /// Sub-directories that contain at least one video.
     pub playlists: Vec<Playlist>,
     pub meta: Option<ChannelMeta>,
+    /// Cached sum of `videos.len() + playlists[*].videos.len()`.
+    pub total_videos_cached: usize,
+    /// Cached sum of all video file sizes.
+    pub total_size_cached: u64,
 }
 
 impl Channel {
     pub fn total_videos(&self) -> usize {
-        self.videos.len() + self.playlists.iter().map(|p| p.videos.len()).sum::<usize>()
+        self.total_videos_cached
     }
 }
 
+/// Scan `root` for channel directories and return them sorted alphabetically.
+///
+/// Skips hidden directories (names starting with `.`) and directories that
+/// contain no recognisable video files.
 pub fn scan_channels(root: &Path) -> Vec<Channel> {
     let mut channels = Vec::new();
     let Ok(entries) = std::fs::read_dir(root) else { return channels };
@@ -57,9 +104,26 @@ pub fn scan_channels(root: &Path) -> Vec<Channel> {
         let path = entry.path();
         if !path.is_dir() { continue; }
         let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') { continue; }
         let (videos, playlists) = scan_channel_dir(&path);
+        if videos.is_empty() && playlists.is_empty() { continue; }
         let meta = load_channel_meta(&videos);
-        channels.push(Channel { name, path, videos, playlists, meta });
+        let total_videos_cached =
+            videos.len() + playlists.iter().map(|p| p.videos.len()).sum::<usize>();
+        let total_size_cached = videos
+            .iter()
+            .chain(playlists.iter().flat_map(|p| p.videos.iter()))
+            .filter_map(|v| v.file_size)
+            .sum();
+        channels.push(Channel {
+            name,
+            path,
+            videos,
+            playlists,
+            meta,
+            total_videos_cached,
+            total_size_cached,
+        });
     }
     channels.sort_by_key(|c| c.name.to_lowercase());
     channels
@@ -134,15 +198,28 @@ struct RawVideo {
     thumb_path: Option<PathBuf>,
     description_path: Option<PathBuf>,
     info_path: Option<PathBuf>,
+    subtitles: Vec<Subtitle>,
     has_live_chat: bool,
 }
 
 fn collect_raw_videos(entries: impl Iterator<Item = std::fs::DirEntry>) -> Vec<RawVideo> {
     let mut by_stem: BTreeMap<String, RawVideo> = BTreeMap::new();
+    let mut pending_subs: Vec<(String, String, PathBuf)> = Vec::new();
     for entry in entries {
         let path = entry.path();
         if !path.is_file() { continue; }
         let file_name = entry.file_name().to_string_lossy().into_owned();
+
+        // Subtitles have stems like "Title [id].en.vtt" — strip the .vtt and trailing .lang
+        if let Some(sub_stem) = file_name.strip_suffix(".vtt") {
+            if let Some(dot) = sub_stem.rfind('.') {
+                let lang = sub_stem[dot + 1..].to_string();
+                let video_stem = sub_stem[..dot].to_string();
+                pending_subs.push((video_stem, lang, path));
+                continue;
+            }
+        }
+
         let Some((stem, kind)) = classify(&file_name) else { continue };
         let Some((title, id)) = parse_stem(stem) else { continue };
         let raw = by_stem.entry(stem.to_string()).or_insert_with(|| RawVideo {
@@ -153,6 +230,7 @@ fn collect_raw_videos(entries: impl Iterator<Item = std::fs::DirEntry>) -> Vec<R
             thumb_path: None,
             description_path: None,
             info_path: None,
+            subtitles: Vec::new(),
             has_live_chat: false,
         });
         match kind {
@@ -163,6 +241,14 @@ fn collect_raw_videos(entries: impl Iterator<Item = std::fs::DirEntry>) -> Vec<R
             FileKind::LiveChat => raw.has_live_chat = true,
             FileKind::Other => {}
         }
+    }
+    for (video_stem, lang, path) in pending_subs {
+        if let Some(raw) = by_stem.get_mut(&video_stem) {
+            raw.subtitles.push(Subtitle { lang, path });
+        }
+    }
+    for raw in by_stem.values_mut() {
+        raw.subtitles.sort_by(|a, b| a.lang.cmp(&b.lang));
     }
     by_stem.into_values().collect()
 }
@@ -184,6 +270,8 @@ fn enrich(raws: Vec<RawVideo>) -> Vec<Video> {
             video_path: raw.video_path,
             thumb_path: raw.thumb_path,
             description_path: raw.description_path,
+            info_path: raw.info_path,
+            subtitles: raw.subtitles,
             has_live_chat: raw.has_live_chat,
             duration_secs,
             file_size,
@@ -193,6 +281,9 @@ fn enrich(raws: Vec<RawVideo>) -> Vec<Video> {
     videos
 }
 
+/// Scan a single flat directory for video files and return enriched `Video` entries.
+///
+/// Used when rescanning a playlist directory without a full library reload.
 pub fn scan_video_files(dir: &Path) -> Vec<Video> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let raws = collect_raw_videos(entries.flatten().filter(|e| e.path().is_file()));

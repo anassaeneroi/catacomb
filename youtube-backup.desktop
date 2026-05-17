@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=YouTube Backup
+Name=YouTube Offline
 Comment=Download and manage YouTube channel backups
 Exec=youtube-backup
 Icon=youtube-backup

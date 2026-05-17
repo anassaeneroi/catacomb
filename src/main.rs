@@ -1,3 +1,16 @@
+//! yt-offline — desktop and web app for archiving YouTube content with yt-dlp.
+//!
+//! # Usage
+//!
+//! * **GUI mode** (default): `yt-offline`
+//! * **Web mode**: `yt-offline --web [PORT]` — starts a headless HTTP server
+//!   on the configured port (default 8080).
+//!
+//! Configuration is read from `config.toml` in the current working directory.
+//! See [`config`] for all available options.
+//!
+//! Licensed under the GNU Affero General Public License v3 or later (AGPL-3.0+).
+//! Source code must be made available to network users per AGPL §13.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
@@ -6,7 +19,6 @@ mod database;
 mod downloader;
 mod library;
 mod theme;
-mod tray;
 mod web;
 
 fn main() -> eframe::Result<()> {

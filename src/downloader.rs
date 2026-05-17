@@ -1,4 +1,27 @@
 //! Running `yt-dlp` in the background and surfacing its progress to the UI.
+//!
+//! Each call to [`Downloader::start`] spawns a thread that runs `yt-dlp` and
+//! pipes stdout/stderr back to the main thread through an `mpsc` channel.
+//! The caller polls for updates via [`Downloader::poll`], which drains the
+//! channel into each [`Job`]'s log buffer.
+//!
+//! # yt-dlp command flags used
+//!
+//! | Flag | Purpose |
+//! |---|---|
+//! | `--cookies cookies.txt` | Pass browser cookies for age-gated/member videos |
+//! | `--write-subs --write-auto-subs` | Download subtitles alongside the video |
+//! | `--write-thumbnail` | Download channel/video thumbnails |
+//! | `--write-description` | Save video description as a sidecar `.description` file |
+//! | `--write-info-json` | Save full metadata as a `.info.json` sidecar |
+//! | `--remux-video mkv` | Re-container to MKV (no re-encode) |
+//! | `--embed-metadata --embed-info-json --embed-chapters` | Embed rich metadata into the MKV |
+//! | `--xattrs` | Store metadata in filesystem extended attributes |
+//! | `--sponsorblock-mark all` | Mark (but don't remove) SponsorBlock segments |
+//! | `--extractor-args youtube:player_client=web` | Use the web player API to avoid throttling |
+//! | `--impersonate Chrome-146:Macos-26` | Impersonate a real browser for bot detection |
+//! | `--break-on-existing` | Stop when the archive file records the video as already downloaded |
+//! | `--download-archive archive.txt` | Record downloaded IDs to avoid re-downloading |
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -6,13 +29,17 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
+/// Describes the kind of YouTube URL being downloaded, which determines the
+/// output path template passed to yt-dlp.
 pub enum UrlKind {
+    /// A channel URL (`/@handle`, `/channel/ID`, or `/c/name`).
     Channel { handle: String },
     Playlist,
     Video,
     Unknown,
 }
 
+/// Classify a YouTube URL into a [`UrlKind`] by inspecting its path.
 pub fn detect_url_kind(url: &str) -> UrlKind {
     if url.contains("playlist?list=") {
         return UrlKind::Playlist;
@@ -39,6 +66,7 @@ fn extract_after<'a>(url: &'a str, marker: &str) -> Option<&'a str> {
     if end == 0 { None } else { Some(&rest[..end]) }
 }
 
+/// Lifecycle state of a download job.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
     Running,
@@ -46,17 +74,22 @@ pub enum JobState {
     Failed,
 }
 
+/// Internal message sent from the yt-dlp thread to the job.
 enum Msg {
     Line(String),
     Progress(f32),
     Finished(bool),
 }
 
+/// A single yt-dlp invocation tracked by the downloader.
 pub struct Job {
     pub url: String,
+    /// Short human-readable path shown in the UI (e.g. `channels/handle/`).
     pub label: String,
     pub state: JobState,
+    /// Download progress as a fraction in `[0.0, 1.0]`.
     pub progress: f32,
+    /// Rolling log buffer — capped at 800 lines to avoid unbounded growth.
     pub log: Vec<String>,
     rx: Receiver<Msg>,
 }
@@ -81,9 +114,12 @@ impl Job {
     }
 }
 
+/// Manages all active and recently completed yt-dlp download jobs.
 pub struct Downloader {
     pub jobs: Vec<Job>,
     pub channels_root: PathBuf,
+    /// Browser name passed to `--cookies-from-browser` (unused) — cookie file
+    /// is currently always `cookies.txt`.
     pub browser: String,
 }
 
@@ -92,10 +128,13 @@ impl Downloader {
         Self { jobs: Vec::new(), channels_root, browser }
     }
 
+    /// Spawn a yt-dlp process for `url` and track it as a new [`Job`].
+    ///
+    /// The output path template is derived from `kind` so that channels,
+    /// playlists, and individual videos land in the right sub-directories.
     pub fn start(&mut self, url: String, kind: &UrlKind) {
         let (tx, rx) = channel();
         let archive_path = self.channels_root.join("archive.txt");
-        let browser = self.browser.clone();
 
         let (out_arg, label) = match kind {
             UrlKind::Channel { handle } => {
@@ -121,25 +160,32 @@ impl Downloader {
             let mut cmd = Command::new("yt-dlp");
             cmd.arg("--newline")
                 .arg("--no-color")
+                .arg("--cookies")
+                .arg("cookies.txt")
                 .arg("--write-subs")
+                .arg("--write-auto-subs")
                 .arg("--write-thumbnail")
                 .arg("--write-description")
                 .arg("--write-info-json")
-                .arg("-f")
+                .arg("--remux-video")
                 .arg("mkv")
                 .arg("--embed-metadata")
+                .arg("--embed-info-json")
+                .arg("--embed-chapters")
+                .arg("--xattrs")
+                .arg("--sponsorblock-mark")
+                .arg("all")
+                .arg("--extractor-args")
+                .arg("youtube:player_client=web")
+                .arg("--progress")
                 .arg("--break-on-existing")
                 .arg("--download-archive")
                 .arg(archive_path.display().to_string())
-                .arg("--ignore-errors")
+                .arg("--impersonate")
+                .arg("Chrome-146:Macos-26")
                 .arg("-o")
-                .arg(&out_arg);
-
-            if !browser.is_empty() && browser != "none" {
-                cmd.arg("--cookies-from-browser").arg(&browser);
-            }
-
-            cmd.arg(&url_for_thread)
+                .arg(&out_arg)
+                .arg(&url_for_thread)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -178,6 +224,9 @@ impl Downloader {
         self.jobs.push(Job { url, label, state: JobState::Running, progress: 0.0, log: Vec::new(), rx });
     }
 
+    /// Drain pending messages from all job threads into their log buffers.
+    ///
+    /// Call this regularly from the UI event loop to pick up progress updates.
     pub fn poll(&mut self) {
         for job in &mut self.jobs {
             job.drain();
@@ -187,8 +236,24 @@ impl Downloader {
     pub fn any_running(&self) -> bool {
         self.jobs.iter().any(|j| j.state == JobState::Running)
     }
+
+    /// Remove all jobs that have finished (done or failed), keeping only running ones.
+    pub fn clear_finished(&mut self) {
+        self.jobs.retain(|j| j.state == JobState::Running);
+    }
+
+    /// Remove a single finished job by index.  Silently ignores the request
+    /// if the job is still running.
+    pub fn remove_job(&mut self, idx: usize) {
+        if let Some(j) = self.jobs.get(idx) {
+            if j.state != JobState::Running {
+                self.jobs.remove(idx);
+            }
+        }
+    }
 }
 
+/// Parse a yt-dlp `[download]  42.7% …` line into a `[0.0, 1.0]` fraction.
 fn parse_progress(line: &str) -> Option<f32> {
     let rest = line.trim_start().strip_prefix("[download]")?.trim_start();
     let pct_end = rest.find('%')?;

@@ -1,7 +1,13 @@
+//! egui desktop application — the main window, sidebar, video grid, and settings UI.
+//!
+//! The [`App`] struct holds all UI state and implements [`eframe::App`].
+//! Background work (downloads, scheduled rescans) runs in threads and
+//! communicates back via `mpsc` channels stored on `App`.
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
 
 use eframe::egui;
@@ -65,7 +71,9 @@ pub struct App {
     show_settings: bool,
     dl_url: String,
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
-    decode_budget: u32,
+    thumb_request_tx: Sender<PathBuf>,
+    thumb_result_rx: Receiver<(PathBuf, Option<egui::ColorImage>)>,
+    thumb_pending: HashSet<PathBuf>,
     desc_cache: HashMap<PathBuf, String>,
     status: String,
     settings_dir: String,
@@ -82,6 +90,13 @@ pub struct App {
     bulk_selected: HashSet<String>,
     // Scheduler
     last_scheduled_check: Option<Instant>,
+    // Cards cache — recomputed only when inputs change
+    cards_cache: Vec<Card>,
+    cards_cache_key: Option<(String, SortMode, SidebarView, u64)>,
+    library_generation: u64,
+    // Web server
+    web_server_running: bool,
+    web_server_shutdown: Option<Sender<()>>,
 }
 
 impl App {
@@ -117,6 +132,20 @@ impl App {
 
         let browser = config.player.browser.clone();
 
+        let (thumb_request_tx, thumb_request_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (thumb_result_tx, thumb_result_rx) =
+            std::sync::mpsc::channel::<(PathBuf, Option<egui::ColorImage>)>();
+        let ctx = cc.egui_ctx.clone();
+        std::thread::spawn(move || {
+            while let Ok(path) = thumb_request_rx.recv() {
+                let img = decode_thumbnail_image(&path);
+                if thumb_result_tx.send((path, img)).is_err() {
+                    break;
+                }
+                ctx.request_repaint();
+            }
+        });
+
         Self {
             config,
             config_path,
@@ -130,7 +159,9 @@ impl App {
             show_settings: false,
             dl_url: String::new(),
             textures: HashMap::new(),
-            decode_budget: 0,
+            thumb_request_tx,
+            thumb_result_rx,
+            thumb_pending: HashSet::new(),
             desc_cache: HashMap::new(),
             status,
             settings_dir,
@@ -145,6 +176,11 @@ impl App {
             bulk_mode: false,
             bulk_selected: HashSet::new(),
             last_scheduled_check: None,
+            cards_cache: Vec::new(),
+            cards_cache_key: None,
+            library_generation: 0,
+            web_server_running: false,
+            web_server_shutdown: None,
         }
     }
 
@@ -161,7 +197,21 @@ impl App {
         );
     }
 
-    fn cards(&self) -> Vec<Card> {
+    fn cards_take(&mut self) -> Vec<Card> {
+        let key = (
+            self.search.clone(),
+            self.sort_mode.clone(),
+            self.sidebar_view.clone(),
+            self.library_generation,
+        );
+        if self.cards_cache_key.as_ref() != Some(&key) {
+            self.cards_cache = self.compute_cards();
+            self.cards_cache_key = Some(key);
+        }
+        std::mem::take(&mut self.cards_cache)
+    }
+
+    fn compute_cards(&self) -> Vec<Card> {
         let query = self.search.trim().to_lowercase();
 
         let mut cards = Vec::new();
@@ -265,18 +315,15 @@ impl App {
         None
     }
 
-    fn texture(&mut self, ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle> {
+    fn texture(&mut self, _ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle> {
         if let Some(slot) = self.textures.get(path) {
             return slot.clone();
         }
-        if self.decode_budget == 0 {
-            ctx.request_repaint();
-            return None;
+        let pb = path.to_path_buf();
+        if self.thumb_pending.insert(pb.clone()) {
+            let _ = self.thumb_request_tx.send(pb);
         }
-        self.decode_budget -= 1;
-        let handle = decode_thumbnail(ctx, path);
-        self.textures.insert(path.to_path_buf(), handle.clone());
-        handle
+        None
     }
 
     fn description(&mut self, video: &Video) -> String {
@@ -365,6 +412,28 @@ impl App {
         }
     }
 
+    fn start_web_server(&mut self) {
+        if self.web_server_running {
+            return;
+        }
+        let shutdown = crate::web::run_with_shutdown(self.config.clone());
+        self.web_server_shutdown = Some(shutdown);
+        self.web_server_running = true;
+        let port = self.config.web.port;
+        self.status = format!("Web server started on port {port}. Access at http://localhost:{port}");
+    }
+
+    fn stop_web_server(&mut self) {
+        if !self.web_server_running {
+            return;
+        }
+        if let Some(shutdown) = self.web_server_shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.web_server_running = false;
+        self.status = "Web server stopped.".to_string();
+    }
+
     fn bulk_mark_watched(&mut self, watched: bool) {
         let ids: Vec<String> = self.bulk_selected.iter().cloned().collect();
         for id in &ids {
@@ -429,10 +498,7 @@ impl App {
     }
 
     fn channel_total_size(ch: &library::Channel) -> u64 {
-        ch.videos.iter()
-            .chain(ch.playlists.iter().flat_map(|p| p.videos.iter()))
-            .filter_map(|v| v.file_size)
-            .sum()
+        ch.total_size_cached
     }
 
     fn top_bar(&mut self, ctx: &egui::Context) {
@@ -521,14 +587,24 @@ impl App {
                     let mut pending_ch_download: Option<(String, String)> = None; // (url, channel_name)
 
                     for i in 0..self.library.len() {
-                        let (name, total, has_playlists, size_bytes, channel_url) = {
+                        let (name, total, has_playlists, size_bytes, channel_url, url_inferred) = {
                             let ch = &self.library[i];
+                            let meta_url = ch.meta.as_ref().and_then(|m| m.channel_url.clone());
+                            let (url, inferred) = if let Some(u) = meta_url {
+                                (Some(u), false)
+                            } else {
+                                let folder_url = ch.path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|n| format!("https://www.youtube.com/@{n}"));
+                                (folder_url, true)
+                            };
                             (
                                 ch.name.clone(),
                                 ch.total_videos(),
                                 !ch.playlists.is_empty(),
                                 Self::channel_total_size(ch),
-                                ch.meta.as_ref().and_then(|m| m.channel_url.clone()),
+                                url,
+                                inferred,
                             )
                         };
 
@@ -555,13 +631,14 @@ impl App {
                         let name_for_menu = name.clone();
                         resp.context_menu(|ui| {
                             if let Some(ref url) = url_for_menu {
-                                if ui.button("⬇ Check for new videos").clicked() {
+                                let mut btn = ui.button("⬇ Check for new videos");
+                                if url_inferred {
+                                    btn = btn.on_hover_text(format!("URL inferred from folder name:\n{url}"));
+                                }
+                                if btn.clicked() {
                                     pending_ch_download = Some((url.clone(), name_for_menu.clone()));
                                     ui.close_menu();
                                 }
-                            } else {
-                                ui.add_enabled(false, egui::Button::new("⬇ Check for new videos"))
-                                    .on_hover_text("Download this channel first to store its URL");
                             }
                             if ui.button("📁 Open folder").clicked() {
                                 let path = self.library[i].path.clone();
@@ -786,6 +863,22 @@ impl App {
                                 .range(1024..=65535),
                         );
                         ui.end_row();
+
+                        ui.label("Web server:");
+                        ui.horizontal(|ui| {
+                            if self.web_server_running {
+                                if ui.button("🛑 Stop").clicked() {
+                                    self.stop_web_server();
+                                }
+                                ui.label(egui::RichText::new("Running").small().weak());
+                            } else {
+                                if ui.button("▶ Start").clicked() {
+                                    self.start_web_server();
+                                }
+                                ui.label(egui::RichText::new("Stopped").small().weak());
+                            }
+                        });
+                        ui.end_row();
                     });
 
                 ui.add_space(8.0);
@@ -911,7 +1004,7 @@ impl App {
     }
 
     fn video_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        let cards = self.cards();
+        let cards = self.cards_take();
         let show_channel = !matches!(self.sidebar_view, SidebarView::Channel(_) | SidebarView::Playlist(_, _));
 
         // Channel metadata banner
@@ -1181,6 +1274,7 @@ impl App {
                 ui.separator();
             }
         });
+        self.cards_cache = cards;
     }
 }
 
@@ -1221,7 +1315,18 @@ impl eframe::App for App {
             }
         }
 
-        self.decode_budget = 6;
+        // Drain any decoded thumbnails from the worker thread
+        while let Ok((path, img)) = self.thumb_result_rx.try_recv() {
+            self.thumb_pending.remove(&path);
+            let handle = img.map(|color_image| {
+                ctx.load_texture(
+                    path.to_string_lossy(),
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+            self.textures.insert(path, handle);
+        }
 
         self.top_bar(ctx);
         self.channel_panel(ctx);
@@ -1286,13 +1391,12 @@ fn spawn_mpv_tracker(sock_path: String, video_id: String, tx: std::sync::mpsc::S
     }
 }
 
-fn decode_thumbnail(ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle> {
+fn decode_thumbnail_image(path: &Path) -> Option<egui::ColorImage> {
     let image = image::open(path).ok()?;
     let image = image.thumbnail(384, 216);
     let rgba = image.to_rgba8();
     let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-    let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
-    Some(ctx.load_texture(path.to_string_lossy(), color_image, egui::TextureOptions::LINEAR))
+    Some(egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw()))
 }
 
 fn file_label(path: &Path) -> String {

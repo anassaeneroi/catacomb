@@ -11,11 +11,12 @@ toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rusqlite = { version = "0.31", features = ["bundled"] }
-tray-icon = "0.13"
 notify-rust = { version = "4", default-features = false, features = ["z"] }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.5", features = ["cors"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = "0.1"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
 
 [profile.release]
 opt-level = 2

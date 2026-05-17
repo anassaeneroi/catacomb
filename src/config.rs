@@ -1,6 +1,12 @@
+//! Application configuration loaded from `config.toml`.
+//!
+//! Each top-level section maps to a TOML table.  Missing sections get sane
+//! defaults so existing config files continue to work after upgrades.
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Root configuration object, serialised from/to `config.toml`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub backup: BackupSection,
@@ -14,11 +20,13 @@ pub struct Config {
     pub web: WebSection,
 }
 
+/// `[backup]` table — where to store downloaded videos.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackupSection {
     pub directory: PathBuf,
 }
 
+/// `[player]` table — external player and browser cookie source.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlayerSection {
     #[serde(default = "default_player")]
@@ -33,6 +41,7 @@ impl Default for PlayerSection {
     }
 }
 
+/// `[ui]` table — egui desktop theme.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UiSection {
     #[serde(default = "default_theme")]
@@ -45,6 +54,7 @@ impl Default for UiSection {
     }
 }
 
+/// `[scheduler]` table — periodic background download schedule.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SchedulerSection {
     #[serde(default)]
@@ -59,15 +69,33 @@ impl Default for SchedulerSection {
     }
 }
 
+/// `[web]` table — built-in HTTP server settings.
+///
+/// `source_url` is **required for AGPL §13 compliance**: set it to a URL
+/// where the running source code can be obtained (e.g. your Codeberg repo).
+/// It is shown as a "Source" link in the web UI footer.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WebSection {
     #[serde(default = "default_web_port")]
     pub port: u16,
+    #[serde(default = "default_web_bind")]
+    /// Address to bind the HTTP server to. Defaults to `127.0.0.1` (localhost only).
+    /// Set to `0.0.0.0` to accept connections from any interface (not recommended).
+    pub bind: String,
+    #[serde(default)]
+    pub transcode: bool,
+    /// Public URL to the source repository, shown in the web UI per AGPL §13.
+    pub source_url: Option<String>,
 }
 
 impl Default for WebSection {
     fn default() -> Self {
-        Self { port: default_web_port() }
+        Self {
+            port: default_web_port(),
+            bind: default_web_bind(),
+            transcode: false,
+            source_url: None,
+        }
     }
 }
 
@@ -76,19 +104,23 @@ fn default_browser() -> String { "firefox".to_string() }
 fn default_theme() -> String { "dark".to_string() }
 fn default_interval_hours() -> u32 { 24 }
 fn default_web_port() -> u16 { 8080 }
+fn default_web_bind() -> String { "127.0.0.1".to_string() }
 
 impl Config {
+    /// Load and parse `config.toml` from `path`.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         toml::from_str(&contents).map_err(|e| e.into())
     }
 
+    /// Serialise the config back to `path` in pretty TOML.
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let contents = toml::to_string_pretty(self)?;
         std::fs::write(path, contents)?;
         Ok(())
     }
 
+    /// Construct a minimal default config pointing `backup.directory` at `dir`.
     pub fn default_with_dir(dir: PathBuf) -> Self {
         Self {
             backup: BackupSection { directory: dir },

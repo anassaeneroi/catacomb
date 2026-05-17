@@ -4,6 +4,11 @@
 # Rust build artifacts
 /target/
 
+# makepkg build artifacts (finished .pkg.tar.zst is NOT ignored)
+/pkg/
+/src/yt-offline/
+/yt-offline/
+
 # Editor / OS cruft
 *.swp
 .DS_Store

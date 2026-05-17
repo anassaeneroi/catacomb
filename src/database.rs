@@ -1,12 +1,25 @@
+//! Persistent storage for watched status and playback positions.
+//!
+//! Uses a bundled SQLite database (`yt-offline.db` by default).
+//!
+//! # Schema
+//!
+//! | Table | Columns | Purpose |
+//! |---|---|---|
+//! | `watched` | `video_id` (PK), `watched_at` | Records videos the user has marked watched |
+//! | `positions` | `video_id` (PK), `position_secs`, `updated_at` | Stores resume positions |
+
 use rusqlite::{Connection, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+/// Thin wrapper around a SQLite connection with schema management.
 pub struct Database {
     conn: Connection,
 }
 
 impl Database {
+    /// Open or create the database at `path`, running schema migrations.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
         let db = Database { conn };
@@ -14,6 +27,7 @@ impl Database {
         Ok(db)
     }
 
+    /// Open an in-memory database — used in tests.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let db = Database { conn };
