@@ -164,6 +164,10 @@ impl Downloader {
             .arg("--write-thumbnail")
             .arg("--write-description")
             .arg("--write-info-json")
+            // Don't write channel/playlist-level metafiles (avatar, info.json,
+            // description). They land as "Title [CHANNEL_ID].ext" files that match
+            // the per-video naming pattern and show up as phantom videos.
+            .arg("--no-write-playlist-metafiles")
             .arg("--remux-video")
             .arg("mkv")
             .arg("--embed-metadata")
@@ -257,7 +261,23 @@ impl Downloader {
                 }
             }
 
-            let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+            let ok = match child.wait() {
+                Ok(status) if status.success() => true,
+                // yt-dlp exits 101 when it stops early because of --break-on-existing
+                // (it reached an already-archived video). That's the normal "nothing
+                // new to download" outcome for a channel re-check, not a failure.
+                Ok(status) => {
+                    if status.code() == Some(101) {
+                        let _ = tx.send(Msg::Line(
+                            "(up to date — stopped at already-downloaded content)".to_string(),
+                        ));
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(_) => false,
+            };
             let _ = tx.send(Msg::Finished(ok));
         });
 

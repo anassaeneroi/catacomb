@@ -366,6 +366,53 @@ pub fn bind_mode_of(addr: &str) -> &'static str {
     }
 }
 
+// ── Cookies ─────────────────────────────────────────────────────────────────────
+
+/// Path to the `cookies.txt` yt-dlp reads, resolved against the process working
+/// directory (the same place `config.toml` lives and where the downloader's
+/// relative `--cookies cookies.txt` resolves).
+pub fn cookies_path() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("cookies.txt")
+}
+
+/// Count cookie entries (Netscape lines with 7 tab-separated fields).
+fn count_cookies(text: &str) -> usize {
+    text.lines().filter(|l| l.split('\t').count() >= 7).count()
+}
+
+/// Whether a cookies file exists and how many cookie entries it holds.
+pub fn cookies_status() -> (bool, usize) {
+    match std::fs::read_to_string(cookies_path()) {
+        Ok(s) => (true, count_cookies(&s)),
+        Err(_) => (false, 0),
+    }
+}
+
+/// Validate that `text` looks like a Netscape cookie jar and write it to
+/// [`cookies_path`]. Returns the number of cookie entries written, or an error
+/// message if the content doesn't look like a cookies.txt.
+pub fn write_cookies(text: &str) -> Result<usize, String> {
+    if text.trim().is_empty() {
+        return Err("no cookies provided".to_string());
+    }
+    let has_cookie_line = text.lines().any(|l| l.split('\t').count() >= 7);
+    let has_header = text.trim_start().starts_with("# Netscape")
+        || text.trim_start().starts_with("# HTTP Cookie File");
+    if !has_cookie_line && !has_header {
+        return Err(
+            "doesn't look like a Netscape cookies.txt (expected tab-separated fields)".to_string(),
+        );
+    }
+    let mut content = text.to_string();
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    std::fs::write(cookies_path(), &content).map_err(|e| e.to_string())?;
+    Ok(count_cookies(&content))
+}
+
 pub fn hash_password(password: &str) -> Option<String> {
     use rand::thread_rng;
     let salt = SaltString::generate(thread_rng());
@@ -922,6 +969,25 @@ async fn post_maintenance_repair(
     (StatusCode::ACCEPTED, "repair queued").into_response()
 }
 
+/// `GET /api/cookies` — report whether a cookies file exists and its entry count.
+async fn get_cookies() -> impl IntoResponse {
+    let (exists, count) = cookies_status();
+    Json(serde_json::json!({ "exists": exists, "cookies": count }))
+}
+
+#[derive(Deserialize)]
+struct CookiesBody {
+    cookies: String,
+}
+
+/// `POST /api/cookies` — replace cookies.txt with pasted Netscape-format content.
+async fn post_cookies(Json(body): Json<CookiesBody>) -> impl IntoResponse {
+    match write_cookies(&body.cookies) {
+        Ok(count) => Json(serde_json::json!({ "ok": true, "cookies": count })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run(config: Config) -> ! {
@@ -992,6 +1058,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/maintenance/scan", get(get_maintenance_scan))
         .route("/api/maintenance/remove", post(post_maintenance_remove))
         .route("/api/maintenance/repair/:id", post(post_maintenance_repair))
+        .route("/api/cookies", get(get_cookies).post(post_cookies))
         .route("/api/login", post(post_login))
         .route("/api/logout", post(post_logout))
         .nest_service("/files", ServeDir::new(&channels_root))
@@ -1542,6 +1609,8 @@ async function openSettings(){
       <div class="settings-hint">Change requires restart. Access from: tailscale, LAN, or all interfaces.</div>
     </div>`:''
   const logoutBtn=cur.download_password_required?`<button onclick="logout()">Log out</button>`:'';
+  let ck={exists:false,cookies:0};try{ck=await(await api('/api/cookies')).json()}catch{}
+  const cookiesStatus=ck.exists?`${ck.cookies} cookie(s) loaded`:'no cookies.txt';
   const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
   bg.innerHTML=`<div class="modal" style="max-width:420px">
     <div class="modal-hdr"><h2>Settings</h2></div>
@@ -1565,6 +1634,13 @@ async function openSettings(){
       <div class="settings-hint">Gates the whole UI and all API access. Leave empty to disable on save; changing it logs out other sessions.</div>
     </div>
     ${bindRows}
+    <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
+      <label>Cookies (cookies.txt)</label>
+      <div class="settings-hint" id="cookies-status">${cookiesStatus}</div>
+      <textarea id="cf-cookies" placeholder="Paste Netscape-format cookies.txt here…" style="width:100%;height:70px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-family:monospace;font-size:11px;resize:vertical"></textarea>
+      <button onclick="saveCookies(this)">Update cookies</button>
+      <div class="settings-hint">Export with a browser extension like "Get cookies.txt LOCALLY", then paste. Refresh when downloads start hitting captchas.</div>
+    </div>
     ${srcRow}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
       ${logoutBtn}
@@ -1573,6 +1649,20 @@ async function openSettings(){
     </div>
   </div>`;
   document.body.appendChild(bg);
+}
+
+async function saveCookies(btn){
+  const t=document.getElementById('cf-cookies').value;
+  if(!t.trim()){setStatus('Paste cookies first');return}
+  btn.disabled=true;
+  try{
+    const r=await fetch('/api/cookies',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookies:t})});
+    if(!r.ok)throw new Error(await r.text());
+    const d=await r.json();
+    document.getElementById('cf-cookies').value='';
+    document.getElementById('cookies-status').textContent=d.cookies+' cookie(s) loaded';
+    setStatus('Cookies updated ('+d.cookies+' entries)');
+  }catch(e){setStatus('Cookies error: '+e.message)}finally{btn.disabled=false}
 }
 
 async function saveSettings(btn){

@@ -101,6 +101,8 @@ pub struct App {
     settings_bind_mode: String,
     settings_password_enabled: bool,
     settings_password_input: String,
+    settings_cookies_input: String,
+    settings_cookies_status: String,
     // Maintenance (library health) window
     show_maintenance: bool,
     health_report: Option<crate::maintenance::HealthReport>,
@@ -193,6 +195,8 @@ impl App {
             settings_bind_mode: crate::web::bind_mode_of(&config_bind).to_string(),
             settings_password_enabled: password_set,
             settings_password_input: String::new(),
+            settings_cookies_input: String::new(),
+            settings_cookies_status: String::new(),
             show_maintenance: false,
             health_report: None,
         }
@@ -574,6 +578,13 @@ impl App {
                         self.settings_password_enabled =
                             self.config.web.download_password.is_some();
                         self.settings_password_input.clear();
+                        self.settings_cookies_input.clear();
+                        let (exists, n) = crate::web::cookies_status();
+                        self.settings_cookies_status = if exists {
+                            format!("{n} cookie(s) loaded")
+                        } else {
+                            "no cookies.txt".to_string()
+                        };
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1077,6 +1088,33 @@ impl App {
                                 }
                                 ui.label(egui::RichText::new("Stopped").small().weak());
                             }
+                        });
+                        ui.end_row();
+
+                        ui.label("Cookies:");
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(&self.settings_cookies_status).small().weak());
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.settings_cookies_input)
+                                    .desired_rows(3)
+                                    .desired_width(300.0)
+                                    .hint_text("paste Netscape cookies.txt…"),
+                            );
+                            if ui.button("Update cookies").clicked() {
+                                match crate::web::write_cookies(&self.settings_cookies_input) {
+                                    Ok(n) => {
+                                        self.settings_cookies_status = format!("{n} cookie(s) loaded");
+                                        self.settings_cookies_input.clear();
+                                        self.status = format!("Cookies updated ({n} entries)");
+                                    }
+                                    Err(e) => self.status = format!("Cookies error: {e}"),
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new("Export via a browser extension, then paste.")
+                                    .small()
+                                    .weak(),
+                            );
                         });
                         ui.end_row();
                     });
