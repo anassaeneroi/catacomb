@@ -50,6 +50,9 @@ pub struct Video {
     pub has_live_chat: bool,
     /// Duration read from `info.json`; `None` if the sidecar is missing.
     pub duration_secs: Option<f64>,
+    /// Whether `info.json` lists a non-empty `chapters` array. Cached at scan
+    /// time so the web layer needn't re-read and parse the sidecar per request.
+    pub has_chapters: bool,
     /// Size of the video file on disk; `None` if the video file is missing.
     pub file_size: Option<u64>,
 }
@@ -255,11 +258,19 @@ fn collect_raw_videos(entries: impl Iterator<Item = std::fs::DirEntry>) -> Vec<R
 
 fn enrich(raws: Vec<RawVideo>) -> Vec<Video> {
     let mut videos: Vec<Video> = raws.into_iter().map(|raw| {
-        let duration_secs = raw.info_path.as_ref().and_then(|p| {
-            let text = std::fs::read_to_string(p).ok()?;
-            let val: serde_json::Value = serde_json::from_str(&text).ok()?;
-            val.get("duration").and_then(|v| v.as_f64())
-        });
+        // Parse info.json once for both duration and chapter presence.
+        let (duration_secs, has_chapters) = raw.info_path.as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .map(|val| {
+                let dur = val.get("duration").and_then(|v| v.as_f64());
+                let chap = val.get("chapters")
+                    .and_then(|c| c.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                (dur, chap)
+            })
+            .unwrap_or((None, false));
         let file_size = raw.video_path.as_ref()
             .and_then(|p| std::fs::metadata(p).ok())
             .map(|m| m.len());
@@ -274,6 +285,7 @@ fn enrich(raws: Vec<RawVideo>) -> Vec<Video> {
             subtitles: raw.subtitles,
             has_live_chat: raw.has_live_chat,
             duration_secs,
+            has_chapters,
             file_size,
         }
     }).collect();

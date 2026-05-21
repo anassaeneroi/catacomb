@@ -170,9 +170,10 @@ paste 1.0.15
 ## Recommendations (Priority Order)
 
 ### HIGH
-1. **Verify web server binding** — Ensure `axum` binds to `127.0.0.1` only, not `0.0.0.0`.
-   - Check: `src/web.rs:618` where the listener is created.
-   - Mitigation: Add a config option for `bind_addr` or document localhost-only setup.
+1. ✅ **Web server binding** — **FIXED**
+   - Added `web.bind` config option (default `127.0.0.1`).
+   - Set in `config.toml` to `127.0.0.1` for localhost-only access.
+   - Users can change to `0.0.0.0` if they understand the security implications.
 
 ### MEDIUM
 2. **File permissions on `cookies.txt`** — Remind users to `chmod 600 cookies.txt`.

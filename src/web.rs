@@ -29,19 +29,23 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Query, State},
-    http::{header, StatusCode},
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeDir;
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::password_hash::SaltString;
 
 use crate::config::Config;
 use crate::database::Database;
 use crate::downloader::{detect_url_kind, Downloader, JobState};
 use crate::library;
+use crate::maintenance;
 
 // ── Shared state ──────────────────────────────────────────────────────────────
 
@@ -66,12 +70,16 @@ pub struct WebState {
     pub watched: Mutex<HashSet<String>>,
     /// Last known playback position per video ID in seconds (persisted in SQLite).
     pub positions: Mutex<HashMap<String, f64>>,
-    pub db_path: PathBuf,
+    /// Shared SQLite connection, opened once at startup instead of per request.
+    pub db: Mutex<Database>,
     pub channels_root: PathBuf,
     pub config_path: PathBuf,
     pub config: Mutex<Config>,
     /// Whether to transcode MKV→mp4 on the fly for playback (requires ffmpeg).
     pub transcode: AtomicBool,
+    /// Active session tokens. Non-empty only when a password is set; a valid
+    /// `session` cookie matching one of these grants access to the gated UI/API.
+    pub sessions: Mutex<HashSet<String>>,
 }
 
 impl WebState {
@@ -170,6 +178,28 @@ struct SettingsPayload {
     /// Clients MUST NOT send this field; the server ignores it on POST.
     #[serde(skip_deserializing, default)]
     source_url: Option<String>,
+    /// Current binding address and port, sent by server only.
+    #[serde(skip_deserializing, default)]
+    current_bind: Option<String>,
+    /// List of available bind options, sent by server only.
+    #[serde(skip_deserializing, default)]
+    available_binds: Option<Vec<BindOption>>,
+    /// Selected bind mode (localhost, tailscale, lan, all). Clients can send this on POST to change.
+    #[serde(skip_deserializing, default)]
+    bind_mode: Option<String>,
+    /// Whether a password is required for downloads (sent by server only).
+    #[serde(skip_deserializing, default)]
+    download_password_required: bool,
+    /// New plaintext password to set for downloads. Clients send this on POST; server does not return it.
+    #[serde(skip_serializing, default)]
+    new_download_password: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BindOption {
+    pub id: String,
+    pub label: String,
+    pub address: String,
 }
 
 // Build a `/files/<rel>` URL from an absolute path, percent-encoding each segment.
@@ -249,6 +279,211 @@ fn find_video_path(library: &[library::Channel], id: &str) -> Option<PathBuf> {
     None
 }
 
+fn detect_tailscale_ip() -> Option<String> {
+    if std::path::Path::new("/proc/net/if_inet6").exists() || std::path::Path::new("/etc/tailscale").exists() {
+        if let Ok(output) = std::process::Command::new("hostname")
+            .arg("-I")
+            .output() {
+            let ip_str = String::from_utf8_lossy(&output.stdout);
+            ip_str
+                .split_whitespace()
+                .find(|ip| ip.starts_with("100."))
+                .map(|s| s.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn detect_lan_ip() -> Option<String> {
+    if let Ok(output) = std::process::Command::new("hostname")
+        .arg("-I")
+        .output() {
+        let ip_str = String::from_utf8_lossy(&output.stdout);
+        ip_str
+            .split_whitespace()
+            .find(|ip| !ip.starts_with("127.") && !ip.starts_with("100."))
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
+pub fn get_available_binds(port: u16) -> Vec<BindOption> {
+    let mut opts = vec![
+        BindOption {
+            id: "localhost".to_string(),
+            label: "Localhost only".to_string(),
+            address: format!("127.0.0.1:{port}"),
+        },
+    ];
+
+    if let Some(ts_ip) = detect_tailscale_ip() {
+        opts.push(BindOption {
+            id: "tailscale".to_string(),
+            label: format!("Tailscale ({})", ts_ip),
+            address: format!("{ts_ip}:{port}"),
+        });
+    }
+
+    if let Some(lan_ip) = detect_lan_ip() {
+        if lan_ip != "127.0.0.1" {
+            opts.push(BindOption {
+                id: "lan".to_string(),
+                label: format!("LAN ({})", lan_ip),
+                address: format!("{lan_ip}:{port}"),
+            });
+        }
+    }
+
+    opts.push(BindOption {
+        id: "all".to_string(),
+        label: "All interfaces (0.0.0.0)".to_string(),
+        address: format!("0.0.0.0:{port}"),
+    });
+
+    opts
+}
+
+pub fn resolve_bind_mode(mode: &str) -> String {
+    match mode {
+        "tailscale" => detect_tailscale_ip().unwrap_or_else(|| "127.0.0.1".to_string()),
+        "lan" => detect_lan_ip().unwrap_or_else(|| "127.0.0.1".to_string()),
+        "all" => "0.0.0.0".to_string(),
+        _ => "127.0.0.1".to_string(),
+    }
+}
+
+/// Infer the bind-mode id (`localhost`/`tailscale`/`lan`/`all`) from a stored bind address.
+pub fn bind_mode_of(addr: &str) -> &'static str {
+    match addr {
+        "127.0.0.1" | "localhost" => "localhost",
+        "0.0.0.0" => "all",
+        a if a.starts_with("100.") => "tailscale",
+        _ => "lan",
+    }
+}
+
+pub fn hash_password(password: &str) -> Option<String> {
+    use rand::thread_rng;
+    let salt = SaltString::generate(thread_rng());
+    let argon2 = Argon2::default();
+    argon2
+        .hash_password(password.as_bytes(), &salt)
+        .ok()
+        .map(|hash| hash.to_string())
+}
+
+fn verify_password(password: &str, hash: &str) -> bool {
+    if let Ok(parsed_hash) = PasswordHash::new(hash) {
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_ok()
+    } else {
+        false
+    }
+}
+
+// ── Session auth ────────────────────────────────────────────────────────────────
+
+/// Generate a 256-bit random session token, hex-encoded.
+fn generate_session_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Extract the `session` cookie value from request headers, if present.
+fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie
+        .split(';')
+        .filter_map(|p| p.trim().strip_prefix("session="))
+        .next()
+        .map(|s| s.to_string())
+}
+
+/// True if the request carries a valid session cookie.
+fn is_authed(state: &WebState, headers: &HeaderMap) -> bool {
+    match session_token_from_headers(headers) {
+        Some(token) => state.sessions.lock().unwrap().contains(&token),
+        None => false,
+    }
+}
+
+/// Whether a download/access password is configured.
+fn password_required(state: &WebState) -> bool {
+    state.config.lock().unwrap().web.download_password.is_some()
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    password: String,
+}
+
+/// `POST /api/login` — verify the password and issue a session cookie.
+async fn post_login(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<LoginRequest>,
+) -> Response {
+    let hash = state.config.lock().unwrap().web.download_password.clone();
+    let Some(hash) = hash else {
+        // No password configured; nothing to authenticate against.
+        return (StatusCode::OK, "no password set").into_response();
+    };
+    if !verify_password(&body.password, &hash) {
+        return (StatusCode::UNAUTHORIZED, "invalid password").into_response();
+    }
+    let token = generate_session_token();
+    state.sessions.lock().unwrap().insert(token.clone());
+    let cookie = format!("session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000");
+    ([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response()
+}
+
+/// `POST /api/logout` — invalidate the current session and clear the cookie.
+async fn post_logout(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(token) = session_token_from_headers(&headers) {
+        state.sessions.lock().unwrap().remove(&token);
+    }
+    let cookie = "session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
+    ([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response()
+}
+
+/// Middleware gating every route behind a session cookie when a password is set.
+/// With no password configured, all requests pass through unchanged (preserves
+/// the localhost-only default). `/api/login` is always reachable so users can
+/// authenticate; unauthenticated `GET /` is served a login page instead of the app.
+async fn auth_middleware(
+    State(state): State<Arc<WebState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !password_required(&state) {
+        return next.run(req).await;
+    }
+    let path = req.uri().path();
+    if path == "/api/login" {
+        return next.run(req).await;
+    }
+    if is_authed(&state, req.headers()) {
+        return next.run(req).await;
+    }
+    if path == "/" {
+        return (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            LOGIN_HTML,
+        )
+            .into_response();
+    }
+    (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 async fn get_index() -> impl IntoResponse {
@@ -284,12 +519,6 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
                 })
             })
             .collect();
-        let has_chapters = v.info_path.as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|val| val.get("chapters").cloned())
-            .map(|c| c.as_array().map(|a| !a.is_empty()).unwrap_or(false))
-            .unwrap_or(false);
         let resume_pos = positions.get(&v.id).copied().filter(|&p| p > 3.0);
         VideoInfo {
             id: v.id.clone(),
@@ -302,20 +531,16 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
             video_url,
             thumb_url,
             subtitles,
-            has_chapters,
+            has_chapters: v.has_chapters,
             resume_pos,
         }
     };
 
     let channels = lib.iter().map(|ch| {
-        let size_bytes: u64 = ch.videos.iter()
-            .chain(ch.playlists.iter().flat_map(|p| p.videos.iter()))
-            .filter_map(|v| v.file_size)
-            .sum();
         ChannelInfo {
             name: ch.name.clone(),
             total_videos: ch.total_videos(),
-            size_bytes,
+            size_bytes: ch.total_size_cached,
             subscriber_count: ch.meta.as_ref().and_then(|m| m.subscriber_count),
             uploader: ch.meta.as_ref().and_then(|m| m.uploader.clone()),
             channel_url: ch.meta.as_ref().and_then(|m| m.channel_url.clone()),
@@ -340,6 +565,8 @@ async fn post_download(
     State(state): State<Arc<WebState>>,
     Json(body): Json<StartDownloadRequest>,
 ) -> impl IntoResponse {
+    // Access control is handled centrally by auth_middleware; reaching here
+    // means the request is authenticated (or no password is configured).
     let url = body.url.trim().to_string();
     if url.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty URL").into_response();
@@ -353,10 +580,7 @@ async fn post_watched(
     State(state): State<Arc<WebState>>,
     Path(video_id): Path<String>,
 ) -> impl IntoResponse {
-    let db = match Database::open(&state.db_path) {
-        Ok(d) => d,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
+    let db = state.db.lock().unwrap();
     let mut watched = state.watched.lock().unwrap();
     let now_watched = !watched.contains(&video_id);
     if let Err(e) = db.set_watched(&video_id, now_watched) {
@@ -367,10 +591,20 @@ async fn post_watched(
 }
 
 async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    let source_url = state.config.lock().unwrap().web.source_url.clone();
+    let cfg = state.config.lock().unwrap();
+    let source_url = cfg.web.source_url.clone();
+    let port = cfg.web.port;
+    let current_bind = cfg.web.bind.clone();
+    let available_binds = get_available_binds(port);
+    let download_password_required = cfg.web.download_password.is_some();
     Json(SettingsPayload {
         transcode: state.transcode.load(Ordering::Relaxed),
         source_url,
+        current_bind: Some(format!("{}:{}", current_bind, port)),
+        available_binds: Some(available_binds),
+        bind_mode: None,
+        download_password_required,
+        new_download_password: None,
     })
 }
 
@@ -381,12 +615,42 @@ async fn post_settings(
     state.transcode.store(body.transcode, Ordering::Relaxed);
     let mut cfg = state.config.lock().unwrap();
     cfg.web.transcode = body.transcode;
+
+    if let Some(new_mode) = &body.bind_mode {
+        let new_addr = resolve_bind_mode(new_mode);
+        cfg.web.bind = new_addr;
+    }
+
+    if let Some(new_pwd) = &body.new_download_password {
+        if new_pwd.is_empty() {
+            cfg.web.download_password = None;
+        } else if let Some(hashed) = hash_password(new_pwd) {
+            cfg.web.download_password = Some(hashed);
+        } else {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to hash password").into_response();
+        }
+        // Password changed: drop all existing sessions so they must re-authenticate.
+        state.sessions.lock().unwrap().clear();
+    }
+
     if let Err(e) = cfg.save(&state.config_path) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("save failed: {e}")).into_response();
     }
     let source_url = cfg.web.source_url.clone();
+    let current_bind = cfg.web.bind.clone();
+    let port = cfg.web.port;
+    let available_binds = get_available_binds(port);
+    let download_password_required = cfg.web.download_password.is_some();
     drop(cfg);
-    Json(SettingsPayload { transcode: body.transcode, source_url }).into_response()
+    Json(SettingsPayload {
+        transcode: body.transcode,
+        source_url,
+        current_bind: Some(format!("{}:{}", current_bind, port)),
+        available_binds: Some(available_binds),
+        bind_mode: None,
+        download_password_required,
+        new_download_password: None,
+    }).into_response()
 }
 
 async fn get_transcode(
@@ -466,14 +730,13 @@ async fn post_resume(
     Path(video_id): Path<String>,
     Json(body): Json<ResumeBody>,
 ) -> impl IntoResponse {
-    if let Ok(db) = Database::open(&state.db_path) {
-        if body.position > 3.0 {
-            let _ = db.set_position(&video_id, body.position);
-            state.positions.lock().unwrap().insert(video_id, body.position);
-        } else {
-            let _ = db.clear_position(&video_id);
-            state.positions.lock().unwrap().remove(&video_id);
-        }
+    let db = state.db.lock().unwrap();
+    if body.position > 3.0 {
+        let _ = db.set_position(&video_id, body.position);
+        state.positions.lock().unwrap().insert(video_id, body.position);
+    } else {
+        let _ = db.clear_position(&video_id);
+        state.positions.lock().unwrap().remove(&video_id);
     }
     (StatusCode::OK, "ok")
 }
@@ -611,13 +874,52 @@ async fn get_description(
 async fn post_rescan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let new_lib = library::scan_channels(&state.channels_root);
     // Refresh watched from DB after rescan
-    if let Ok(db) = Database::open(&state.db_path) {
-        if let Ok(w) = db.get_watched() {
-            *state.watched.lock().unwrap() = w;
-        }
+    if let Ok(w) = state.db.lock().unwrap().get_watched() {
+        *state.watched.lock().unwrap() = w;
     }
     *state.library.lock().unwrap() = new_lib;
     (StatusCode::OK, "rescanned")
+}
+
+/// `GET /api/maintenance/scan` — report duplicate videos and missing assets.
+async fn get_maintenance_scan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let lib = state.library.lock().unwrap();
+    let report = maintenance::scan(&state.channels_root, &lib);
+    Json(report)
+}
+
+#[derive(Deserialize)]
+struct RemoveRequest {
+    paths: Vec<PathBuf>,
+}
+
+/// `POST /api/maintenance/remove` — delete the listed duplicate files.
+/// Paths outside the library root are refused.
+async fn post_maintenance_remove(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<RemoveRequest>,
+) -> impl IntoResponse {
+    let (removed, errors) = maintenance::remove_files(&state.channels_root, &body.paths);
+    // Refresh the library so the removed copies disappear from the UI.
+    let new_lib = library::scan_channels(&state.channels_root);
+    *state.library.lock().unwrap() = new_lib;
+    Json(serde_json::json!({ "removed": removed, "errors": errors }))
+}
+
+/// `POST /api/maintenance/repair/:id` — re-fetch missing sidecars for one video.
+async fn post_maintenance_repair(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let target = {
+        let lib = state.library.lock().unwrap();
+        maintenance::locate(&lib, &id)
+    };
+    let Some((dir, stem)) = target else {
+        return (StatusCode::NOT_FOUND, "video not found in library").into_response();
+    };
+    state.downloader.lock().unwrap().repair(&id, &dir, &stem);
+    (StatusCode::ACCEPTED, "repair queued").into_response()
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -648,9 +950,10 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .join("config.toml");
 
     let library = library::scan_channels(&channels_root);
-    let db = Database::open(&db_path);
-    let watched = db.as_ref().ok().and_then(|d| d.get_watched().ok()).unwrap_or_default();
-    let positions = db.as_ref().ok().and_then(|d| d.get_positions().ok()).unwrap_or_default();
+    let db = Database::open(&db_path)
+        .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
+    let watched = db.get_watched().unwrap_or_default();
+    let positions = db.get_positions().unwrap_or_default();
 
     let downloader = Downloader::new(channels_root.clone(), config.player.browser.clone());
     let transcode = AtomicBool::new(config.web.transcode);
@@ -662,11 +965,12 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         downloader: Mutex::new(downloader),
         watched: Mutex::new(watched),
         positions: Mutex::new(positions),
-        db_path,
+        db: Mutex::new(db),
         channels_root: channels_root.clone(),
         config_path,
         config: Mutex::new(config),
         transcode,
+        sessions: Mutex::new(HashSet::new()),
     });
 
     let app = Router::new()
@@ -685,10 +989,15 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/metadata/:id", get(get_metadata))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/transcode/:id", get(get_transcode))
+        .route("/api/maintenance/scan", get(get_maintenance_scan))
+        .route("/api/maintenance/remove", post(post_maintenance_remove))
+        .route("/api/maintenance/repair/:id", post(post_maintenance_repair))
+        .route("/api/login", post(post_login))
+        .route("/api/logout", post(post_logout))
         .nest_service("/files", ServeDir::new(&channels_root))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state);
 
-    let bind_addr = &config.web.bind;
     let listener = match tokio::net::TcpListener::bind(format!("{bind_addr}:{port}")).await {
         Ok(l) => l,
         Err(e) => {
@@ -711,6 +1020,45 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
 
 // ── Embedded UI ───────────────────────────────────────────────────────────────
 
+/// Standalone login page served at `GET /` when a password is set and the
+/// request is unauthenticated. Posts to `/api/login` and reloads on success.
+const LOGIN_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yt-offline — Sign in</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#1a1a2e;color:#eee;font:14px/1.5 system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh}
+  .box{background:#16213e;border:1px solid #334;border-radius:8px;padding:28px;width:300px;display:flex;flex-direction:column;gap:12px}
+  h1{font-size:1.1em;text-align:center}
+  input{background:#0f3460;border:1px solid #334;color:#eee;padding:9px 11px;border-radius:4px;font-size:14px}
+  button{background:#e94560;border:none;color:#fff;padding:9px;border-radius:4px;cursor:pointer;font-size:14px;font-weight:600}
+  .err{color:#f87171;font-size:12px;text-align:center;min-height:16px}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>yt-offline</h1>
+  <input type="password" id="pwd" placeholder="Password" autofocus onkeydown="if(event.key==='Enter')login()">
+  <button onclick="login()">Sign in</button>
+  <div class="err" id="err"></div>
+</div>
+<script>
+'use strict';
+async function login(){
+  const pwd=document.getElementById('pwd').value;
+  const err=document.getElementById('err');
+  err.textContent='';
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
+    if(r.ok){location.reload()}else{err.textContent='Invalid password'}
+  }catch{err.textContent='Connection error'}
+}
+</script>
+</body>
+</html>"#;
+
 const HTML_UI: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -722,6 +1070,11 @@ const HTML_UI: &str = r#"<!DOCTYPE html>
   .theme-solarized{--bg:#002b36;--panel:#073642;--card:#004052;--accent:#268bd2;--text:#839496;--muted:#586e75;--border:#144}
   .theme-nord{--bg:#2e3440;--panel:#3b4252;--card:#434c5e;--accent:#88c0d0;--text:#eceff4;--muted:#9aa;--border:#4c566a}
   .theme-amoled{--bg:#000;--panel:#0a0a0a;--card:#111;--accent:#e94560;--text:#eee;--muted:#666;--border:#222}
+  .theme-dracula{--bg:#282a36;--panel:#282a36;--card:#343746;--accent:#bd93f9;--text:#f8f8f2;--muted:#6272a4;--border:#44475a}
+  .theme-trans{--bg:#e8f7fd;--panel:#fef0f4;--card:#fce8f2;--accent:#55cdfc;--text:#cc0066;--muted:#888;--border:#f7a8b8}
+  .theme-emo-nocturnal{--bg:#0a0a0a;--panel:#0d0d0d;--card:#1a1a1a;--accent:#ff0090;--text:#e8e8e8;--muted:#888;--border:#2a2a2a}
+  .theme-emo-coffin{--bg:#0d0009;--panel:#110010;--card:#1a0018;--accent:#cc2222;--text:#c0c0c0;--muted:#666;--border:#3a0030}
+  .theme-emo-scene-queen{--bg:#080818;--panel:#0a0a1e;--card:#111128;--accent:#39ff14;--text:#c8c8ff;--muted:#666;--border:#222244}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif;display:flex;flex-direction:column;height:100vh;overflow:hidden}
   header{background:var(--panel);padding:8px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap}
@@ -830,6 +1183,7 @@ const HTML_UI: &str = r#"<!DOCTYPE html>
   </select>
   <span id="hdr-stats"></span>
   <button onclick="rescan()" title="Rescan library">⟳</button>
+  <button onclick="openMaintenance()" title="Library health">🩺</button>
   <button onclick="openSettings()">⚙</button>
   <span id="status"></span>
 </header>
@@ -1022,9 +1376,11 @@ async function previewDownload(){
   }
 }
 async function confirmDownload(url,btn){
-  btn.closest('.modal-bg').remove();
-  try{await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});document.getElementById('dl-url').value='';setStatus('Download queued…')}
-  catch(e){setStatus('Error: '+e.message)}
+  if(btn)btn.closest('.modal-bg').remove();
+  try{
+    await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    document.getElementById('dl-url').value='';setStatus('Download queued…')
+  }catch(e){setStatus('Error: '+e.message)}
 }
 async function downloadChannel(url){try{await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});setStatus('Checking for new videos…')}catch(e){setStatus('Error: '+e.message)}}
 async function downloadChannelByIdx(i){await downloadChannel(channelUrls[i]||'https://www.youtube.com/@'+library[i].name)}
@@ -1166,15 +1522,26 @@ async function showMetadata(id){
 function switchMetaTab(tab,which){tab.parentElement.querySelectorAll('.meta-tab').forEach(t=>t.classList.remove('active'));tab.classList.add('active');document.getElementById('meta-summary').style.display=which==='summary'?'':'none';document.getElementById('meta-raw').style.display=which==='raw'?'':'none'}
 
 /* ── Settings ───────────────────────────────────────────────────── */
-const THEMES=[['dark','Dark'],['light','Light'],['solarized','Solarized'],['nord','Nord'],['amoled','AMOLED']];
+const THEMES=[['dark','Dark'],['light','Light'],['dracula','Dracula'],['trans','Trans'],['emo-nocturnal','Emo: Nocturnal'],['emo-coffin','Emo: Coffin'],['emo-scene-queen','Emo: Scene Queen'],['solarized','Solarized'],['nord','Nord'],['amoled','AMOLED']];
 function applyTheme(t){document.body.className=t==='dark'?'':'theme-'+t;localStorage.setItem('theme',t)}
 
+async function logout(){try{await fetch('/api/logout',{method:'POST'});location.reload()}catch{}}
+
 async function openSettings(){
-  let cur={transcode:false,source_url:null};try{cur=await(await api('/api/settings')).json()}catch{}
+  let cur={transcode:false,source_url:null,current_bind:null,available_binds:[],download_password_required:false};try{cur=await(await api('/api/settings')).json()}catch{}
   const savedTheme=localStorage.getItem('theme')||'dark';
   const srcRow=cur.source_url
     ?`<div class="settings-hint" style="margin-top:8px">Source code: <a href="${esc(cur.source_url)}" target="_blank">${esc(cur.source_url)}</a> (AGPL-3.0)</div>`
     :`<div class="settings-hint" style="margin-top:8px;color:var(--muted)">AGPL-3.0 — set <code>web.source_url</code> in config.toml to link source code</div>`;
+  const bindRows=cur.available_binds?.length?`<div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
+      <label>Binding</label>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Current: <code style="background:var(--bg);padding:2px 4px;border-radius:2px">${esc(cur.current_bind||'unknown')}</code></div>
+      <select id="cf-bind" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px;width:100%">
+        ${cur.available_binds.map(b=>`<option value="${esc(b.id)}">${esc(b.label)}</option>`).join('')}
+      </select>
+      <div class="settings-hint">Change requires restart. Access from: tailscale, LAN, or all interfaces.</div>
+    </div>`:''
+  const logoutBtn=cur.download_password_required?`<button onclick="logout()">Log out</button>`:'';
   const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
   bg.innerHTML=`<div class="modal" style="max-width:420px">
     <div class="modal-hdr"><h2>Settings</h2></div>
@@ -1189,8 +1556,18 @@ async function openSettings(){
         ${THEMES.map(([id,label])=>`<option value="${id}"${savedTheme===id?' selected':''}>${label}</option>`).join('')}
       </select>
     </div>
+    <div class="settings-row">
+      <label for="cf-download-pwd">Require password to access UI</label>
+      <input type="checkbox" id="cf-download-pwd" ${cur.download_password_required?'checked':''} onchange="document.getElementById('cf-pwd-input').style.display=this.checked?'flex':'none'">
+    </div>
+    <div id="cf-pwd-input" style="display:${cur.download_password_required?'flex':'none'};flex-direction:column;gap:4px;margin-bottom:10px">
+      <input type="password" id="cf-download-password" placeholder="New password (leave empty to disable)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 8px;border-radius:4px">
+      <div class="settings-hint">Gates the whole UI and all API access. Leave empty to disable on save; changing it logs out other sessions.</div>
+    </div>
+    ${bindRows}
     ${srcRow}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      ${logoutBtn}
       <button onclick="this.closest('.modal-bg').remove()">Cancel</button>
       <button class="primary" onclick="saveSettings(this)">Save</button>
     </div>
@@ -1200,10 +1577,103 @@ async function openSettings(){
 
 async function saveSettings(btn){
   const transcode=document.getElementById('cf-transcode').checked;
+  const bindMode=document.getElementById('cf-bind')?.value;
+  const pwdCheckbox=document.getElementById('cf-download-pwd');
+  const pwdInput=document.getElementById('cf-download-password');
+  const payload={transcode};
+  if(bindMode)payload.bind_mode=bindMode;
+  if(pwdCheckbox&&pwdCheckbox.checked){
+    payload.new_download_password=pwdInput?.value||'';
+  }
+  const settingPwd=pwdCheckbox&&pwdCheckbox.checked&&pwdInput?.value;
   try{
-    await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({transcode})});
-    setStatus('Saved.');btn.closest('.modal-bg').remove();await loadLibrary();
+    await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    btn.closest('.modal-bg').remove();
+    if(settingPwd){setStatus('Password set — signing in again…');location.reload();return}
+    let msg='Saved.';
+    if(bindMode)msg='Settings saved. Restart required for binding change.';
+    if(pwdCheckbox&&pwdCheckbox.checked&&!pwdInput?.value)msg='Password disabled. '+msg;
+    setStatus(msg);await loadLibrary();
   }catch(e){setStatus('Error: '+e.message)}
+}
+
+/* ── Maintenance (library health) ───────────────────────────────── */
+async function openMaintenance(){
+  const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  bg.innerHTML=`<div class="modal" style="max-width:760px;width:100%">
+    <div class="modal-hdr"><h2>Library health</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div id="maint-body" style="overflow:auto;max-height:75vh"><em style="color:var(--muted)">Scanning…</em></div>
+  </div>`;
+  document.body.appendChild(bg);
+  try{
+    const r=await(await api('/api/maintenance/scan')).json();
+    renderMaintenance(r);
+  }catch(e){document.getElementById('maint-body').innerHTML=`<div style="color:#f87171">Scan failed: ${esc(e.message)}</div>`}
+}
+
+function renderMaintenance(r){
+  const body=document.getElementById('maint-body');if(!body)return;
+  const dups=r.duplicates||[],miss=r.missing||[];
+  let h='';
+  h+=`<h3 style="font-size:13px;margin:4px 0 8px">Duplicates (${dups.length})</h3>`;
+  if(!dups.length){h+='<div style="color:var(--muted);font-size:12px;margin-bottom:12px">No duplicate video IDs found.</div>'}
+  else{
+    for(const g of dups){
+      h+=`<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px">
+        <div style="font-weight:600;font-size:12px;margin-bottom:6px">${esc(g.title)} <span style="color:var(--muted)">[${esc(g.id)}]</span></div>`;
+      g.copies.forEach((c,i)=>{
+        const tag=c.recommended_keep?'<span style="color:#4ade80">keep</span>':'<span style="color:#f87171">remove</span>';
+        const size=c.file_size?fmtSize(c.file_size):'no video';
+        h+=`<label style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
+          <input type="checkbox" class="dup-chk" data-files='${esc(JSON.stringify(c.files))}' ${c.recommended_keep?'':'checked'}>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.location||'(unknown)')} · ${size} · ${c.files.length} files</span>
+          ${tag}
+        </label>`;
+      });
+      h+=`</div>`;
+    }
+    h+=`<button class="primary" onclick="removeDuplicates(this)">🗑 Remove checked copies</button>`;
+  }
+  h+=`<h3 style="font-size:13px;margin:16px 0 8px">Missing assets (${miss.length})</h3>`;
+  if(!miss.length){h+='<div style="color:var(--muted);font-size:12px">Every video has its thumbnail, metadata, and description.</div>'}
+  else{
+    if(miss.length>1)h+=`<button onclick="repairAll(this)" style="margin-bottom:8px">⬇ Fetch all missing (${miss.length})</button>`;
+    for(const m of miss){
+      const need=[m.missing_thumbnail?'thumbnail':null,m.missing_info?'metadata':null,m.missing_description?'description':null].filter(Boolean).join(', ');
+      h+=`<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.title)} <span style="color:var(--muted)">— missing ${need}</span></span>
+        <button onclick="repairVideo('${esc(m.id)}',this)">⬇ Fetch</button>
+      </div>`;
+    }
+  }
+  body.innerHTML=h;
+}
+
+async function removeDuplicates(btn){
+  const chks=[...document.querySelectorAll('.dup-chk:checked')];
+  let paths=[];
+  for(const c of chks){try{paths=paths.concat(JSON.parse(c.dataset.files))}catch{}}
+  if(!paths.length){setStatus('Nothing selected.');return}
+  if(!confirm(`Delete ${paths.length} file(s)? This cannot be undone.`))return;
+  btn.disabled=true;
+  try{
+    const r=await(await api('/api/maintenance/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths})})).json();
+    setStatus(`Removed ${r.removed} file(s)`+(r.errors&&r.errors.length?`, ${r.errors.length} error(s)`:''));
+    await loadLibrary();
+    const fresh=await(await api('/api/maintenance/scan')).json();renderMaintenance(fresh);
+  }catch(e){setStatus('Error: '+e.message)}finally{btn.disabled=false}
+}
+
+async function repairVideo(id,btn){
+  if(btn){btn.disabled=true;btn.textContent='⏳ Queued'}
+  try{await api('/api/maintenance/repair/'+encodeURIComponent(id),{method:'POST'});setStatus('Repair queued — see Downloads')}
+  catch(e){setStatus('Error: '+e.message);if(btn){btn.disabled=false;btn.textContent='⬇ Fetch'}}
+}
+async function repairAll(btn){
+  btn.disabled=true;
+  const buttons=[...document.querySelectorAll('#maint-body button')].filter(b=>b.textContent.includes('Fetch')&&b!==btn);
+  for(const b of buttons){const id=b.getAttribute('onclick')?.match(/repairVideo\('([^']+)'/)?.[1];if(id)await repairVideo(id,b)}
+  setStatus('All repairs queued — see Downloads');
 }
 
 /* ── Jobs ───────────────────────────────────────────────────────── */

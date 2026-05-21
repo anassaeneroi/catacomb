@@ -18,6 +18,7 @@ mod config;
 mod database;
 mod downloader;
 mod library;
+mod maintenance;
 mod theme;
 mod web;
 

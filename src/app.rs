@@ -97,6 +97,13 @@ pub struct App {
     // Web server
     web_server_running: bool,
     web_server_shutdown: Option<Sender<()>>,
+    // Settings-window scratch state (not persisted directly)
+    settings_bind_mode: String,
+    settings_password_enabled: bool,
+    settings_password_input: String,
+    // Maintenance (library health) window
+    show_maintenance: bool,
+    health_report: Option<crate::maintenance::HealthReport>,
 }
 
 impl App {
@@ -131,6 +138,8 @@ impl App {
         let resume_positions = db.get_positions().unwrap_or_default();
 
         let browser = config.player.browser.clone();
+        let config_bind = config.web.bind.clone();
+        let password_set = config.web.download_password.is_some();
 
         let (thumb_request_tx, thumb_request_rx) = std::sync::mpsc::channel::<PathBuf>();
         let (thumb_result_tx, thumb_result_rx) =
@@ -181,6 +190,11 @@ impl App {
             library_generation: 0,
             web_server_running: false,
             web_server_shutdown: None,
+            settings_bind_mode: crate::web::bind_mode_of(&config_bind).to_string(),
+            settings_password_enabled: password_set,
+            settings_password_input: String::new(),
+            show_maintenance: false,
+            health_report: None,
         }
     }
 
@@ -189,7 +203,20 @@ impl App {
         self.sidebar_view = SidebarView::All;
         self.selected_video = None;
         self.desc_cache.clear();
-        self.textures.clear();
+        // Keep already-decoded thumbnail textures across rescans — they're keyed
+        // by file path and don't change. Drop only entries whose thumbnail is no
+        // longer in the library so removed videos don't leak GPU textures. This
+        // avoids the full thumbnail reload flicker on every rescan.
+        let valid: HashSet<PathBuf> = self
+            .library
+            .iter()
+            .flat_map(|c| c.videos.iter().chain(c.playlists.iter().flat_map(|p| p.videos.iter())))
+            .filter_map(|v| v.thumb_path.clone())
+            .collect();
+        self.textures.retain(|p, _| valid.contains(p));
+        self.thumb_pending.retain(|p| valid.contains(p));
+        // Bump the generation so the card cache recomputes against the new library.
+        self.library_generation += 1;
         self.status = format!(
             "Rescanned: {} channels, {} videos",
             self.library.len(),
@@ -531,10 +558,22 @@ impl App {
                 if ui.selectable_label(self.show_downloads, dl_label).clicked() {
                     self.show_downloads = !self.show_downloads;
                 }
+                if ui.selectable_label(self.show_maintenance, "🩺 Maintenance").clicked() {
+                    self.show_maintenance = !self.show_maintenance;
+                    if self.show_maintenance {
+                        self.health_report =
+                            Some(crate::maintenance::scan(&self.channels_root, &self.library));
+                    }
+                }
                 if ui.selectable_label(self.show_settings, "⚙ Settings").clicked() {
                     self.show_settings = !self.show_settings;
                     if self.show_settings {
                         self.settings_dir = self.channels_root.display().to_string();
+                        self.settings_bind_mode =
+                            crate::web::bind_mode_of(&self.config.web.bind).to_string();
+                        self.settings_password_enabled =
+                            self.config.web.download_password.is_some();
+                        self.settings_password_input.clear();
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -769,6 +808,128 @@ impl App {
             });
     }
 
+    fn maintenance_window(&mut self, ctx: &egui::Context) {
+        if !self.show_maintenance {
+            return;
+        }
+        let mut open = self.show_maintenance;
+        let report = self.health_report.clone().unwrap_or_default();
+
+        // Actions are collected during rendering and applied after the closure
+        // to avoid borrowing `self` while the report is borrowed immutably.
+        let mut to_remove: Vec<PathBuf> = Vec::new();
+        let mut to_repair: Vec<String> = Vec::new();
+        let mut rescan_health = false;
+
+        egui::Window::new("🩺 Library health")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(620.0)
+            .default_height(500.0)
+            .show(ctx, |ui| {
+                if ui.button("⟳ Rescan health").clicked() {
+                    rescan_health = true;
+                }
+                ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading(format!("Duplicates ({})", report.duplicates.len()));
+                    if report.duplicates.is_empty() {
+                        ui.label(egui::RichText::new("No duplicate video IDs found.").weak());
+                    }
+                    for g in &report.duplicates {
+                        ui.group(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} [{}]", g.title, g.id)).strong(),
+                            );
+                            for c in &g.copies {
+                                let size = c
+                                    .file_size
+                                    .map(format_size)
+                                    .unwrap_or_else(|| "no video".to_string());
+                                let tag = if c.recommended_keep { "✓ keep" } else { "✗ remove" };
+                                ui.label(format!(
+                                    "  {} · {} · {} files — {}",
+                                    c.location, size, c.files.len(), tag
+                                ));
+                            }
+                            if ui.button("🗑 Remove non-recommended copies").clicked() {
+                                for c in &g.copies {
+                                    if !c.recommended_keep {
+                                        to_remove.extend(c.files.iter().cloned());
+                                    }
+                                }
+                            }
+                        });
+                    }
+
+                    ui.add_space(10.0);
+                    ui.heading(format!("Missing assets ({})", report.missing.len()));
+                    if report.missing.is_empty() {
+                        ui.label(
+                            egui::RichText::new(
+                                "Every video has its thumbnail, metadata, and description.",
+                            )
+                            .weak(),
+                        );
+                    }
+                    if report.missing.len() > 1
+                        && ui
+                            .button(format!("⬇ Fetch all missing ({})", report.missing.len()))
+                            .clicked()
+                    {
+                        for m in &report.missing {
+                            to_repair.push(m.id.clone());
+                        }
+                    }
+                    for m in &report.missing {
+                        ui.horizontal(|ui| {
+                            let need: Vec<&str> = [
+                                m.missing_thumbnail.then_some("thumbnail"),
+                                m.missing_info.then_some("metadata"),
+                                m.missing_description.then_some("description"),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .collect();
+                            ui.label(format!("{} — missing {}", m.title, need.join(", ")));
+                            if ui.button("⬇ Fetch").clicked() {
+                                to_repair.push(m.id.clone());
+                            }
+                        });
+                    }
+                });
+            });
+        self.show_maintenance = open;
+
+        // ── Apply collected actions ────────────────────────────────────────
+        let mut changed = false;
+        if !to_remove.is_empty() {
+            let (removed, errors) =
+                crate::maintenance::remove_files(&self.channels_root, &to_remove);
+            self.status = if errors.is_empty() {
+                format!("Removed {removed} file(s)")
+            } else {
+                format!("Removed {removed} file(s), {} error(s)", errors.len())
+            };
+            changed = true;
+        }
+        if !to_repair.is_empty() {
+            for id in &to_repair {
+                if let Some((dir, stem)) = crate::maintenance::locate(&self.library, id) {
+                    self.downloader.repair(id, &dir, &stem);
+                }
+            }
+            self.status = format!("Queued {} repair(s) — see Downloads", to_repair.len());
+            self.show_downloads = true;
+        }
+        if changed || rescan_health {
+            self.rescan();
+            self.health_report =
+                Some(crate::maintenance::scan(&self.channels_root, &self.library));
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
@@ -864,6 +1025,45 @@ impl App {
                         );
                         ui.end_row();
 
+                        ui.label("Bind interface:");
+                        let binds = crate::web::get_available_binds(self.config.web.port);
+                        let selected_label = binds
+                            .iter()
+                            .find(|b| b.id == self.settings_bind_mode)
+                            .map(|b| b.label.clone())
+                            .unwrap_or_else(|| "Localhost only".to_string());
+                        egui::ComboBox::from_id_salt("bind_combo")
+                            .selected_text(selected_label)
+                            .show_ui(ui, |ui| {
+                                for b in &binds {
+                                    if ui
+                                        .selectable_label(self.settings_bind_mode == b.id, &b.label)
+                                        .clicked()
+                                    {
+                                        self.settings_bind_mode = b.id.clone();
+                                    }
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Download password:");
+                        ui.vertical(|ui| {
+                            ui.checkbox(&mut self.settings_password_enabled, "require for web downloads");
+                            if self.settings_password_enabled {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.settings_password_input)
+                                        .password(true)
+                                        .desired_width(220.0)
+                                        .hint_text(if self.config.web.download_password.is_some() {
+                                            "leave blank to keep current"
+                                        } else {
+                                            "set a password"
+                                        }),
+                                );
+                            }
+                        });
+                        ui.end_row();
+
                         ui.label("Web server:");
                         ui.horizontal(|ui| {
                             if self.web_server_running {
@@ -890,6 +1090,23 @@ impl App {
                         let new_dir = PathBuf::from(&self.settings_dir);
                         let dir_changed = new_dir != self.config.backup.directory;
                         self.config.backup.directory = new_dir.clone();
+
+                        // Resolve the chosen interface to a concrete bind address.
+                        let new_bind = crate::web::resolve_bind_mode(&self.settings_bind_mode);
+                        let bind_changed = new_bind != self.config.web.bind;
+                        self.config.web.bind = new_bind;
+
+                        // Apply the download-password setting.
+                        if !self.settings_password_enabled {
+                            self.config.web.download_password = None;
+                        } else if !self.settings_password_input.is_empty() {
+                            match crate::web::hash_password(&self.settings_password_input) {
+                                Some(hash) => self.config.web.download_password = Some(hash),
+                                None => self.status = "Error hashing password".to_string(),
+                            }
+                            self.settings_password_input.clear();
+                        }
+
                         match self.config.save(&self.config_path) {
                             Ok(_) => self.status = "Settings saved.".to_string(),
                             Err(e) => self.status = format!("Error saving config: {e}"),
@@ -899,6 +1116,12 @@ impl App {
                             self.downloader.channels_root = new_dir;
                             let _ = std::fs::create_dir_all(&self.channels_root);
                             self.rescan();
+                        }
+                        // Re-bind a running server so the new interface takes effect now.
+                        if bind_changed && self.web_server_running {
+                            self.stop_web_server();
+                            self.start_web_server();
+                            self.status = "Settings saved. Web server re-bound.".to_string();
                         }
                     }
                     ui.label(
@@ -1334,6 +1557,7 @@ impl eframe::App for App {
             self.downloads_panel(ctx);
         }
         self.settings_window(ctx);
+        self.maintenance_window(ctx);
         self.detail_panel(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             self.video_list(ctx, ui);

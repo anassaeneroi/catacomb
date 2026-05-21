@@ -133,7 +133,6 @@ impl Downloader {
     /// The output path template is derived from `kind` so that channels,
     /// playlists, and individual videos land in the right sub-directories.
     pub fn start(&mut self, url: String, kind: &UrlKind) {
-        let (tx, rx) = channel();
         let archive_path = self.channels_root.join("archive.txt");
 
         let (out_arg, label) = match kind {
@@ -155,41 +154,82 @@ impl Downloader {
             ),
         };
 
-        let url_for_thread = url.clone();
-        thread::spawn(move || {
-            let mut cmd = Command::new("yt-dlp");
-            cmd.arg("--newline")
-                .arg("--no-color")
-                .arg("--cookies")
-                .arg("cookies.txt")
-                .arg("--write-subs")
-                .arg("--write-auto-subs")
-                .arg("--write-thumbnail")
-                .arg("--write-description")
-                .arg("--write-info-json")
-                .arg("--remux-video")
-                .arg("mkv")
-                .arg("--embed-metadata")
-                .arg("--embed-info-json")
-                .arg("--embed-chapters")
-                .arg("--xattrs")
-                .arg("--sponsorblock-mark")
-                .arg("all")
-                .arg("--extractor-args")
-                .arg("youtube:player_client=web")
-                .arg("--progress")
-                .arg("--break-on-existing")
-                .arg("--download-archive")
-                .arg(archive_path.display().to_string())
-                .arg("--impersonate")
-                .arg("Chrome-146:Macos-26")
-                .arg("-o")
-                .arg(&out_arg)
-                .arg(&url_for_thread)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+        let mut cmd = Command::new("yt-dlp");
+        cmd.arg("--newline")
+            .arg("--no-color")
+            .arg("--cookies")
+            .arg("cookies.txt")
+            .arg("--write-subs")
+            .arg("--write-auto-subs")
+            .arg("--write-thumbnail")
+            .arg("--write-description")
+            .arg("--write-info-json")
+            .arg("--remux-video")
+            .arg("mkv")
+            .arg("--embed-metadata")
+            .arg("--embed-info-json")
+            .arg("--embed-chapters")
+            .arg("--xattrs")
+            .arg("--sponsorblock-mark")
+            .arg("all")
+            .arg("--extractor-args")
+            .arg("youtube:player_client=web")
+            .arg("--progress")
+            .arg("--break-on-existing")
+            .arg("--download-archive")
+            .arg(archive_path.display().to_string())
+            .arg("--impersonate")
+            .arg("Chrome-146:Macos-26")
+            .arg("-o")
+            .arg(&out_arg)
+            .arg(&url);
 
+        self.spawn_job(cmd, url, label);
+    }
+
+    /// Re-fetch missing sidecar assets (thumbnail, info.json, description,
+    /// subtitles) for a single video without re-downloading the video itself.
+    ///
+    /// `dir`/`stem` come from the existing file on disk so the fetched sidecars
+    /// land with exactly the same filename stem and associate with the video.
+    pub fn repair(&mut self, video_id: &str, dir: &std::path::Path, stem: &str) {
+        let _ = std::fs::create_dir_all(dir);
+        // Escape literal `%` so yt-dlp doesn't treat it as an output field.
+        let safe_stem = stem.replace('%', "%%");
+        let out_arg = format!("{}/{}.%(ext)s", dir.display(), safe_stem);
+        let url = format!("https://www.youtube.com/watch?v={video_id}");
+        let label = format!("repair {stem}");
+
+        let mut cmd = Command::new("yt-dlp");
+        cmd.arg("--newline")
+            .arg("--no-color")
+            .arg("--skip-download")
+            .arg("--cookies")
+            .arg("cookies.txt")
+            .arg("--write-thumbnail")
+            .arg("--write-info-json")
+            .arg("--write-description")
+            .arg("--write-subs")
+            .arg("--write-auto-subs")
+            .arg("--extractor-args")
+            .arg("youtube:player_client=web")
+            .arg("--impersonate")
+            .arg("Chrome-146:Macos-26")
+            .arg("-o")
+            .arg(&out_arg)
+            .arg(&url);
+
+        self.spawn_job(cmd, url, label);
+    }
+
+    /// Spawn `cmd` on a background thread, streaming its output into a new [`Job`].
+    fn spawn_job(&mut self, mut cmd: Command, url: String, label: String) {
+        let (tx, rx) = channel();
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        thread::spawn(move || {
             let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(err) => {
