@@ -39,6 +39,21 @@ pub enum UrlKind {
     Unknown,
 }
 
+/// Build a YouTube URL from a library folder name that yt-dlp will resolve to
+/// the same folder it already downloaded to.
+///
+/// Folder names that look like a channel ID (`UC` + 22 chars) use the
+/// `/channel/` form; everything else is treated as a handle and gets `/@`.
+/// This avoids the mismatch where info.json's canonical `channel_url` field
+/// points to `/channel/UCxxx` and yt-dlp then creates a second folder.
+pub fn check_url_for_folder(folder_name: &str) -> String {
+    if folder_name.starts_with("UC") && folder_name.len() == 24 {
+        format!("https://www.youtube.com/channel/{folder_name}")
+    } else {
+        format!("https://www.youtube.com/@{folder_name}")
+    }
+}
+
 /// Classify a YouTube URL into a [`UrlKind`] by inspecting its path.
 pub fn detect_url_kind(url: &str) -> UrlKind {
     if url.contains("playlist?list=") {
@@ -132,7 +147,13 @@ impl Downloader {
     ///
     /// The output path template is derived from `kind` so that channels,
     /// playlists, and individual videos land in the right sub-directories.
-    pub fn start(&mut self, url: String, kind: &UrlKind) {
+    ///
+    /// When `full_scan` is false (default / incremental mode) `--break-on-existing`
+    /// is passed so yt-dlp stops as soon as it hits the first already-archived
+    /// video — fast for routine channel checks.  When `full_scan` is true the
+    /// flag is omitted so every video is checked individually against the
+    /// download archive; slower, but correctly fills gaps in the history.
+    pub fn start(&mut self, url: String, kind: &UrlKind, full_scan: bool) {
         let archive_path = self.channels_root.join("archive.txt");
 
         let (out_arg, label) = match kind {
@@ -178,9 +199,11 @@ impl Downloader {
             .arg("all")
             .arg("--extractor-args")
             .arg("youtube:player_client=web")
-            .arg("--progress")
-            .arg("--break-on-existing")
-            .arg("--download-archive")
+            .arg("--progress");
+        if !full_scan {
+            cmd.arg("--break-on-existing");
+        }
+        cmd.arg("--download-archive")
             .arg(archive_path.display().to_string())
             .arg("--impersonate")
             .arg("Chrome-146:Macos-26")
@@ -254,6 +277,12 @@ impl Downloader {
 
             if let Some(stdout) = child.stdout.take() {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    // Suppress the alarming "Aborting remaining downloads" line that
+                    // yt-dlp emits for --break-on-existing; we replace it with a
+                    // friendlier message when we detect exit code 101 below.
+                    if line.trim() == "Aborting remaining downloads" {
+                        continue;
+                    }
                     if let Some(p) = parse_progress(&line) {
                         let _ = tx.send(Msg::Progress(p));
                     }

@@ -70,6 +70,7 @@ pub struct App {
     show_downloads: bool,
     show_settings: bool,
     dl_url: String,
+    dl_full_scan: bool,
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
     thumb_request_tx: Sender<PathBuf>,
     thumb_result_rx: Receiver<(PathBuf, Option<egui::ColorImage>)>,
@@ -103,6 +104,9 @@ pub struct App {
     settings_password_input: String,
     settings_cookies_input: String,
     settings_cookies_status: String,
+    // File picker → chosen cookies.txt path arrives here from a dialog thread.
+    cookies_pick_tx: Sender<PathBuf>,
+    cookies_pick_rx: Receiver<PathBuf>,
     // Maintenance (library health) window
     show_maintenance: bool,
     health_report: Option<crate::maintenance::HealthReport>,
@@ -141,7 +145,9 @@ impl App {
 
         let browser = config.player.browser.clone();
         let config_bind = config.web.bind.clone();
-        let password_set = config.web.download_password.is_some();
+        let password_set = db.get_setting("password_hash").ok().flatten().is_some();
+
+        let (cookies_pick_tx, cookies_pick_rx) = std::sync::mpsc::channel::<PathBuf>();
 
         let (thumb_request_tx, thumb_request_rx) = std::sync::mpsc::channel::<PathBuf>();
         let (thumb_result_tx, thumb_result_rx) =
@@ -169,6 +175,7 @@ impl App {
             show_downloads: false,
             show_settings: false,
             dl_url: String::new(),
+            dl_full_scan: false,
             textures: HashMap::new(),
             thumb_request_tx,
             thumb_result_rx,
@@ -197,6 +204,8 @@ impl App {
             settings_password_input: String::new(),
             settings_cookies_input: String::new(),
             settings_cookies_status: String::new(),
+            cookies_pick_tx,
+            cookies_pick_rx,
             show_maintenance: false,
             health_report: None,
         }
@@ -488,11 +497,11 @@ impl App {
     fn run_scheduled_check(&mut self) {
         let mut count = 0;
         let urls: Vec<String> = self.library.iter()
-            .filter_map(|ch| ch.meta.as_ref()?.channel_url.clone())
+            .map(|ch| crate::downloader::check_url_for_folder(&ch.name))
             .collect();
         for url in urls {
             let kind = detect_url_kind(&url);
-            self.downloader.start(url, &kind);
+            self.downloader.start(url, &kind, false);
             count += 1;
         }
         self.status = format!("Scheduled check: started {} channel downloads", count);
@@ -576,7 +585,7 @@ impl App {
                         self.settings_bind_mode =
                             crate::web::bind_mode_of(&self.config.web.bind).to_string();
                         self.settings_password_enabled =
-                            self.config.web.download_password.is_some();
+                            self.db.get_setting("password_hash").ok().flatten().is_some();
                         self.settings_password_input.clear();
                         self.settings_cookies_input.clear();
                         let (exists, n) = crate::web::cookies_status();
@@ -637,24 +646,17 @@ impl App {
                     let mut pending_ch_download: Option<(String, String)> = None; // (url, channel_name)
 
                     for i in 0..self.library.len() {
-                        let (name, total, has_playlists, size_bytes, channel_url, url_inferred) = {
+                        let (name, total, has_playlists, size_bytes, channel_url) = {
                             let ch = &self.library[i];
-                            let meta_url = ch.meta.as_ref().and_then(|m| m.channel_url.clone());
-                            let (url, inferred) = if let Some(u) = meta_url {
-                                (Some(u), false)
-                            } else {
-                                let folder_url = ch.path.file_name()
-                                    .and_then(|n| n.to_str())
-                                    .map(|n| format!("https://www.youtube.com/@{n}"));
-                                (folder_url, true)
-                            };
+                            // Always derive the check URL from the folder name so yt-dlp
+                            // writes to the existing folder, not a new UCxxx one.
+                            let url = crate::downloader::check_url_for_folder(&ch.name);
                             (
                                 ch.name.clone(),
                                 ch.total_videos(),
                                 !ch.playlists.is_empty(),
                                 Self::channel_total_size(ch),
                                 url,
-                                inferred,
                             )
                         };
 
@@ -680,12 +682,9 @@ impl App {
                         let url_for_menu = channel_url.clone();
                         let name_for_menu = name.clone();
                         resp.context_menu(|ui| {
-                            if let Some(ref url) = url_for_menu {
-                                let mut btn = ui.button("⬇ Check for new videos");
-                                if url_inferred {
-                                    btn = btn.on_hover_text(format!("URL inferred from folder name:\n{url}"));
-                                }
-                                if btn.clicked() {
+                            {
+                                let url = &url_for_menu;
+                                if ui.button("⬇ Check for new videos").clicked() {
                                     pending_ch_download = Some((url.clone(), name_for_menu.clone()));
                                     ui.close_menu();
                                 }
@@ -719,7 +718,7 @@ impl App {
                     // Process deferred right-click download action
                     if let Some((url, ch_name)) = pending_ch_download {
                         let kind = detect_url_kind(&url);
-                        self.downloader.start(url, &kind);
+                        self.downloader.start(url, &kind, self.dl_full_scan);
                         self.status = format!("Checking {} for new videos…", ch_name);
                     }
                 });
@@ -760,11 +759,13 @@ impl App {
                     }
                 }
 
+                ui.checkbox(&mut self.dl_full_scan, "Full scan (check every video, fills gaps)");
+
                 let ready = !self.dl_url.trim().is_empty();
                 if ui.add_enabled(ready, egui::Button::new("⬇  Start download")).clicked() {
                     let url = self.dl_url.trim().to_string();
                     let dest = dest_preview.clone();
-                    self.downloader.start(url, &kind);
+                    self.downloader.start(url, &kind, self.dl_full_scan);
                     self.status = format!("Downloading: {dest}");
                 }
 
@@ -782,40 +783,56 @@ impl App {
                 if self.downloader.jobs.is_empty() {
                     ui.label(egui::RichText::new("Nothing queued yet.").weak());
                 }
+                let mut remove_job: Option<usize> = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for job in self.downloader.jobs.iter().rev() {
+                    let n = self.downloader.jobs.len();
+                    for i in (0..n).rev() {
+                        let job = &self.downloader.jobs[i];
                         let (text, color) = match job.state {
                             JobState::Running => ("running", egui::Color32::from_rgb(230, 200, 60)),
                             JobState::Done => ("done", egui::Color32::from_rgb(110, 200, 110)),
                             JobState::Failed => ("failed", egui::Color32::from_rgb(220, 110, 110)),
                         };
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(color, text);
-                                ui.label(&job.label);
-                            });
-                            ui.label(egui::RichText::new(&job.url).small().weak());
-                            if job.state == JobState::Running {
-                                ui.add(egui::ProgressBar::new(job.progress).show_percentage());
-                            }
-                            let last = job.log.last().map(String::as_str).unwrap_or("");
-                            if !last.is_empty() {
-                                ui.label(egui::RichText::new(last).small().monospace());
-                            }
-                            ui.collapsing("output log", |ui| {
-                                egui::ScrollArea::vertical()
-                                    .max_height(180.0)
-                                    .auto_shrink([false, true])
-                                    .stick_to_bottom(true)
-                                    .show(ui, |ui| {
-                                        for line in &job.log {
-                                            ui.label(egui::RichText::new(line).small().monospace());
-                                        }
-                                    });
+                        let finished = job.state != JobState::Running;
+                        ui.push_id(i, |ui| {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(color, text);
+                                    ui.label(&job.label);
+                                    if finished {
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.small_button("✕").clicked() {
+                                                remove_job = Some(i);
+                                            }
+                                        });
+                                    }
+                                });
+                                ui.label(egui::RichText::new(&job.url).small().weak());
+                                if job.state == JobState::Running {
+                                    ui.add(egui::ProgressBar::new(job.progress).show_percentage());
+                                }
+                                let last = job.log.last().map(String::as_str).unwrap_or("");
+                                if !last.is_empty() {
+                                    ui.label(egui::RichText::new(last).small().monospace());
+                                }
+                                ui.collapsing("output log", |ui| {
+                                    egui::ScrollArea::vertical()
+                                        .max_height(180.0)
+                                        .auto_shrink([false, true])
+                                        .stick_to_bottom(true)
+                                        .show(ui, |ui| {
+                                            for line in &self.downloader.jobs[i].log {
+                                                ui.label(egui::RichText::new(line).small().monospace());
+                                            }
+                                        });
+                                });
                             });
                         });
                     }
                 });
+                if let Some(i) = remove_job {
+                    self.downloader.remove_job(i);
+                }
             });
     }
 
@@ -1061,15 +1078,16 @@ impl App {
                         ui.vertical(|ui| {
                             ui.checkbox(&mut self.settings_password_enabled, "require for web downloads");
                             if self.settings_password_enabled {
+                                let hint = if self.settings_password_input.is_empty() {
+                                    "leave blank to keep current"
+                                } else {
+                                    "set a password"
+                                };
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.settings_password_input)
                                         .password(true)
                                         .desired_width(220.0)
-                                        .hint_text(if self.config.web.download_password.is_some() {
-                                            "leave blank to keep current"
-                                        } else {
-                                            "set a password"
-                                        }),
+                                        .hint_text(hint),
                                 );
                             }
                         });
@@ -1094,22 +1112,56 @@ impl App {
                         ui.label("Cookies:");
                         ui.vertical(|ui| {
                             ui.label(egui::RichText::new(&self.settings_cookies_status).small().weak());
+                            if ui.button("📁 Choose cookies.txt…").clicked() {
+                                // Run the file dialog off the UI thread; the chosen
+                                // path comes back via cookies_pick_rx (polled in update()).
+                                let tx = self.cookies_pick_tx.clone();
+                                std::thread::spawn(move || {
+                                    if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                                        .enable_all()
+                                        .build()
+                                    {
+                                        let picked = rt.block_on(async {
+                                            rfd::AsyncFileDialog::new()
+                                                .set_title("Select cookies.txt")
+                                                .add_filter("cookies", &["txt"])
+                                                .pick_file()
+                                                .await
+                                        });
+                                        if let Some(f) = picked {
+                                            let _ = tx.send(f.path().to_path_buf());
+                                        }
+                                    }
+                                });
+                            }
+                            ui.label(egui::RichText::new("…or paste below").small().weak());
                             ui.add(
                                 egui::TextEdit::multiline(&mut self.settings_cookies_input)
                                     .desired_rows(3)
                                     .desired_width(300.0)
                                     .hint_text("paste Netscape cookies.txt…"),
                             );
-                            if ui.button("Update cookies").clicked() {
-                                match crate::web::write_cookies(&self.settings_cookies_input) {
-                                    Ok(n) => {
-                                        self.settings_cookies_status = format!("{n} cookie(s) loaded");
-                                        self.settings_cookies_input.clear();
-                                        self.status = format!("Cookies updated ({n} entries)");
+                            ui.horizontal(|ui| {
+                                if ui.button("Update cookies").clicked() {
+                                    match crate::web::write_cookies(&self.settings_cookies_input) {
+                                        Ok(n) => {
+                                            self.settings_cookies_status = format!("{n} cookie(s) loaded");
+                                            self.settings_cookies_input.clear();
+                                            self.status = format!("Cookies updated ({n} entries)");
+                                        }
+                                        Err(e) => self.status = format!("Cookies error: {e}"),
                                     }
-                                    Err(e) => self.status = format!("Cookies error: {e}"),
                                 }
-                            }
+                                if ui.button("Clear cookies").clicked() {
+                                    match crate::web::clear_cookies() {
+                                        Ok(()) => {
+                                            self.settings_cookies_status = "no cookies.txt".to_string();
+                                            self.status = "Cookies cleared".to_string();
+                                        }
+                                        Err(e) => self.status = format!("Error clearing cookies: {e}"),
+                                    }
+                                }
+                            });
                             ui.label(
                                 egui::RichText::new("Export via a browser extension, then paste.")
                                     .small()
@@ -1134,15 +1186,26 @@ impl App {
                         let bind_changed = new_bind != self.config.web.bind;
                         self.config.web.bind = new_bind;
 
-                        // Apply the download-password setting.
-                        if !self.settings_password_enabled {
-                            self.config.web.download_password = None;
+                        // Apply the download-password setting to the database.
+                        let pwd_result = if !self.settings_password_enabled {
+                            self.db.set_setting("password_hash", None)
                         } else if !self.settings_password_input.is_empty() {
                             match crate::web::hash_password(&self.settings_password_input) {
-                                Some(hash) => self.config.web.download_password = Some(hash),
-                                None => self.status = "Error hashing password".to_string(),
+                                Some(hash) => {
+                                    let r = self.db.set_setting("password_hash", Some(&hash));
+                                    self.settings_password_input.clear();
+                                    r
+                                }
+                                None => {
+                                    self.status = "Error hashing password".to_string();
+                                    Ok(())
+                                }
                             }
-                            self.settings_password_input.clear();
+                        } else {
+                            Ok(())
+                        };
+                        if let Err(e) = pwd_result {
+                            self.status = format!("DB error: {e}");
                         }
 
                         match self.config.save(&self.config_path) {
@@ -1587,6 +1650,20 @@ impl eframe::App for App {
                 )
             });
             self.textures.insert(path, handle);
+        }
+
+        // A cookies.txt was chosen in the file dialog — validate and install it.
+        while let Ok(path) = self.cookies_pick_rx.try_recv() {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => match crate::web::write_cookies(&content) {
+                    Ok(n) => {
+                        self.settings_cookies_status = format!("{n} cookie(s) loaded");
+                        self.status = format!("Cookies imported ({n} entries)");
+                    }
+                    Err(e) => self.status = format!("Cookies error: {e}"),
+                },
+                Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
+            }
         }
 
         self.top_bar(ctx);

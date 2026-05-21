@@ -163,6 +163,10 @@ struct SubtitleInfo {
 #[derive(Deserialize)]
 struct StartDownloadRequest {
     url: String,
+    /// When true, omits `--break-on-existing` so every video is checked
+    /// individually — slower but fills gaps in partially-archived channels.
+    #[serde(default)]
+    full_scan: bool,
 }
 
 /// Response body for `GET /api/progress`.
@@ -368,6 +372,23 @@ pub fn bind_mode_of(addr: &str) -> &'static str {
 
 // ── Cookies ─────────────────────────────────────────────────────────────────────
 
+/// Convert SubRip (SRT) subtitle text to WebVTT.
+///
+/// The only structural differences are the `WEBVTT` header and the timestamp
+/// decimal separator (SRT uses `,`, VTT uses `.`).
+fn srt_to_vtt(srt: &str) -> String {
+    let mut out = String::from("WEBVTT\n\n");
+    for line in srt.lines() {
+        if line.contains("-->") {
+            out.push_str(&line.replace(',', "."));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Path to the `cookies.txt` yt-dlp reads, resolved against the process working
 /// directory (the same place `config.toml` lives and where the downloader's
 /// relative `--cookies cookies.txt` resolves).
@@ -463,7 +484,7 @@ fn is_authed(state: &WebState, headers: &HeaderMap) -> bool {
 
 /// Whether a download/access password is configured.
 fn password_required(state: &WebState) -> bool {
-    state.config.lock().unwrap().web.download_password.is_some()
+    state.db.lock().unwrap().get_setting("password_hash").ok().flatten().is_some()
 }
 
 #[derive(Deserialize)]
@@ -476,7 +497,7 @@ async fn post_login(
     State(state): State<Arc<WebState>>,
     Json(body): Json<LoginRequest>,
 ) -> Response {
-    let hash = state.config.lock().unwrap().web.download_password.clone();
+    let hash = state.db.lock().unwrap().get_setting("password_hash").ok().flatten();
     let Some(hash) = hash else {
         // No password configured; nothing to authenticate against.
         return (StatusCode::OK, "no password set").into_response();
@@ -558,7 +579,14 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         let thumb_url = v.thumb_path.as_deref().and_then(|p| file_url(root, p));
         let subtitles: Vec<SubtitleInfo> = v.subtitles.iter()
             .filter_map(|s| {
-                let url = file_url(root, &s.path)?;
+                let is_srt = s.path.extension().and_then(|e| e.to_str()) == Some("srt");
+                let url = if is_srt {
+                    // Route SRT through the on-the-fly conversion endpoint.
+                    let rel = s.path.strip_prefix(root).ok()?;
+                    Some(format!("/api/sub-vtt/{}", rel.display()))
+                } else {
+                    file_url(root, &s.path)
+                }?;
                 Some(SubtitleInfo {
                     lang: s.lang.clone(),
                     label: lang_label(&s.lang),
@@ -619,7 +647,7 @@ async fn post_download(
         return (StatusCode::BAD_REQUEST, "empty URL").into_response();
     }
     let kind = detect_url_kind(&url);
-    state.downloader.lock().unwrap().start(url, &kind);
+    state.downloader.lock().unwrap().start(url, &kind, body.full_scan);
     (StatusCode::ACCEPTED, "ok").into_response()
 }
 
@@ -643,7 +671,9 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let port = cfg.web.port;
     let current_bind = cfg.web.bind.clone();
     let available_binds = get_available_binds(port);
-    let download_password_required = cfg.web.download_password.is_some();
+    drop(cfg);
+    let download_password_required =
+        state.db.lock().unwrap().get_setting("password_hash").ok().flatten().is_some();
     Json(SettingsPayload {
         transcode: state.transcode.load(Ordering::Relaxed),
         source_url,
@@ -668,18 +698,6 @@ async fn post_settings(
         cfg.web.bind = new_addr;
     }
 
-    if let Some(new_pwd) = &body.new_download_password {
-        if new_pwd.is_empty() {
-            cfg.web.download_password = None;
-        } else if let Some(hashed) = hash_password(new_pwd) {
-            cfg.web.download_password = Some(hashed);
-        } else {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to hash password").into_response();
-        }
-        // Password changed: drop all existing sessions so they must re-authenticate.
-        state.sessions.lock().unwrap().clear();
-    }
-
     if let Err(e) = cfg.save(&state.config_path) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("save failed: {e}")).into_response();
     }
@@ -687,8 +705,26 @@ async fn post_settings(
     let current_bind = cfg.web.bind.clone();
     let port = cfg.web.port;
     let available_binds = get_available_binds(port);
-    let download_password_required = cfg.web.download_password.is_some();
     drop(cfg);
+
+    if let Some(new_pwd) = &body.new_download_password {
+        let db = state.db.lock().unwrap();
+        let result = if new_pwd.is_empty() {
+            db.set_setting("password_hash", None)
+        } else if let Some(hashed) = hash_password(new_pwd) {
+            db.set_setting("password_hash", Some(&hashed))
+        } else {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to hash password").into_response();
+        };
+        if let Err(e) = result {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")).into_response();
+        }
+        // Password changed: drop all existing sessions so they must re-authenticate.
+        state.sessions.lock().unwrap().clear();
+    }
+
+    let download_password_required =
+        state.db.lock().unwrap().get_setting("password_hash").ok().flatten().is_some();
     Json(SettingsPayload {
         transcode: body.transcode,
         source_url,
@@ -698,6 +734,31 @@ async fn post_settings(
         download_password_required,
         new_download_password: None,
     }).into_response()
+}
+
+/// `GET /api/sub-vtt/*path` — serve an SRT subtitle file as WebVTT.
+///
+/// The path is relative to the channels root.  The file must be within the
+/// channels root (path traversal is rejected with 403).
+async fn get_sub_vtt(
+    State(state): State<Arc<WebState>>,
+    Path(rel): Path<String>,
+) -> Response {
+    let path = state.channels_root.join(&rel);
+    // Reject path traversal outside the library.
+    let ok = match (state.channels_root.canonicalize(), path.canonicalize()) {
+        (Ok(root), Ok(p)) => p.starts_with(root),
+        _ => false,
+    };
+    if !ok {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let vtt = srt_to_vtt(&content);
+    ([(header::CONTENT_TYPE, "text/vtt; charset=utf-8")], vtt).into_response()
 }
 
 async fn get_transcode(
@@ -969,6 +1030,15 @@ async fn post_maintenance_repair(
     (StatusCode::ACCEPTED, "repair queued").into_response()
 }
 
+/// Delete cookies.txt, removing all stored session cookies.
+pub fn clear_cookies() -> Result<(), String> {
+    let p = cookies_path();
+    if p.exists() {
+        std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// `GET /api/cookies` — report whether a cookies file exists and its entry count.
 async fn get_cookies() -> impl IntoResponse {
     let (exists, count) = cookies_status();
@@ -985,6 +1055,14 @@ async fn post_cookies(Json(body): Json<CookiesBody>) -> impl IntoResponse {
     match write_cookies(&body.cookies) {
         Ok(count) => Json(serde_json::json!({ "ok": true, "cookies": count })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// `DELETE /api/cookies` — remove cookies.txt entirely.
+async fn delete_cookies() -> impl IntoResponse {
+    match clear_cookies() {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }
 
@@ -1055,10 +1133,11 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/metadata/:id", get(get_metadata))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/transcode/:id", get(get_transcode))
+        .route("/api/sub-vtt/*path", get(get_sub_vtt))
         .route("/api/maintenance/scan", get(get_maintenance_scan))
         .route("/api/maintenance/remove", post(post_maintenance_remove))
         .route("/api/maintenance/repair/:id", post(post_maintenance_repair))
-        .route("/api/cookies", get(get_cookies).post(post_cookies))
+        .route("/api/cookies", get(get_cookies).post(post_cookies).delete(delete_cookies))
         .route("/api/login", post(post_login))
         .route("/api/logout", post(post_logout))
         .nest_service("/files", ServeDir::new(&channels_root))
@@ -1274,6 +1353,7 @@ const HTML_UI: &str = r#"<!DOCTYPE html>
 <footer>
   <input type="url" id="dl-url" placeholder="YouTube URL…" onkeydown="if(event.key==='Enter')previewDownload()">
   <button class="primary" onclick="previewDownload()">⬇ Download</button>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Check every video individually instead of stopping at the first already-archived one. Slower but fills gaps."><input type="checkbox" id="dl-full-scan"> Full scan</label>
   <span id="agpl-notice" style="font-size:10px;color:var(--muted);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
 </footer>
 
@@ -1308,7 +1388,7 @@ function setStatus(s){document.getElementById('status').textContent=s}
 function renderSidebar(){
   const el=document.getElementById('sidebar');
   const allVids=library.flatMap(ch=>[...ch.videos,...ch.playlists.flatMap(p=>p.videos)]);
-  const contVids=allVids.filter(v=>v.resume_pos&&v.resume_pos>5);
+  const contVids=allVids.filter(v=>v.resume_pos&&v.resume_pos>5&&!v.watched);
   const total=library.reduce((s,c)=>s+c.total_videos,0);
   let h=`<div class="sidebar-label">Library</div>`;
   if(contVids.length)h+=`<div class="ch-item${showContinue?' active':''}" onclick="setContinue()">▶ Continue (${contVids.length})</div>`;
@@ -1340,7 +1420,7 @@ function currentVideos(){
   if(showContinue){
     for(const ch of library)
       for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
-        if(v.resume_pos&&v.resume_pos>5&&(!q||v.title.toLowerCase().includes(q)||v.id.includes(q)))
+        if(v.resume_pos&&v.resume_pos>5&&!v.watched&&(!q||v.title.toLowerCase().includes(q)||v.id.includes(q)))
           vids.push({...v,channel:ch.name});
     vids.sort((a,b)=>(b.resume_pos||0)-(a.resume_pos||0));
     return vids;
@@ -1442,15 +1522,22 @@ async function previewDownload(){
     setStatus('');
   }
 }
+function fullScan(){return document.getElementById('dl-full-scan')?.checked||false}
 async function confirmDownload(url,btn){
   if(btn)btn.closest('.modal-bg').remove();
   try{
-    await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,full_scan:fullScan()})});
     document.getElementById('dl-url').value='';setStatus('Download queued…')
   }catch(e){setStatus('Error: '+e.message)}
 }
-async function downloadChannel(url){try{await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});setStatus('Checking for new videos…')}catch(e){setStatus('Error: '+e.message)}}
-async function downloadChannelByIdx(i){await downloadChannel(channelUrls[i]||'https://www.youtube.com/@'+library[i].name)}
+async function downloadChannel(url){try{await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,full_scan:fullScan()})});setStatus('Checking for new videos…')}catch(e){setStatus('Error: '+e.message)}}
+function checkUrlForChannel(name){
+  // Mirror check_url_for_folder in downloader.rs: UC+22 chars = channel ID, else handle
+  return(/^UC.{22}$/.test(name))
+    ?'https://www.youtube.com/channel/'+name
+    :'https://www.youtube.com/@'+name;
+}
+async function downloadChannelByIdx(i){await downloadChannel(checkUrlForChannel(library[i].name))}
 
 /* ── Rescan ─────────────────────────────────────────────────────── */
 async function rescan(){try{await api('/api/rescan',{method:'POST'});await loadLibrary()}catch(e){setStatus('Error: '+e.message)}}
@@ -1637,9 +1724,13 @@ async function openSettings(){
     <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
       <label>Cookies (cookies.txt)</label>
       <div class="settings-hint" id="cookies-status">${cookiesStatus}</div>
-      <textarea id="cf-cookies" placeholder="Paste Netscape-format cookies.txt here…" style="width:100%;height:70px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-family:monospace;font-size:11px;resize:vertical"></textarea>
-      <button onclick="saveCookies(this)">Update cookies</button>
-      <div class="settings-hint">Export with a browser extension like "Get cookies.txt LOCALLY", then paste. Refresh when downloads start hitting captchas.</div>
+      <input type="file" id="cf-cookies-file" accept=".txt,text/plain" onchange="loadCookieFile(this)" style="font-size:11px;color:var(--muted)">
+      <textarea id="cf-cookies" placeholder="…or paste Netscape-format cookies.txt here" style="width:100%;height:70px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-family:monospace;font-size:11px;resize:vertical"></textarea>
+      <div style="display:flex;gap:6px">
+        <button onclick="saveCookies(this)">Update cookies</button>
+        <button onclick="clearCookies(this)" style="color:var(--muted)">Clear</button>
+      </div>
+      <div class="settings-hint">Choose a file or paste (e.g. from "Get cookies.txt LOCALLY"). Refresh when downloads start hitting captchas.</div>
     </div>
     ${srcRow}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
@@ -1649,6 +1740,14 @@ async function openSettings(){
     </div>
   </div>`;
   document.body.appendChild(bg);
+}
+
+function loadCookieFile(input){
+  const f=input.files&&input.files[0];if(!f)return;
+  const r=new FileReader();
+  r.onload=()=>{document.getElementById('cf-cookies').value=r.result;setStatus('Loaded '+f.name+' — click Update cookies to save')};
+  r.onerror=()=>setStatus('Could not read file');
+  r.readAsText(f);
 }
 
 async function saveCookies(btn){
@@ -1663,6 +1762,15 @@ async function saveCookies(btn){
     document.getElementById('cookies-status').textContent=d.cookies+' cookie(s) loaded';
     setStatus('Cookies updated ('+d.cookies+' entries)');
   }catch(e){setStatus('Cookies error: '+e.message)}finally{btn.disabled=false}
+}
+async function clearCookies(btn){
+  if(!confirm('Remove cookies.txt? Downloads requiring login will fail until you add new cookies.'))return;
+  btn.disabled=true;
+  try{
+    await api('/api/cookies',{method:'DELETE'});
+    document.getElementById('cookies-status').textContent='no cookies.txt';
+    setStatus('Cookies cleared');
+  }catch(e){setStatus('Error: '+e.message)}finally{btn.disabled=false}
 }
 
 async function saveSettings(btn){

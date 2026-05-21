@@ -88,9 +88,6 @@ pub struct WebSection {
     pub transcode: bool,
     /// Public URL to the source repository, shown in the web UI per AGPL §13.
     pub source_url: Option<String>,
-    /// Optional plaintext password required for downloads via web UI.
-    /// If set, users must provide this password to queue downloads.
-    pub download_password: Option<String>,
 }
 
 impl Default for WebSection {
@@ -100,7 +97,6 @@ impl Default for WebSection {
             bind: default_web_bind(),
             transcode: false,
             source_url: None,
-            download_password: None,
         }
     }
 }

@@ -19,6 +19,9 @@ tokio-stream = "0.1"
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 argon2 = "0.5"
 rand = "0.8"
+# File-picker dialog for the desktop GUI. xdg-portal backend keeps it pure-Rust
+# (zbus, no GTK/libdbus build dep), consistent with notify-rust above.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 
 [profile.release]
 opt-level = 2

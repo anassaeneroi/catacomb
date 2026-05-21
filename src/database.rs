@@ -8,6 +8,7 @@
 //! |---|---|---|
 //! | `watched` | `video_id` (PK), `watched_at` | Records videos the user has marked watched |
 //! | `positions` | `video_id` (PK), `position_secs`, `updated_at` | Stores resume positions |
+//! | `settings` | `key` (PK), `value` | Persistent app settings (password hash, etc.) |
 
 use rusqlite::{Connection, Result};
 use std::collections::{HashMap, HashSet};
@@ -45,8 +46,33 @@ impl Database {
                 video_id TEXT PRIMARY KEY,
                 position_secs REAL NOT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
+        Ok(())
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+        let mut rows = stmt.query([key])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: Option<&str>) -> Result<()> {
+        match value {
+            Some(v) => {
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                    [key, v],
+                )?;
+            }
+            None => {
+                self.conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+            }
+        }
         Ok(())
     }
 

@@ -213,8 +213,10 @@ fn collect_raw_videos(entries: impl Iterator<Item = std::fs::DirEntry>) -> Vec<R
         if !path.is_file() { continue; }
         let file_name = entry.file_name().to_string_lossy().into_owned();
 
-        // Subtitles have stems like "Title [id].en.vtt" — strip the .vtt and trailing .lang
-        if let Some(sub_stem) = file_name.strip_suffix(".vtt") {
+        // Subtitles: "Title [id].en.vtt" or "Title [id].en.srt" — strip ext then .lang
+        let sub_stem = file_name.strip_suffix(".vtt")
+            .or_else(|| file_name.strip_suffix(".srt"));
+        if let Some(sub_stem) = sub_stem {
             if let Some(dot) = sub_stem.rfind('.') {
                 let lang = sub_stem[dot + 1..].to_string();
                 let video_stem = sub_stem[..dot].to_string();

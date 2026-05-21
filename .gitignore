@@ -16,3 +16,9 @@
 
 # Sensitive: YouTube session cookies — never commit
 cookies.txt
+
+# User-specific runtime config (bind address, password hash, etc.) — never commit
+config.toml
+
+# Runtime database (watched status, positions, password hash) — never commit
+yt-offline.db
