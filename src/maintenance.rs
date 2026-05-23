@@ -191,11 +191,23 @@ pub fn scan(root: &Path, channels: &[Channel]) -> HealthReport {
 }
 
 /// True if `target` resolves to a location inside `root`.
+///
+/// `target` may not exist (e.g. the caller is about to delete it). In that
+/// case we canonicalise the parent directory and join the file name back on,
+/// so a deleted file still gets a correct safety verdict instead of a false
+/// "outside library" refusal.
 fn is_within(root: &Path, target: &Path) -> bool {
-    match (root.canonicalize(), target.canonicalize()) {
-        (Ok(r), Ok(t)) => t.starts_with(r),
-        _ => false,
-    }
+    let Ok(canon_root) = root.canonicalize() else { return false };
+    let canon_target = match target.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            let Some(parent) = target.parent() else { return false };
+            let Some(name) = target.file_name() else { return false };
+            let Ok(canon_parent) = parent.canonicalize() else { return false };
+            canon_parent.join(name)
+        }
+    };
+    canon_target.starts_with(canon_root)
 }
 
 /// Delete the given files, refusing any path that escapes `root`.
@@ -212,10 +224,52 @@ pub fn remove_files(root: &Path, paths: &[PathBuf]) -> (usize, Vec<String>) {
         }
         match std::fs::remove_file(p) {
             Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Already gone — treat as success so a duplicate-delete from
+                // a stale UI doesn't look like an error.
+                removed += 1;
+            }
             Err(e) => errors.push(format!("{}: {e}", p.display())),
         }
     }
     (removed, errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn is_within_accepts_inside_path() {
+        let tmp = std::env::temp_dir().join("yt-offline-iw-test-1");
+        let _ = fs::create_dir_all(&tmp);
+        let inside = tmp.join("foo.txt");
+        let _ = fs::write(&inside, "x");
+        assert!(is_within(&tmp, &inside));
+        let _ = fs::remove_file(&inside);
+        let _ = fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn is_within_rejects_outside_path() {
+        let tmp = std::env::temp_dir().join("yt-offline-iw-test-2");
+        let _ = fs::create_dir_all(&tmp);
+        // The target's parent canonicalises to /tmp, which doesn't start with tmp.
+        let outside = std::env::temp_dir().join("not-our-dir-xyz.txt");
+        assert!(!is_within(&tmp, &outside));
+        let _ = fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn is_within_handles_missing_target() {
+        // Target doesn't exist; parent dir does and is inside root.
+        let tmp = std::env::temp_dir().join("yt-offline-iw-test-3");
+        let _ = fs::create_dir_all(&tmp);
+        let ghost = tmp.join("does-not-exist.txt");
+        assert!(is_within(&tmp, &ghost));
+        let _ = fs::remove_dir(&tmp);
+    }
 }
 
 /// Look up a video's directory and filename stem by ID, for repair targeting.

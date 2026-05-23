@@ -14,7 +14,7 @@ use eframe::egui;
 
 use crate::config::Config;
 use crate::database::Database;
-use crate::downloader::{detect_url_kind, Downloader, JobState, UrlKind};
+use crate::downloader::{detect_url_kind, DownloadQuality, Downloader, JobState, UrlKind};
 use crate::library::{self, Video};
 use crate::theme;
 
@@ -35,14 +35,18 @@ enum SortMode {
     DurationDesc,
     SizeAsc,
     SizeDesc,
+    DateDesc,
+    DateAsc,
 }
 
 #[derive(Clone, PartialEq)]
 enum SidebarView {
+    Channels,
     All,
     Channel(usize),
     Playlist(usize, usize),
     ContinueWatching,
+    Music,
 }
 
 struct Card {
@@ -54,6 +58,7 @@ struct Card {
     has_live_chat: bool,
     duration_secs: Option<f64>,
     file_size: Option<u64>,
+    upload_date: Option<String>,
     watched: bool,
     resume_pos: Option<f64>,
 }
@@ -71,13 +76,19 @@ pub struct App {
     show_settings: bool,
     dl_url: String,
     dl_full_scan: bool,
+    dl_quality: DownloadQuality,
+    dl_music_mode: bool,
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
     thumb_request_tx: Sender<PathBuf>,
     thumb_result_rx: Receiver<(PathBuf, Option<egui::ColorImage>)>,
     thumb_pending: HashSet<PathBuf>,
     desc_cache: HashMap<PathBuf, String>,
     status: String,
+    music_library: Vec<library::Track>,
+    music_root: PathBuf,
     settings_dir: String,
+    settings_plex_path: String,
+    plex_status: String,
     db: Database,
     card_density: f32,
     sort_mode: SortMode,
@@ -143,9 +154,18 @@ impl App {
         let watched = db.get_watched().unwrap_or_default();
         let resume_positions = db.get_positions().unwrap_or_default();
 
+        let music_root = channels_root.with_file_name("music");
+        let music_library = library::scan_music(&music_root);
+
+        let max_concurrent = config.backup.max_concurrent;
+        let use_bundled_ytdlp = config.backup.use_bundled_ytdlp;
         let browser = config.player.browser.clone();
         let config_bind = config.web.bind.clone();
         let password_set = db.get_setting("password_hash").ok().flatten().is_some();
+        let plex_path_str = config.plex.library_path
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
 
         let (cookies_pick_tx, cookies_pick_rx) = std::sync::mpsc::channel::<PathBuf>();
 
@@ -171,18 +191,24 @@ impl App {
             sidebar_view: SidebarView::All,
             selected_video: None,
             search: String::new(),
-            downloader: Downloader::new(channels_root, browser),
+            downloader: Downloader::new(channels_root, browser, max_concurrent, use_bundled_ytdlp),
             show_downloads: false,
             show_settings: false,
             dl_url: String::new(),
-            dl_full_scan: false,
+            dl_full_scan: true,
+            dl_quality: DownloadQuality::Best,
+            dl_music_mode: false,
             textures: HashMap::new(),
             thumb_request_tx,
             thumb_result_rx,
             thumb_pending: HashSet::new(),
             desc_cache: HashMap::new(),
             status,
+            music_library,
+            music_root,
             settings_dir,
+            settings_plex_path: plex_path_str,
+            plex_status: String::new(),
             db,
             card_density: 1.0,
             sort_mode: SortMode::Title,
@@ -213,6 +239,7 @@ impl App {
 
     fn rescan(&mut self) {
         self.library = library::scan_channels(&self.channels_root);
+        self.music_library = library::scan_music(&self.music_root);
         self.sidebar_view = SidebarView::All;
         self.selected_video = None;
         self.desc_cache.clear();
@@ -273,12 +300,14 @@ impl App {
                 has_live_chat: v.has_live_chat,
                 duration_secs: v.duration_secs,
                 file_size: v.file_size,
+                upload_date: v.upload_date.clone(),
                 watched: self.watched.contains(&v.id),
                 resume_pos,
             });
         };
 
         match &self.sidebar_view {
+            SidebarView::Channels | SidebarView::Music => { return cards; } // rendered separately
             SidebarView::ContinueWatching => {
                 for ch in &self.library {
                     for v in ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter())) {
@@ -336,23 +365,29 @@ impl App {
                 cards.sort_by_key(|c| c.file_size.unwrap_or(0));
                 cards.reverse();
             }
+            SortMode::DateDesc => {
+                // Empty/missing dates sort to the end of "newest first".
+                cards.sort_by(|a, b| b.upload_date.as_deref().unwrap_or("").cmp(a.upload_date.as_deref().unwrap_or("")));
+            }
+            SortMode::DateAsc => {
+                // Empty/missing dates sort to the end of "oldest first" too.
+                cards.sort_by(|a, b| {
+                    match (a.upload_date.as_deref(), b.upload_date.as_deref()) {
+                        (Some(x), Some(y)) => x.cmp(y),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
         }
 
         cards
     }
 
     fn find_video_by_id(&self, id: &str) -> Option<(Video, String)> {
-        for channel in &self.library {
-            if let Some(v) = channel.videos.iter().find(|v| v.id == id) {
-                return Some((v.clone(), channel.name.clone()));
-            }
-            for playlist in &channel.playlists {
-                if let Some(v) = playlist.videos.iter().find(|v| v.id == id) {
-                    return Some((v.clone(), channel.name.clone()));
-                }
-            }
-        }
-        None
+        library::find_video(&self.library, id)
+            .map(|(v, ch)| (v.clone(), ch.name.clone()))
     }
 
     fn texture(&mut self, _ctx: &egui::Context, path: &Path) -> Option<egui::TextureHandle> {
@@ -381,7 +416,14 @@ impl App {
 
     fn play_with_tracking(&mut self, path: &Path, video_id: String) {
         let cmd = self.config.player.command.clone();
-        let use_mpv_ipc = cmd.contains("mpv");
+        // Only enable IPC for genuine mpv invocations — substring matching
+        // would also fire for things like `mympv-wrapper`, `gnomempv`, etc.,
+        // which don't implement the JSON-IPC protocol.
+        let exe = std::path::Path::new(&cmd)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(cmd.as_str());
+        let use_mpv_ipc = exe == "mpv" || exe == "mpv.exe";
 
         #[cfg(unix)]
         let sock_path = format!("/tmp/yt-offline-{video_id}.sock");
@@ -501,7 +543,7 @@ impl App {
             .collect();
         for url in urls {
             let kind = detect_url_kind(&url);
-            self.downloader.start(url, &kind, false);
+            self.downloader.start(url, &kind, true, DownloadQuality::Best);
             count += 1;
         }
         self.status = format!("Scheduled check: started {} channel downloads", count);
@@ -582,6 +624,9 @@ impl App {
                     self.show_settings = !self.show_settings;
                     if self.show_settings {
                         self.settings_dir = self.channels_root.display().to_string();
+                        self.settings_plex_path = self.config.plex.library_path
+                            .as_deref().map(|p| p.display().to_string()).unwrap_or_default();
+                        self.plex_status.clear();
                         self.settings_bind_mode =
                             crate::web::bind_mode_of(&self.config.web.bind).to_string();
                         self.settings_password_enabled =
@@ -618,6 +663,17 @@ impl App {
 
                     if ui
                         .selectable_label(
+                            self.sidebar_view == SidebarView::Channels,
+                            format!("⊟ Channels  ({})", self.library.len()),
+                        )
+                        .clicked()
+                    {
+                        self.sidebar_view = SidebarView::Channels;
+                        self.selected_video = None;
+                    }
+
+                    if ui
+                        .selectable_label(
                             self.sidebar_view == SidebarView::All,
                             format!("⊞ All  ({total})"),
                         )
@@ -638,6 +694,18 @@ impl App {
                             self.sidebar_view = SidebarView::ContinueWatching;
                             self.selected_video = None;
                         }
+                    }
+
+                    let music_count = self.music_library.len();
+                    if ui
+                        .selectable_label(
+                            self.sidebar_view == SidebarView::Music,
+                            format!("♫ Music  ({music_count})"),
+                        )
+                        .clicked()
+                    {
+                        self.sidebar_view = SidebarView::Music;
+                        self.selected_video = None;
                     }
 
                     ui.separator();
@@ -718,7 +786,7 @@ impl App {
                     // Process deferred right-click download action
                     if let Some((url, ch_name)) = pending_ch_download {
                         let kind = detect_url_kind(&url);
-                        self.downloader.start(url, &kind, self.dl_full_scan);
+                        self.downloader.start(url, &kind, !self.dl_full_scan, DownloadQuality::Best);
                         self.status = format!("Checking {} for new videos…", ch_name);
                     }
                 });
@@ -759,14 +827,39 @@ impl App {
                     }
                 }
 
-                ui.checkbox(&mut self.dl_full_scan, "Full scan (check every video, fills gaps)");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.dl_music_mode, false, "🎬 Video");
+                    ui.selectable_value(&mut self.dl_music_mode, true, "🎵 Music");
+                });
+
+                if self.dl_music_mode {
+                    ui.label(egui::RichText::new("Audio-only — saves to music/ directory").small().weak());
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label("Quality:");
+                        egui::ComboBox::from_id_salt("dl_quality")
+                            .selected_text(self.dl_quality.label())
+                            .show_ui(ui, |ui| {
+                                for &q in DownloadQuality::all() {
+                                    ui.selectable_value(&mut self.dl_quality, q, q.label());
+                                }
+                            });
+                    });
+                    ui.checkbox(&mut self.dl_full_scan, "Fast mode (stop at first already-downloaded video)")
+                        .on_hover_text("Faster for large channels but may miss new videos if gaps exist in the archive. Leave off to check every video.");
+                }
 
                 let ready = !self.dl_url.trim().is_empty();
                 if ui.add_enabled(ready, egui::Button::new("⬇  Start download")).clicked() {
                     let url = self.dl_url.trim().to_string();
                     let dest = dest_preview.clone();
-                    self.downloader.start(url, &kind, self.dl_full_scan);
-                    self.status = format!("Downloading: {dest}");
+                    if self.dl_music_mode {
+                        self.downloader.start_music(url);
+                        self.status = "Downloading music…".to_string();
+                    } else {
+                        self.downloader.start(url, &kind, !self.dl_full_scan, self.dl_quality);
+                        self.status = format!("Downloading: {dest}");
+                    }
                 }
 
                 ui.separator();
@@ -780,8 +873,23 @@ impl App {
                         self.prev_job_states.clear();
                     }
                 });
-                if self.downloader.jobs.is_empty() {
+                if self.downloader.jobs.is_empty() && self.downloader.pending_count() == 0 {
                     ui.label(egui::RichText::new("Nothing queued yet.").weak());
+                }
+                let pending_count = self.downloader.pending_count();
+                if pending_count > 0 {
+                    let max = self.downloader.max_concurrent;
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "⏳ {pending_count} queued (max {max} concurrent)"
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                    let snapshots = self.downloader.pending_snapshots();
+                    for (label, _url) in &snapshots {
+                        ui.label(egui::RichText::new(format!("  · {label}")).small().weak());
+                    }
                 }
                 let mut remove_job: Option<usize> = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -811,7 +919,7 @@ impl App {
                                 if job.state == JobState::Running {
                                     ui.add(egui::ProgressBar::new(job.progress).show_percentage());
                                 }
-                                let last = job.log.last().map(String::as_str).unwrap_or("");
+                                let last = job.log.back().map(String::as_str).unwrap_or("");
                                 if !last.is_empty() {
                                     ui.label(egui::RichText::new(last).small().monospace());
                                 }
@@ -1046,6 +1154,36 @@ impl App {
                         );
                         ui.end_row();
 
+                        ui.label("Max concurrent downloads:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.config.backup.max_concurrent)
+                                .range(1..=10),
+                        )
+                        .on_hover_text("Maximum simultaneous yt-dlp processes. Extra downloads queue automatically.");
+                        ui.end_row();
+
+                        ui.label("yt-dlp binary:");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut self.config.backup.use_bundled_ytdlp, false, "System")
+                                .on_hover_text("Use whatever yt-dlp is on PATH.");
+                            ui.radio_value(&mut self.config.backup.use_bundled_ytdlp, true, "Bundled")
+                                .on_hover_text("Use the yt-dlp + deno installed under ~/.local/share/yt-offline/bin/.");
+                            let installed = crate::ytdlp_bin::bundled_installed();
+                            let btn_label = if installed { "Update" } else { "Install" };
+                            if ui.button(btn_label)
+                                .on_hover_text("Download (or update) the bundled yt-dlp + deno from GitHub. Streams output as a job.")
+                                .clicked()
+                            {
+                                self.downloader.start_ytdlp_update();
+                            }
+                            if installed {
+                                ui.label(egui::RichText::new("✓ installed").weak().small());
+                            } else {
+                                ui.label(egui::RichText::new("not installed").weak().small());
+                            }
+                        });
+                        ui.end_row();
+
                         ui.label("Web UI port:");
                         ui.add(
                             egui::DragValue::new(&mut self.config.web.port)
@@ -1173,6 +1311,46 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.separator();
+                ui.heading("Plex");
+                ui.add_space(4.0);
+                ui.label("Plex library path:");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings_plex_path)
+                            .hint_text("/media/plex/YouTube")
+                            .desired_width(300.0),
+                    );
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Creates a TV-show symlink tree here. Point a Plex TV library at this folder.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.horizontal(|ui| {
+                    let can_generate = !self.settings_plex_path.trim().is_empty();
+                    if ui.add_enabled(can_generate, egui::Button::new("⟳ Generate Plex library")).clicked() {
+                        let plex_path = PathBuf::from(self.settings_plex_path.trim());
+                        let result = crate::plex::generate(&self.library, &plex_path);
+                        self.plex_status = if result.errors.is_empty() {
+                            format!("{} link(s) created/updated", result.links_created)
+                        } else {
+                            format!(
+                                "{} link(s) created, {} error(s): {}",
+                                result.links_created,
+                                result.errors.len(),
+                                result.errors.first().unwrap_or(&String::new())
+                            )
+                        };
+                    }
+                    if !self.plex_status.is_empty() {
+                        ui.label(egui::RichText::new(&self.plex_status).small());
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
                 ui.add_space(4.0);
 
                 ui.horizontal(|ui| {
@@ -1180,6 +1358,14 @@ impl App {
                         let new_dir = PathBuf::from(&self.settings_dir);
                         let dir_changed = new_dir != self.config.backup.directory;
                         self.config.backup.directory = new_dir.clone();
+
+                        // Plex library path
+                        let plex_trimmed = self.settings_plex_path.trim();
+                        self.config.plex.library_path = if plex_trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(PathBuf::from(plex_trimmed))
+                        };
 
                         // Resolve the chosen interface to a concrete bind address.
                         let new_bind = crate::web::resolve_bind_mode(&self.settings_bind_mode);
@@ -1212,6 +1398,8 @@ impl App {
                             Ok(_) => self.status = "Settings saved.".to_string(),
                             Err(e) => self.status = format!("Error saving config: {e}"),
                         }
+                        self.downloader.max_concurrent = self.config.backup.max_concurrent;
+                        self.downloader.use_bundled_ytdlp = self.config.backup.use_bundled_ytdlp;
                         if dir_changed {
                             self.channels_root = new_dir.clone();
                             self.downloader.channels_root = new_dir;
@@ -1327,7 +1515,154 @@ impl App {
             });
     }
 
+    fn channel_grid(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let density = self.card_density;
+        let thumb_w = (176.0 * density).round();
+        let thumb_h = (99.0 * density).round();
+        let card_w = thumb_w + 4.0; // 2px border each side
+
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let available_w = ui.available_width();
+            let cols = ((available_w / (card_w + 12.0)) as usize).max(1);
+            let n = self.library.len();
+
+            for row_start in (0..n).step_by(cols) {
+                ui.horizontal(|ui| {
+                    for i in row_start..(row_start + cols).min(n) {
+                        // Collect data we need without holding a borrow into self.library
+                        let (name, total, size_bytes, thumb_path) = {
+                            let ch = &self.library[i];
+                            let thumb = ch.videos.iter()
+                                .chain(ch.playlists.iter().flat_map(|p| p.videos.iter()))
+                                .find_map(|v| v.thumb_path.clone());
+                            (ch.name.clone(), ch.total_videos(), ch.total_size_cached, thumb)
+                        };
+
+                        ui.push_id(i, |ui| {
+                            let (card_rect, card_resp) = ui.allocate_exact_size(
+                                egui::vec2(card_w, thumb_h + 46.0 * density),
+                                egui::Sense::click(),
+                            );
+                            let visuals = ui.visuals();
+                            let border_color = if card_resp.hovered() {
+                                visuals.selection.bg_fill
+                            } else {
+                                visuals.widgets.noninteractive.bg_stroke.color
+                            };
+                            ui.painter().rect_stroke(card_rect, 6.0, egui::Stroke::new(2.0, border_color));
+
+                            let thumb_rect = egui::Rect::from_min_size(
+                                card_rect.min + egui::vec2(2.0, 2.0),
+                                egui::vec2(thumb_w, thumb_h),
+                            );
+                            let texture = thumb_path.as_ref().and_then(|p| self.texture(ctx, p));
+                            match &texture {
+                                Some(handle) => {
+                                    egui::Image::new(handle)
+                                        .maintain_aspect_ratio(true)
+                                        .paint_at(ui, thumb_rect);
+                                }
+                                None => {
+                                    ui.painter().rect_filled(thumb_rect, 4.0, egui::Color32::from_gray(30));
+                                    ui.painter().text(
+                                        thumb_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "📺",
+                                        egui::FontId::proportional(28.0 * density),
+                                        egui::Color32::from_gray(100),
+                                    );
+                                }
+                            }
+
+                            let text_top = card_rect.min + egui::vec2(6.0, thumb_h + 6.0);
+                            ui.painter().text(
+                                text_top,
+                                egui::Align2::LEFT_TOP,
+                                &name,
+                                egui::FontId::proportional(13.0 * density),
+                                visuals.text_color(),
+                            );
+                            let sub = format!(
+                                "{} video{}{}",
+                                total,
+                                if total == 1 { "" } else { "s" },
+                                if size_bytes > 0 { format!(" · {}", format_size(size_bytes)) } else { String::new() }
+                            );
+                            ui.painter().text(
+                                text_top + egui::vec2(0.0, 16.0 * density),
+                                egui::Align2::LEFT_TOP,
+                                &sub,
+                                egui::FontId::proportional(11.0 * density),
+                                visuals.weak_text_color(),
+                            );
+
+                            if card_resp.clicked() {
+                                self.sidebar_view = SidebarView::Channel(i);
+                                self.selected_video = None;
+                            }
+                        });
+                        ui.add_space(8.0);
+                    }
+                });
+                ui.add_space(8.0);
+            }
+        });
+    }
+
+    fn music_view(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Music");
+        if self.music_library.is_empty() {
+            ui.label(egui::RichText::new(
+                "No tracks yet. Download audio with Music mode in the Downloads panel."
+            ).weak());
+            return;
+        }
+        let mut current_artist = String::new();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for track in &self.music_library {
+                if track.artist != current_artist {
+                    current_artist = track.artist.clone();
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(&track.artist).strong());
+                    ui.separator();
+                }
+                ui.push_id(&track.id, |ui| {
+                    ui.horizontal(|ui| {
+                        let dur = track.duration_secs
+                            .map(|s| {
+                                let m = s as u64 / 60;
+                                let sec = s as u64 % 60;
+                                format!("{m}:{sec:02}")
+                            })
+                            .unwrap_or_default();
+                        if ui.selectable_label(false, &track.title).clicked() {
+                            if let Err(e) = Command::new(&self.config.player.command)
+                                .arg(&track.path)
+                                .spawn()
+                            {
+                                self.status = format!("Could not open player: {e}");
+                            }
+                        }
+                        if !dur.is_empty() {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(egui::RichText::new(dur).small().weak());
+                            });
+                        }
+                    });
+                });
+            }
+        });
+    }
+
     fn video_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        if self.sidebar_view == SidebarView::Channels {
+            self.channel_grid(ctx, ui);
+            return;
+        }
+        if self.sidebar_view == SidebarView::Music {
+            self.music_view(ui);
+            return;
+        }
         let cards = self.cards_take();
         let show_channel = !matches!(self.sidebar_view, SidebarView::Channel(_) | SidebarView::Playlist(_, _));
 
@@ -1394,6 +1729,8 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.selectable_value(&mut self.sort_mode, SortMode::DateDesc, "Newest");
+                ui.selectable_value(&mut self.sort_mode, SortMode::DateAsc, "Oldest");
                 ui.selectable_value(&mut self.sort_mode, SortMode::SizeDesc, "Largest");
                 ui.selectable_value(&mut self.sort_mode, SortMode::SizeAsc, "Smallest");
                 ui.selectable_value(&mut self.sort_mode, SortMode::DurationDesc, "Longest");
@@ -1605,12 +1942,14 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.downloader.poll();
+        // Snapshot the previous-frame running state BEFORE check_notifications
+        // overwrites prev_job_states with the current frame's. Otherwise
+        // was_running tracks the wrong frame and the auto-rescan never fires.
+        let was_running_prev = self.prev_job_states.values().any(|&s| s == JobState::Running);
         self.check_notifications();
 
         let any_running = self.downloader.any_running();
-        // Auto-rescan when all downloads finish
-        let was_running = self.prev_job_states.values().any(|&s| s == JobState::Running);
-        if was_running && !any_running {
+        if was_running_prev && !any_running {
             self.rescan();
         }
 
@@ -1620,9 +1959,10 @@ impl eframe::App for App {
 
         // Scheduled channel checks
         if self.config.scheduler.enabled && !any_running {
-            let interval = std::time::Duration::from_secs(
-                self.config.scheduler.interval_hours as u64 * 3600,
-            );
+            // Defensive clamp: a manually-edited config.toml with 0 hours
+            // would otherwise re-fire every frame.
+            let hours = self.config.scheduler.interval_hours.max(1);
+            let interval = std::time::Duration::from_secs(hours as u64 * 3600);
             let due = self.last_scheduled_check
                 .map_or(true, |t| t.elapsed() >= interval);
             if due {

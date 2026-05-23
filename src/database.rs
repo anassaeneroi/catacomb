@@ -21,8 +21,23 @@ pub struct Database {
 
 impl Database {
     /// Open or create the database at `path`, running schema migrations.
+    ///
+    /// On Unix the file mode is tightened to `0600` so the Argon2 password
+    /// hash and resume positions aren't readable by other local users. A
+    /// best-effort: failure is logged but doesn't abort startup.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mut perms = meta.permissions();
+                if perms.mode() & 0o777 != 0o600 {
+                    perms.set_mode(0o600);
+                    let _ = std::fs::set_permissions(path, perms);
+                }
+            }
+        }
         let db = Database { conn };
         db.init_schema()?;
         Ok(db)

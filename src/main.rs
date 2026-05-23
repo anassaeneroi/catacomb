@@ -19,8 +19,10 @@ mod database;
 mod downloader;
 mod library;
 mod maintenance;
+mod plex;
 mod theme;
 mod web;
+mod ytdlp_bin;
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();

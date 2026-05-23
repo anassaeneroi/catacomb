@@ -18,13 +18,26 @@ pub struct Config {
     pub scheduler: SchedulerSection,
     #[serde(default)]
     pub web: WebSection,
+    #[serde(default)]
+    pub plex: PlexSection,
 }
 
 /// `[backup]` table — where to store downloaded videos.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackupSection {
     pub directory: PathBuf,
+    /// Maximum simultaneous yt-dlp processes. Extra downloads queue and start
+    /// automatically when a slot opens. Set to 0 for no limit (not recommended).
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: usize,
+    /// If true, use the bundled yt-dlp + deno binaries managed by yt-offline
+    /// (installed under `~/.local/share/yt-offline/bin/`). If false, use the
+    /// `yt-dlp` found on the system PATH.
+    #[serde(default)]
+    pub use_bundled_ytdlp: bool,
 }
+
+fn default_max_concurrent() -> usize { 3 }
 
 /// `[player]` table — external player and browser cookie source.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -69,6 +82,14 @@ impl Default for SchedulerSection {
     fn default() -> Self {
         Self { enabled: false, interval_hours: default_interval_hours() }
     }
+}
+
+/// `[plex]` table — Plex-compatible TV-show symlink library.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PlexSection {
+    /// Directory where the Plex symlink tree is written.
+    /// Leave unset to disable Plex library generation.
+    pub library_path: Option<PathBuf>,
 }
 
 /// `[web]` table — built-in HTTP server settings.
@@ -125,11 +146,16 @@ impl Config {
     /// Construct a minimal default config pointing `backup.directory` at `dir`.
     pub fn default_with_dir(dir: PathBuf) -> Self {
         Self {
-            backup: BackupSection { directory: dir },
+            backup: BackupSection {
+                directory: dir,
+                max_concurrent: default_max_concurrent(),
+                use_bundled_ytdlp: false,
+            },
             player: PlayerSection::default(),
             ui: UiSection::default(),
             scheduler: SchedulerSection::default(),
             web: WebSection::default(),
+            plex: PlexSection::default(),
         }
     }
 }

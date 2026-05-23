@@ -29,13 +29,14 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Query, Request, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeDir;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -43,7 +44,7 @@ use argon2::password_hash::SaltString;
 
 use crate::config::Config;
 use crate::database::Database;
-use crate::downloader::{detect_url_kind, Downloader, JobState};
+use crate::downloader::{detect_url_kind, DownloadQuality, Downloader, JobState};
 use crate::library;
 use crate::maintenance;
 
@@ -77,10 +78,32 @@ pub struct WebState {
     pub config: Mutex<Config>,
     /// Whether to transcode MKV→mp4 on the fly for playback (requires ffmpeg).
     pub transcode: AtomicBool,
-    /// Active session tokens. Non-empty only when a password is set; a valid
-    /// `session` cookie matching one of these grants access to the gated UI/API.
-    pub sessions: Mutex<HashSet<String>>,
+    /// Active session tokens mapped to their issued-at `Instant`. Tokens older
+    /// than [`SESSION_TTL`] are rejected and pruned lazily on each touch.
+    pub sessions: Mutex<HashMap<String, std::time::Instant>>,
+    /// When the last scheduled channel check ran; used to compute the next due time.
+    pub last_scheduled_check: Mutex<Option<std::time::Instant>>,
+    /// Cached "is password required" — refreshed when the password is changed.
+    /// Avoids a DB hit on every request through `auth_middleware`.
+    pub password_required_cache: AtomicBool,
+    /// Per-IP failure tracker for [`post_login`]. Each entry is the number of
+    /// recent failures and the instant the lockout (if any) expires.
+    pub login_attempts: Mutex<HashMap<std::net::IpAddr, LoginAttempt>>,
 }
+
+/// Failed-login tracking entry. After [`LOGIN_LOCKOUT_AFTER`] failures from
+/// the same IP, further attempts are rejected until [`LoginAttempt::until`].
+pub struct LoginAttempt {
+    pub failures: u32,
+    pub until: Option<std::time::Instant>,
+}
+
+/// How long a session token is valid for after login.
+pub const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+/// Failures per IP before /api/login starts returning 429.
+pub const LOGIN_LOCKOUT_AFTER: u32 = 5;
+/// How long the lockout lasts once tripped.
+pub const LOGIN_LOCKOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl WebState {
     fn job_snapshots(dl: &Downloader) -> Vec<JobSnapshot> {
@@ -95,7 +118,7 @@ impl WebState {
                     JobState::Failed => "failed",
                 },
                 progress: j.progress,
-                last_line: j.log.last().cloned().unwrap_or_default(),
+                last_line: j.log.back().cloned().unwrap_or_default(),
             })
             .collect()
     }
@@ -119,6 +142,8 @@ struct ChannelInfo {
     subscriber_count: Option<u64>,
     uploader: Option<String>,
     channel_url: Option<String>,
+    /// Thumbnail URL for the channel overview grid — first available video thumbnail.
+    thumb_url: Option<String>,
     playlists: Vec<PlaylistInfo>,
     videos: Vec<VideoInfo>,
 }
@@ -140,6 +165,8 @@ struct VideoInfo {
     title: String,
     duration_secs: Option<f64>,
     file_size: Option<u64>,
+    /// Upload date as `YYYYMMDD` (yt-dlp's native format).
+    upload_date: Option<String>,
     has_video: bool,
     has_live_chat: bool,
     watched: bool,
@@ -159,6 +186,18 @@ struct SubtitleInfo {
     url: String,
 }
 
+/// JSON representation of a single music track sent to the browser.
+#[derive(Serialize)]
+struct TrackInfo {
+    id: String,
+    title: String,
+    artist: String,
+    duration_secs: Option<f64>,
+    file_size: Option<u64>,
+    audio_url: Option<String>,
+    thumb_url: Option<String>,
+}
+
 /// Request body for `POST /api/download`.
 #[derive(Deserialize)]
 struct StartDownloadRequest {
@@ -167,12 +206,24 @@ struct StartDownloadRequest {
     /// individually — slower but fills gaps in partially-archived channels.
     #[serde(default)]
     full_scan: bool,
+    /// Quality selector: "best" (default), "1080p", "720p", "480p", "360p", or "music".
+    /// When "music", audio-only mode is used regardless of other settings.
+    #[serde(default)]
+    quality: String,
 }
 
 /// Response body for `GET /api/progress`.
 #[derive(Serialize)]
 struct ProgressResponse {
     jobs: Vec<JobSnapshot>,
+    queued: Vec<QueuedSnapshot>,
+    max_concurrent: usize,
+}
+
+#[derive(Serialize)]
+struct QueuedSnapshot {
+    label: String,
+    url: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -197,6 +248,28 @@ struct SettingsPayload {
     /// New plaintext password to set for downloads. Clients send this on POST; server does not return it.
     #[serde(skip_serializing, default)]
     new_download_password: Option<String>,
+    /// Plex library path, readable and writable by both client and server.
+    #[serde(default)]
+    plex_library_path: Option<String>,
+    /// Whether the background scheduler is enabled.
+    #[serde(default)]
+    scheduler_enabled: bool,
+    /// Hours between automatic channel checks (1–168). Ignored if 0 on POST.
+    #[serde(default)]
+    scheduler_interval_hours: u32,
+    /// Seconds until the next scheduled check. `None` if scheduler is disabled or last check unknown.
+    #[serde(skip_deserializing, default)]
+    scheduler_next_check_secs: Option<u64>,
+    /// Maximum simultaneous yt-dlp processes. 0 = unlimited. Ignored if 0 on POST.
+    #[serde(default)]
+    max_concurrent: usize,
+    /// If true, invoke the bundled yt-dlp under `~/.local/share/yt-offline/bin/`
+    /// instead of the system PATH yt-dlp.
+    #[serde(default)]
+    use_bundled_ytdlp: bool,
+    /// Whether the bundled yt-dlp binary is installed on disk (sent by server only).
+    #[serde(skip_deserializing, default)]
+    bundled_ytdlp_installed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -220,11 +293,14 @@ fn file_url(channels_root: &StdPath, full: &StdPath) -> Option<String> {
 }
 
 fn percent_encode_segment(s: &str) -> String {
+    use std::fmt::Write;
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            _ => out.push_str(&format!("%{:02X}", b)),
+            // `write!` reuses `out`'s buffer — avoids the intermediate
+            // `String` allocation that `format!` would produce per byte.
+            _ => { let _ = write!(out, "%{:02X}", b); }
         }
     }
     out
@@ -262,25 +338,11 @@ fn lang_label(code: &str) -> String {
 }
 
 fn find_video_info_path(library: &[library::Channel], id: &str) -> Option<PathBuf> {
-    for ch in library {
-        for v in ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter())) {
-            if v.id == id {
-                return v.info_path.clone();
-            }
-        }
-    }
-    None
+    library::find_video(library, id).and_then(|(v, _)| v.info_path.clone())
 }
 
 fn find_video_path(library: &[library::Channel], id: &str) -> Option<PathBuf> {
-    for ch in library {
-        for v in ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter())) {
-            if v.id == id {
-                return v.video_path.clone();
-            }
-        }
-    }
-    None
+    library::find_video(library, id).and_then(|(v, _)| v.video_path.clone())
 }
 
 fn detect_tailscale_ip() -> Option<String> {
@@ -434,6 +496,71 @@ pub fn write_cookies(text: &str) -> Result<usize, String> {
     Ok(count_cookies(&content))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn srt_to_vtt_replaces_comma_in_timestamps_only() {
+        let srt = "1\n00:00:01,500 --> 00:00:03,000\nHello, world\n";
+        let vtt = srt_to_vtt(srt);
+        assert!(vtt.starts_with("WEBVTT\n\n"));
+        // Comma in body preserved; comma in timestamp converted to dot.
+        assert!(vtt.contains("00:00:01.500 --> 00:00:03.000"));
+        assert!(vtt.contains("Hello, world"));
+    }
+
+    #[test]
+    fn count_cookies_only_counts_seven_field_lines() {
+        let body = "# Netscape HTTP Cookie File\n\
+                    .youtube.com\tTRUE\t/\tFALSE\t0\tname\tvalue\n\
+                    not a cookie line\n\
+                    .example.com\tTRUE\t/\tFALSE\t0\tn2\tv2\n";
+        assert_eq!(count_cookies(body), 2);
+    }
+
+    #[test]
+    fn percent_encode_segment_passes_safe_chars() {
+        assert_eq!(percent_encode_segment("abcXYZ0-9._~"), "abcXYZ0-9._~");
+    }
+
+    #[test]
+    fn percent_encode_segment_escapes_space_and_slash() {
+        assert_eq!(percent_encode_segment("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn percent_encode_segment_escapes_non_ascii() {
+        // 'é' in UTF-8 is 0xC3 0xA9.
+        assert_eq!(percent_encode_segment("é"), "%C3%A9");
+    }
+
+    #[test]
+    fn bind_mode_of_recognizes_loopback_and_wildcard() {
+        assert_eq!(bind_mode_of("127.0.0.1"), "localhost");
+        assert_eq!(bind_mode_of("localhost"), "localhost");
+        assert_eq!(bind_mode_of("0.0.0.0"), "all");
+        assert_eq!(bind_mode_of("100.64.1.2"), "tailscale");
+        assert_eq!(bind_mode_of("192.168.1.10"), "lan");
+    }
+
+    #[test]
+    fn hash_password_verify_roundtrip() {
+        let h = hash_password("hunter2").unwrap();
+        assert!(verify_password("hunter2", &h));
+        assert!(!verify_password("wrong", &h));
+    }
+
+    #[test]
+    fn lang_label_known_codes() {
+        assert_eq!(lang_label("en"), "English");
+        assert_eq!(lang_label("ja"), "Japanese");
+        assert_eq!(lang_label("en-orig"), "English (auto)");
+        // Unknown: returned as-is.
+        assert_eq!(lang_label("zz"), "zz");
+    }
+}
+
 pub fn hash_password(password: &str) -> Option<String> {
     use rand::thread_rng;
     let salt = SaltString::generate(thread_rng());
@@ -474,17 +601,31 @@ fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// True if the request carries a valid session cookie.
+/// True if the request carries a valid, non-expired session cookie.
+///
+/// Expired tokens are removed from the in-memory set as a side effect so the
+/// `sessions` map doesn't grow without bound for users who never log out.
 fn is_authed(state: &WebState, headers: &HeaderMap) -> bool {
-    match session_token_from_headers(headers) {
-        Some(token) => state.sessions.lock().unwrap().contains(&token),
-        None => false,
-    }
+    let Some(token) = session_token_from_headers(headers) else { return false };
+    let mut sessions = state.sessions.lock().unwrap();
+    let now = std::time::Instant::now();
+    // Lazy prune: drop anything older than the TTL.
+    sessions.retain(|_, issued| now.duration_since(*issued) < SESSION_TTL);
+    sessions.contains_key(&token)
 }
 
-/// Whether a download/access password is configured.
+/// Whether a download/access password is configured. Backed by an atomic
+/// cache to avoid a SQLite hit on every request (especially for static files).
 fn password_required(state: &WebState) -> bool {
-    state.db.lock().unwrap().get_setting("password_hash").ok().flatten().is_some()
+    state.password_required_cache.load(Ordering::Relaxed)
+}
+
+/// Re-read the password setting from the DB and update the cache. Called
+/// after any change that could affect whether a password exists.
+fn refresh_password_cache(state: &WebState) {
+    let present = state.db.lock().unwrap()
+        .get_setting("password_hash").ok().flatten().is_some();
+    state.password_required_cache.store(present, Ordering::Relaxed);
 }
 
 #[derive(Deserialize)]
@@ -492,22 +633,69 @@ struct LoginRequest {
     password: String,
 }
 
+/// Build the `Set-Cookie` header value for a session token.
+///
+/// `Secure` is added when the request arrived over HTTPS — detected either
+/// by a forwarding proxy (`X-Forwarded-Proto: https`) or by the request URI
+/// scheme. Setting `Secure` unconditionally would break logins on plain-HTTP
+/// LAN deployments since the browser would refuse to send the cookie back.
+fn session_cookie(token: &str, headers: &HeaderMap, max_age_secs: u64) -> String {
+    let secure = headers.get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age_secs}{secure_attr}")
+}
+
 /// `POST /api/login` — verify the password and issue a session cookie.
+///
+/// Rate-limited per source IP: after [`LOGIN_LOCKOUT_AFTER`] failed attempts,
+/// further attempts return 429 for [`LOGIN_LOCKOUT_DURATION`]. Successful
+/// logins reset the counter for that IP.
 async fn post_login(
     State(state): State<Arc<WebState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Response {
+    let ip = addr.ip();
+    let now = std::time::Instant::now();
+    // Check lockout first.
+    {
+        let mut attempts = state.login_attempts.lock().unwrap();
+        // GC entries whose lockout has elapsed.
+        attempts.retain(|_, a| a.until.map_or(true, |u| u > now));
+        if let Some(a) = attempts.get(&ip) {
+            if let Some(until) = a.until {
+                if until > now {
+                    return (StatusCode::TOO_MANY_REQUESTS, "too many failed attempts — try again shortly").into_response();
+                }
+            }
+        }
+    }
+
     let hash = state.db.lock().unwrap().get_setting("password_hash").ok().flatten();
     let Some(hash) = hash else {
         // No password configured; nothing to authenticate against.
         return (StatusCode::OK, "no password set").into_response();
     };
     if !verify_password(&body.password, &hash) {
+        let mut attempts = state.login_attempts.lock().unwrap();
+        let entry = attempts.entry(ip).or_insert(LoginAttempt { failures: 0, until: None });
+        entry.failures += 1;
+        if entry.failures >= LOGIN_LOCKOUT_AFTER {
+            entry.until = Some(now + LOGIN_LOCKOUT_DURATION);
+            entry.failures = 0;
+        }
         return (StatusCode::UNAUTHORIZED, "invalid password").into_response();
     }
+    // Success: reset the failure counter for this IP.
+    state.login_attempts.lock().unwrap().remove(&ip);
+
     let token = generate_session_token();
-    state.sessions.lock().unwrap().insert(token.clone());
-    let cookie = format!("session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000");
+    state.sessions.lock().unwrap().insert(token.clone(), now);
+    let cookie = session_cookie(&token, &headers, SESSION_TTL.as_secs());
     ([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response()
 }
 
@@ -519,8 +707,36 @@ async fn post_logout(
     if let Some(token) = session_token_from_headers(&headers) {
         state.sessions.lock().unwrap().remove(&token);
     }
-    let cookie = "session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
+    let cookie = session_cookie("", &headers, 0);
     ([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response()
+}
+
+/// Middleware that attaches conservative security headers to every response.
+///
+/// The Content-Security-Policy permits inline JS and styles (the embedded UI
+/// is one big inline script tag) but forbids loading code from third-party
+/// origins, blocks plugin / object embedding, and prevents the page from
+/// being framed. This caps the blast radius of any future XSS slip-up in
+/// the embedded UI strings.
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    // SAFETY: every value here is a fixed compile-time ASCII string.
+    let csp = "default-src 'self'; \
+               script-src 'self' 'unsafe-inline'; \
+               style-src 'self' 'unsafe-inline'; \
+               img-src 'self' data: blob: https:; \
+               media-src 'self' blob:; \
+               connect-src 'self'; \
+               font-src 'self'; \
+               object-src 'none'; \
+               base-uri 'self'; \
+               frame-ancestors 'none'";
+    headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(csp));
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    resp
 }
 
 /// Middleware gating every route behind a session cookie when a password is set.
@@ -600,6 +816,7 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
             title: v.title.clone(),
             duration_secs: v.duration_secs,
             file_size: v.file_size,
+            upload_date: v.upload_date.clone(),
             has_video: v.video_path.is_some(),
             has_live_chat: v.has_live_chat,
             watched: watched.contains(&v.id),
@@ -612,6 +829,9 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     };
 
     let channels = lib.iter().map(|ch| {
+        let thumb_url = ch.videos.iter()
+            .chain(ch.playlists.iter().flat_map(|p| p.videos.iter()))
+            .find_map(|v| v.thumb_path.as_deref().and_then(|p| file_url(root, p)));
         ChannelInfo {
             name: ch.name.clone(),
             total_videos: ch.total_videos(),
@@ -619,6 +839,7 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
             subscriber_count: ch.meta.as_ref().and_then(|m| m.subscriber_count),
             uploader: ch.meta.as_ref().and_then(|m| m.uploader.clone()),
             channel_url: ch.meta.as_ref().and_then(|m| m.channel_url.clone()),
+            thumb_url,
             playlists: ch.playlists.iter().map(|p| PlaylistInfo {
                 name: p.name.clone(),
                 videos: p.videos.iter().map(|v| to_info(v, &watched)).collect(),
@@ -630,10 +851,43 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     Json(LibraryResponse { channels })
 }
 
+async fn get_music(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let music_root = {
+        let dl = state.downloader.lock().unwrap();
+        dl.music_root()
+    };
+    let tracks = library::scan_music(&music_root);
+    let track_infos: Vec<TrackInfo> = tracks.into_iter().map(|t| {
+        let audio_url = {
+            let rel = t.path.strip_prefix(&music_root).ok()
+                .map(|r| format!("/music-files/{}", r.display()));
+            rel
+        };
+        let thumb_url = t.thumb_path.as_deref().and_then(|p| {
+            let rel = p.strip_prefix(&music_root).ok()?;
+            Some(format!("/music-files/{}", rel.display()))
+        });
+        TrackInfo {
+            id: t.id,
+            title: t.title,
+            artist: t.artist,
+            duration_secs: t.duration_secs,
+            file_size: t.file_size,
+            audio_url,
+            thumb_url,
+        }
+    }).collect();
+    Json(serde_json::json!({ "tracks": track_infos }))
+}
+
 async fn get_progress(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let mut dl = state.downloader.lock().unwrap();
     dl.poll();
-    Json(ProgressResponse { jobs: WebState::job_snapshots(&dl) })
+    let queued = dl.pending_snapshots().into_iter()
+        .map(|(label, url)| QueuedSnapshot { label, url })
+        .collect();
+    let max_concurrent = dl.max_concurrent;
+    Json(ProgressResponse { jobs: WebState::job_snapshots(&dl), queued, max_concurrent })
 }
 
 async fn post_download(
@@ -646,8 +900,20 @@ async fn post_download(
     if url.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty URL").into_response();
     }
-    let kind = detect_url_kind(&url);
-    state.downloader.lock().unwrap().start(url, &kind, body.full_scan);
+    let mut dl = state.downloader.lock().unwrap();
+    if body.quality == "music" {
+        dl.start_music(url);
+    } else {
+        let quality = match body.quality.as_str() {
+            "1080p" => DownloadQuality::Res1080,
+            "720p"  => DownloadQuality::Res720,
+            "480p"  => DownloadQuality::Res480,
+            "360p"  => DownloadQuality::Res360,
+            _       => DownloadQuality::Best,
+        };
+        let kind = detect_url_kind(&url);
+        dl.start(url, &kind, body.full_scan, quality);
+    }
     (StatusCode::ACCEPTED, "ok").into_response()
 }
 
@@ -671,9 +937,26 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let port = cfg.web.port;
     let current_bind = cfg.web.bind.clone();
     let available_binds = get_available_binds(port);
+    let plex_library_path = cfg.plex.library_path.as_deref()
+        .map(|p| p.display().to_string());
+    let scheduler_enabled = cfg.scheduler.enabled;
+    let scheduler_interval_hours = cfg.scheduler.interval_hours;
+    let max_concurrent = cfg.backup.max_concurrent;
+    let use_bundled_ytdlp = cfg.backup.use_bundled_ytdlp;
     drop(cfg);
-    let download_password_required =
-        state.db.lock().unwrap().get_setting("password_hash").ok().flatten().is_some();
+
+    let scheduler_next_check_secs = if scheduler_enabled {
+        let last = *state.last_scheduled_check.lock().unwrap();
+        let interval_secs = scheduler_interval_hours as u64 * 3600;
+        Some(match last {
+            None => 0,
+            Some(t) => interval_secs.saturating_sub(t.elapsed().as_secs()),
+        })
+    } else {
+        None
+    };
+
+    let download_password_required = state.password_required_cache.load(Ordering::Relaxed);
     Json(SettingsPayload {
         transcode: state.transcode.load(Ordering::Relaxed),
         source_url,
@@ -682,6 +965,13 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         bind_mode: None,
         download_password_required,
         new_download_password: None,
+        plex_library_path,
+        scheduler_enabled,
+        scheduler_interval_hours,
+        scheduler_next_check_secs,
+        max_concurrent,
+        use_bundled_ytdlp,
+        bundled_ytdlp_installed: crate::ytdlp_bin::bundled_installed(),
     })
 }
 
@@ -698,6 +988,19 @@ async fn post_settings(
         cfg.web.bind = new_addr;
     }
 
+    if let Some(ref p) = body.plex_library_path {
+        cfg.plex.library_path = if p.trim().is_empty() { None } else { Some(std::path::PathBuf::from(p.trim())) };
+    }
+
+    cfg.scheduler.enabled = body.scheduler_enabled;
+    if body.scheduler_interval_hours > 0 {
+        cfg.scheduler.interval_hours = body.scheduler_interval_hours;
+    }
+    if body.max_concurrent > 0 {
+        cfg.backup.max_concurrent = body.max_concurrent;
+    }
+    cfg.backup.use_bundled_ytdlp = body.use_bundled_ytdlp;
+
     if let Err(e) = cfg.save(&state.config_path) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("save failed: {e}")).into_response();
     }
@@ -705,7 +1008,20 @@ async fn post_settings(
     let current_bind = cfg.web.bind.clone();
     let port = cfg.web.port;
     let available_binds = get_available_binds(port);
+    let scheduler_enabled = cfg.scheduler.enabled;
+    let scheduler_interval_hours = cfg.scheduler.interval_hours;
+    let max_concurrent = cfg.backup.max_concurrent;
+    let use_bundled_ytdlp = cfg.backup.use_bundled_ytdlp;
     drop(cfg);
+
+    // Apply the new concurrency limit and binary choice to the live downloader.
+    {
+        let mut dl = state.downloader.lock().unwrap();
+        if body.max_concurrent > 0 {
+            dl.max_concurrent = body.max_concurrent;
+        }
+        dl.use_bundled_ytdlp = use_bundled_ytdlp;
+    }
 
     if let Some(new_pwd) = &body.new_download_password {
         let db = state.db.lock().unwrap();
@@ -716,15 +1032,28 @@ async fn post_settings(
         } else {
             return (StatusCode::INTERNAL_SERVER_ERROR, "failed to hash password").into_response();
         };
+        drop(db);
         if let Err(e) = result {
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")).into_response();
         }
         // Password changed: drop all existing sessions so they must re-authenticate.
         state.sessions.lock().unwrap().clear();
+        refresh_password_cache(&state);
     }
 
-    let download_password_required =
-        state.db.lock().unwrap().get_setting("password_hash").ok().flatten().is_some();
+    let plex_library_path = state.config.lock().unwrap().plex.library_path.as_deref()
+        .map(|p| p.display().to_string());
+    let download_password_required = state.password_required_cache.load(Ordering::Relaxed);
+    let scheduler_next_check_secs = if scheduler_enabled {
+        let last = *state.last_scheduled_check.lock().unwrap();
+        let interval_secs = scheduler_interval_hours as u64 * 3600;
+        Some(match last {
+            None => 0,
+            Some(t) => interval_secs.saturating_sub(t.elapsed().as_secs()),
+        })
+    } else {
+        None
+    };
     Json(SettingsPayload {
         transcode: body.transcode,
         source_url,
@@ -733,6 +1062,13 @@ async fn post_settings(
         bind_mode: None,
         download_password_required,
         new_download_password: None,
+        plex_library_path,
+        scheduler_enabled,
+        scheduler_interval_hours,
+        scheduler_next_check_secs,
+        max_concurrent,
+        use_bundled_ytdlp,
+        bundled_ytdlp_installed: crate::ytdlp_bin::bundled_installed(),
     }).into_response()
 }
 
@@ -853,18 +1189,41 @@ async fn post_resume(
 struct PreviewQuery { url: String }
 
 async fn get_preview(
-    State(_state): State<Arc<WebState>>,
+    State(state): State<Arc<WebState>>,
     Query(q): Query<PreviewQuery>,
 ) -> impl IntoResponse {
     let url = q.url.trim().to_string();
     if url.is_empty() {
         return (StatusCode::BAD_REQUEST, "no url").into_response();
     }
-    let output = tokio::process::Command::new("yt-dlp")
-        .arg("--dump-single-json")
+    let use_bundled = state.config.lock().unwrap().backup.use_bundled_ytdlp;
+    if use_bundled {
+        crate::ytdlp_bin::ensure_bundled_executable();
+    }
+    let ytdlp_path = crate::ytdlp_bin::ytdlp_invocation(use_bundled);
+    let mut cmd = tokio::process::Command::new(ytdlp_path);
+    // Extend PATH so yt-dlp finds the bundled deno for JS deciphering.
+    let bundled_dir = crate::ytdlp_bin::bundled_dir();
+    if bundled_dir.exists() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let new_path = match std::env::var_os("PATH") {
+            Some(existing) => format!("{}{}{}", bundled_dir.display(), sep, existing.to_string_lossy()),
+            None => bundled_dir.display().to_string(),
+        };
+        cmd.env("PATH", new_path);
+    }
+    cmd.arg("--dump-single-json")
         .arg("--flat-playlist")
-        .arg("--no-warnings")
-        .arg("--cookies").arg("cookies.txt")
+        .arg("--no-warnings");
+    // Mirror Downloader::apply_cookie_flags so the preview honors the same
+    // cookies precedence (file > browser fallback).
+    let browser = state.config.lock().unwrap().player.browser.clone();
+    if std::path::Path::new("cookies.txt").exists() {
+        cmd.arg("--cookies").arg("cookies.txt");
+    } else if !browser.is_empty() && browser != "none" {
+        cmd.arg("--cookies-from-browser").arg(&browser);
+    }
+    let output = cmd
         .arg("--impersonate").arg("Chrome-146:Macos-26")
         .arg(&url)
         .stdin(Stdio::null())
@@ -966,15 +1325,11 @@ async fn get_description(
     Path(video_id): Path<String>,
 ) -> impl IntoResponse {
     let lib = state.library.lock().unwrap();
-    for ch in lib.iter() {
-        for v in ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter())) {
-            if v.id == video_id {
-                let text = v.description_path.as_ref()
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .unwrap_or_default();
-                return (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response();
-            }
-        }
+    if let Some((v, _)) = library::find_video(&lib, &video_id) {
+        let text = v.description_path.as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
+        return (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response();
     }
     (StatusCode::NOT_FOUND, "not found").into_response()
 }
@@ -987,6 +1342,24 @@ async fn post_rescan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     }
     *state.library.lock().unwrap() = new_lib;
     (StatusCode::OK, "rescanned")
+}
+
+/// `POST /api/plex/generate` — generate (or refresh) the Plex symlink tree.
+async fn post_plex_generate(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let plex_root = {
+        let cfg = state.config.lock().unwrap();
+        cfg.plex.library_path.clone()
+    };
+    let Some(plex_root) = plex_root else {
+        return (StatusCode::BAD_REQUEST, "no plex.library_path configured").into_response();
+    };
+    let lib = state.library.lock().unwrap();
+    let result = crate::plex::generate(&lib, &plex_root);
+    drop(lib);
+    Json(serde_json::json!({
+        "links_created": result.links_created,
+        "errors": result.errors,
+    })).into_response()
 }
 
 /// `GET /api/maintenance/scan` — report duplicate videos and missing assets.
@@ -1030,6 +1403,35 @@ async fn post_maintenance_repair(
     (StatusCode::ACCEPTED, "repair queued").into_response()
 }
 
+/// `POST /api/scheduler/run` — trigger an immediate scheduled channel check.
+async fn post_scheduler_run(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    if state.downloader.lock().unwrap().any_running() {
+        return (StatusCode::CONFLICT, "downloads already running").into_response();
+    }
+    let urls: Vec<String> = state.library.lock().unwrap()
+        .iter()
+        .map(|ch| crate::downloader::check_url_for_folder(&ch.name))
+        .collect();
+    if urls.is_empty() {
+        return (StatusCode::OK, "no channels to check").into_response();
+    }
+    let count = urls.len();
+    let mut dl = state.downloader.lock().unwrap();
+    for url in urls {
+        let kind = detect_url_kind(&url);
+        dl.start(url, &kind, true, DownloadQuality::Best);
+    }
+    *state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
+    (StatusCode::ACCEPTED, format!("started {count} channel checks")).into_response()
+}
+
+/// `POST /api/ytdlp/update` — download (or update) the bundled yt-dlp + deno
+/// binaries. Streams output through a regular [`Job`] entry.
+async fn post_ytdlp_update(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    state.downloader.lock().unwrap().start_ytdlp_update();
+    (StatusCode::ACCEPTED, "started bundled yt-dlp update").into_response()
+}
+
 /// Delete cookies.txt, removing all stored session cookies.
 pub fn clear_cookies() -> Result<(), String> {
     let p = cookies_path();
@@ -1068,12 +1470,21 @@ async fn delete_cookies() -> impl IntoResponse {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+/// Run the web server in the foreground until the process is killed.
+///
+/// The `--web` CLI path. We hand `serve` a sentinel `Receiver` whose `Sender`
+/// is leaked, so `recv()` blocks forever and the shutdown branch of the
+/// `tokio::select!` inside `serve` never fires. The previous `let _ = tx`
+/// dropped the sender on the same line and caused immediate shutdown.
 pub fn run(config: Config) -> ! {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let (tx, rx) = std::sync::mpsc::channel();
-    let _ = tx; // Keep tx alive to prevent rx from becoming permanently closed
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::mem::forget(tx); // intentional leak: keeps rx alive forever
     rt.block_on(serve(config, rx));
-    unreachable!()
+    // serve() should run until the process exits. If it ever returns,
+    // sit in an idle loop instead of panicking — the listener bind failed
+    // and was already logged.
+    loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
 }
 
 pub fn run_with_shutdown(config: Config) -> std::sync::mpsc::Sender<()> {
@@ -1099,11 +1510,19 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     let watched = db.get_watched().unwrap_or_default();
     let positions = db.get_positions().unwrap_or_default();
 
-    let downloader = Downloader::new(channels_root.clone(), config.player.browser.clone());
+    let downloader = Downloader::new(
+        channels_root.clone(),
+        config.player.browser.clone(),
+        config.backup.max_concurrent,
+        config.backup.use_bundled_ytdlp,
+    );
+    let music_root = downloader.music_root();
+    let _ = std::fs::create_dir_all(&music_root);
     let transcode = AtomicBool::new(config.web.transcode);
     let port = config.web.port;
     let bind_addr = config.web.bind.clone();
 
+    let password_required_initial = db.get_setting("password_hash").ok().flatten().is_some();
     let state = Arc::new(WebState {
         library: Mutex::new(library),
         downloader: Mutex::new(downloader),
@@ -1114,7 +1533,45 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         config_path,
         config: Mutex::new(config),
         transcode,
-        sessions: Mutex::new(HashSet::new()),
+        sessions: Mutex::new(HashMap::new()),
+        last_scheduled_check: Mutex::new(None),
+        password_required_cache: AtomicBool::new(password_required_initial),
+        login_attempts: Mutex::new(HashMap::new()),
+    });
+
+    // Background scheduler — ticks every 60 s; runs channel checks when due.
+    let sched_state = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            let (enabled, interval_hours) = {
+                let cfg = sched_state.config.lock().unwrap();
+                (cfg.scheduler.enabled, cfg.scheduler.interval_hours)
+            };
+            if !enabled { continue; }
+            if sched_state.downloader.lock().unwrap().any_running() { continue; }
+            // Clamp interval defensively. A manually edited config.toml with 0
+            // (or accidentally tiny value) would otherwise trigger every tick.
+            let safe_hours = interval_hours.max(1);
+            let interval_dur = std::time::Duration::from_secs(safe_hours as u64 * 3600);
+            let due = {
+                let last = *sched_state.last_scheduled_check.lock().unwrap();
+                last.map_or(true, |t| t.elapsed() >= interval_dur)
+            };
+            if !due { continue; }
+            let urls: Vec<String> = sched_state.library.lock().unwrap()
+                .iter()
+                .map(|ch| crate::downloader::check_url_for_folder(&ch.name))
+                .collect();
+            if urls.is_empty() { continue; }
+            let mut dl = sched_state.downloader.lock().unwrap();
+            for url in urls {
+                let kind = detect_url_kind(&url);
+                dl.start(url, &kind, true, DownloadQuality::Best);
+            }
+            *sched_state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
+        }
     });
 
     let app = Router::new()
@@ -1134,14 +1591,25 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/transcode/:id", get(get_transcode))
         .route("/api/sub-vtt/*path", get(get_sub_vtt))
+        .route("/api/plex/generate", post(post_plex_generate))
         .route("/api/maintenance/scan", get(get_maintenance_scan))
         .route("/api/maintenance/remove", post(post_maintenance_remove))
         .route("/api/maintenance/repair/:id", post(post_maintenance_repair))
         .route("/api/cookies", get(get_cookies).post(post_cookies).delete(delete_cookies))
+        .route("/api/scheduler/run", post(post_scheduler_run))
+        .route("/api/ytdlp/update", post(post_ytdlp_update))
+        .route("/api/music", get(get_music))
         .route("/api/login", post(post_login))
         .route("/api/logout", post(post_logout))
         .nest_service("/files", ServeDir::new(&channels_root))
+        .nest_service("/music-files", ServeDir::new(&music_root))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        // Cap any uploaded body at 4 MiB. cookies.txt and POSTed JSON payloads
+        // are tiny in normal use; anything larger is either accidental or
+        // malicious. Path-specific overrides aren't needed since we have no
+        // legitimate large-upload endpoints.
+        .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
+        .layer(middleware::from_fn(security_headers))
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(format!("{bind_addr}:{port}")).await {
@@ -1153,7 +1621,9 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     };
     println!("yt-offline web UI: http://localhost:{port}");
 
-    let server = axum::serve(listener, app);
+    // `into_make_service_with_connect_info` so handlers can extract the
+    // client's `SocketAddr` (used for per-IP rate limiting on /api/login).
+    let server = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>());
     tokio::select! {
         _ = server => {},
         _ = tokio::task::spawn_blocking(move || {
@@ -1246,6 +1716,14 @@ const HTML_UI: &str = r#"<!DOCTYPE html>
   section#content{flex:1;overflow-y:auto;padding:10px;min-width:0}
   .toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+  .ch-card{background:var(--card);border-radius:8px;overflow:hidden;border:2px solid transparent;transition:border-color .15s;cursor:pointer;display:flex;flex-direction:column}
+  .ch-card:hover{border-color:var(--accent)}
+  .ch-card-thumb{width:100%;aspect-ratio:16/9;background:#111;overflow:hidden;position:relative}
+  .ch-card-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .ch-card-thumb .nothumb{display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:var(--muted);font-size:28px}
+  .ch-card-info{padding:8px 10px 10px;display:flex;flex-direction:column;gap:2px}
+  .ch-card-name{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ch-card-meta{font-size:11px;color:var(--muted)}
   .card{background:var(--card);border-radius:6px;overflow:hidden;border:2px solid transparent;transition:border-color .15s;display:flex;flex-direction:column;cursor:pointer}
   .card:hover{border-color:rgba(233,69,96,.5)}
   .card.selected{border-color:var(--accent)}
@@ -1321,6 +1799,8 @@ const HTML_UI: &str = r#"<!DOCTYPE html>
   <h1>yt-offline</h1>
   <input type="search" id="search" placeholder="Filter…" oninput="renderGrid()">
   <select id="sort" onchange="renderGrid()">
+    <option value="date-desc">Newest</option>
+    <option value="date-asc">Oldest</option>
     <option value="title">Title</option>
     <option value="dur-asc">Shortest</option>
     <option value="dur-desc">Longest</option>
@@ -1353,13 +1833,22 @@ const HTML_UI: &str = r#"<!DOCTYPE html>
 <footer>
   <input type="url" id="dl-url" placeholder="YouTube URL…" onkeydown="if(event.key==='Enter')previewDownload()">
   <button class="primary" onclick="previewDownload()">⬇ Download</button>
-  <label style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Check every video individually instead of stopping at the first already-archived one. Slower but fills gaps."><input type="checkbox" id="dl-full-scan"> Full scan</label>
+  <select id="dl-quality" title="Download quality" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px" onchange="updateDlMode()">
+    <option value="best">Best quality</option>
+    <option value="1080p">1080p</option>
+    <option value="720p">720p</option>
+    <option value="480p">480p</option>
+    <option value="360p">360p</option>
+    <option value="music">🎵 Music</option>
+  </select>
+  <label id="fast-mode-label" style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Stop at the first already-downloaded video. Faster for large channels but may miss new videos if gaps exist in the archive."><input type="checkbox" id="dl-full-scan"> Fast mode</label>
   <span id="agpl-notice" style="font-size:10px;color:var(--muted);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
 </footer>
 
 <script>
 'use strict';
-let library=[], channelUrls=[], activeChannelIdx=null, activePlaylistIdx=null, showContinue=false;
+let library=[], channelUrls=[], activeChannelIdx=null, activePlaylistIdx=null, showContinue=false, showChannels=false, showMusic=false;
+let musicTracks=[];
 let bulkMode=false, selected=new Set(), selectedId=null;
 let currentPlayingId=null, saveTimer=null;
 
@@ -1381,6 +1870,7 @@ async function loadLibrary(){
     renderSidebar();renderGrid();
     if(selectedId)renderDetails();
   }catch(e){setStatus('Error: '+e.message)}
+  loadMusic();
 }
 function setStatus(s){document.getElementById('status').textContent=s}
 
@@ -1392,7 +1882,9 @@ function renderSidebar(){
   const total=library.reduce((s,c)=>s+c.total_videos,0);
   let h=`<div class="sidebar-label">Library</div>`;
   if(contVids.length)h+=`<div class="ch-item${showContinue?' active':''}" onclick="setContinue()">▶ Continue (${contVids.length})</div>`;
-  h+=`<div class="ch-item${!showContinue&&activeChannelIdx===null?' active':''}" onclick="setView(null,null)">⊞ All (${total})</div>`;
+  h+=`<div class="ch-item${showChannels?' active':''}" onclick="setChannels()">⊟ Channels (${library.length})</div>`;
+  h+=`<div class="ch-item${!showContinue&&!showChannels&&activeChannelIdx===null?' active':''}" onclick="setView(null,null)">⊞ All (${total})</div>`;
+  h+=`<div class="ch-item${showMusic?' active':''}" onclick="setMusic()">♫ Music (${musicTracks.length})</div>`;
   h+=`<div class="sidebar-label" style="margin-top:8px">Channels</div>`;
   for(let i=0;i<library.length;i++){
     const ch=library[i];
@@ -1409,8 +1901,10 @@ function renderSidebar(){
   }
   el.innerHTML=h;
 }
-function setContinue(){showContinue=true;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setView(ci,pi){showContinue=false;activeChannelIdx=ci;activePlaylistIdx=pi;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setContinue(){showContinue=true;showChannels=false;showMusic=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setChannels(){showChannels=true;showContinue=false;showMusic=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setView(ci,pi){showContinue=false;showChannels=false;showMusic=false;activeChannelIdx=ci;activePlaylistIdx=pi;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setMusic(){showMusic=true;showContinue=false;showChannels=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
 
 /* ── Grid ───────────────────────────────────────────────────────── */
 function currentVideos(){
@@ -1432,6 +1926,8 @@ function currentVideos(){
     for(const v of pool)
       if(!q||v.title.toLowerCase().includes(q)||v.id.includes(q))vids.push({...v,channel:ch.name});
   }
+  if(sort==='date-desc')vids.sort((a,b)=>(b.upload_date||'').localeCompare(a.upload_date||''));
+  if(sort==='date-asc')vids.sort((a,b)=>{const ax=a.upload_date||'￿',bx=b.upload_date||'￿';return ax.localeCompare(bx)});
   if(sort==='dur-asc')vids.sort((a,b)=>(a.duration_secs??0)-(b.duration_secs??0));
   if(sort==='dur-desc')vids.sort((a,b)=>(b.duration_secs??0)-(a.duration_secs??0));
   if(sort==='size-asc')vids.sort((a,b)=>(a.file_size??0)-(b.file_size??0));
@@ -1441,6 +1937,8 @@ function currentVideos(){
 }
 
 function renderGrid(){
+  if(showChannels){renderChannelGrid();return}
+  if(showMusic){renderMusicGrid();return}
   const vids=currentVideos();
   setStatus(vids.length+' video'+(vids.length!==1?'s':''));
   const grid=document.getElementById('grid');
@@ -1450,6 +1948,7 @@ function renderGrid(){
     const chk=bulkMode?`<input type="checkbox" ${selected.has(v.id)?'checked':''} onchange="toggleSel('${v.id}',this.checked)">`:'';
     const meta=[
       showChCol?esc(v.channel):null,
+      v.upload_date?fmtDate(v.upload_date):null,
       v.duration_secs!=null?fmtDur(v.duration_secs):null,
       v.file_size!=null?fmtSize(v.file_size):null,
       v.has_live_chat?'💬':null,
@@ -1473,6 +1972,61 @@ function renderGrid(){
 
 /* ── Watched / bulk ─────────────────────────────────────────────── */
 async function toggleWatched(id){try{await api('/api/watched/'+id,{method:'POST'});await loadLibrary()}catch(e){setStatus('Error: '+e.message)}}
+function renderChannelGrid(){
+  const q=(document.getElementById('search')?.value||'').toLowerCase();
+  const grid=document.getElementById('grid');
+  const chs=q?library.filter(ch=>ch.name.toLowerCase().includes(q)||ch.uploader?.toLowerCase().includes(q)):library;
+  setStatus(chs.length+' channel'+(chs.length!==1?'s':''));
+  if(!chs.length){grid.innerHTML='<div class="empty">Nothing here.</div>';return}
+  grid.innerHTML='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;padding:4px">'+chs.map((ch,i)=>{
+    const idx=library.indexOf(ch);
+    const thumb=ch.thumb_url?`<img src="${ch.thumb_url}" loading="lazy" alt="">`:'<div class="nothumb">📺</div>';
+    const size=ch.size_bytes>0?` · ${fmtSize(ch.size_bytes)}`:'';
+    const label=ch.uploader&&ch.uploader!==ch.name?esc(ch.uploader):esc(ch.name);
+    return `<div class="ch-card" onclick="setView(${idx},null)">
+      <div class="ch-card-thumb">${thumb}</div>
+      <div class="ch-card-info">
+        <div class="ch-card-name" title="${esc(ch.name)}">${label}</div>
+        <div class="ch-card-meta">${ch.total_videos} video${ch.total_videos!==1?'s':''}${size}</div>
+      </div>
+    </div>`;
+  }).join('')+'</div>';
+}
+async function loadMusic(){
+  try{const d=await(await api('/api/music')).json();musicTracks=d.tracks||[];renderSidebar();if(showMusic)renderMusicGrid()}catch(e){console.warn('music load:',e)}
+}
+function renderMusicGrid(){
+  const q=(document.getElementById('search')?.value||'').toLowerCase();
+  const grid=document.getElementById('grid');
+  const tracks=q?musicTracks.filter(t=>t.title.toLowerCase().includes(q)||t.artist.toLowerCase().includes(q)):musicTracks;
+  setStatus(tracks.length+' track'+(tracks.length!==1?'s':''));
+  if(!tracks.length){grid.innerHTML='<div class="empty">No music yet. Use 🎵 Music mode in the download bar.</div>';return}
+  let currentArtist='',h='<div style="width:100%;padding:4px">';
+  for(const t of tracks){
+    if(t.artist!==currentArtist){
+      currentArtist=t.artist;
+      h+=`<div style="font-weight:700;margin:12px 0 4px;color:var(--text)">${esc(t.artist)}</div><hr style="border-color:var(--border);margin:0 0 8px">`;
+    }
+    const dur=t.duration_secs!=null?fmtDur(t.duration_secs):'';
+    const playBtn=t.audio_url?`<button class="play" onclick="playAudio('${esc(t.id)}','${esc(t.title)}','${esc(safeUrl(t.audio_url))}')">▶</button>`:'';
+    h+=`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">
+      ${playBtn}
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.title)}</span>
+      <span style="color:var(--muted);font-size:12px;flex-shrink:0">${dur}</span>
+    </div>`;
+  }
+  h+='</div>';
+  grid.innerHTML=h;
+}
+function playAudio(id,title,url){
+  const bg=document.createElement('div');bg.className='modal-bg';
+  bg.onclick=e=>{if(e.target===bg)closeModal(bg)};
+  bg.innerHTML=`<div class="modal" style="max-width:420px">
+    <div class="modal-hdr"><h2>${esc(title)}</h2><button onclick="closeModal(this.closest('.modal-bg'))">✕ Close</button></div>
+    <div class="modal-body"><audio id="audio-player" src="${url}" controls autoplay style="width:100%"></audio></div>
+  </div>`;
+  document.body.appendChild(bg);
+}
 function toggleBulk(){bulkMode=document.getElementById('bulk').checked;selected.clear();document.getElementById('bulk-actions').style.display=bulkMode?'flex':'none';renderGrid()}
 function toggleSel(id,on){if(on)selected.add(id);else selected.delete(id);document.getElementById('sel-count').textContent=selected.size+' selected'}
 async function bulkWatched(on){await Promise.all([...selected].map(id=>api('/api/watched/'+id,{method:'POST'})));selected.clear();await loadLibrary()}
@@ -1497,7 +2051,7 @@ async function previewDownload(){
     bg.innerHTML=`<div class="modal" style="max-width:480px">
       <div class="modal-hdr"><h2>Confirm download</h2></div>
       <div class="modal-body" style="align-items:flex-start;gap:12px">
-        ${d.thumbnail?`<img class="preview-thumb" src="${esc(d.thumbnail)}" onerror="this.remove()">`:''}
+        ${d.thumbnail?`<img class="preview-thumb" src="${esc(safeUrl(d.thumbnail))}" onerror="this.remove()">`:''}
         <div>
           <div style="font-weight:600;margin-bottom:6px">${esc(d.title||'Unknown')}</div>
           ${d.channel?`<div style="font-size:12px;color:var(--muted);margin-bottom:4px">${esc(d.channel)}</div>`:''}
@@ -1522,15 +2076,19 @@ async function previewDownload(){
     setStatus('');
   }
 }
-function fullScan(){return document.getElementById('dl-full-scan')?.checked||false}
+function fullScan(){return !(document.getElementById('dl-full-scan')?.checked||false)}
+function dlQuality(){return document.getElementById('dl-quality')?.value||'best'}
+function updateDlMode(){const isMusic=dlQuality()==='music';document.getElementById('fast-mode-label').style.display=isMusic?'none':'flex'}
 async function confirmDownload(url,btn){
   if(btn)btn.closest('.modal-bg').remove();
   try{
-    await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,full_scan:fullScan()})});
+    const quality=dlQuality();
+    const body={url,full_scan:fullScan(),quality};
+    await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     document.getElementById('dl-url').value='';setStatus('Download queued…')
   }catch(e){setStatus('Error: '+e.message)}
 }
-async function downloadChannel(url){try{await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,full_scan:fullScan()})});setStatus('Checking for new videos…')}catch(e){setStatus('Error: '+e.message)}}
+async function downloadChannel(url){try{await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,full_scan:true,quality:'best'})});setStatus('Checking for new videos…')}catch(e){setStatus('Error: '+e.message)}}
 function checkUrlForChannel(name){
   // Mirror check_url_for_folder in downloader.rs: UC+22 chars = channel ID, else handle
   return(/^UC.{22}$/.test(name))
@@ -1551,11 +2109,11 @@ function playVideo(id){
   currentPlayingId=id;
   const bg=document.createElement('div');bg.className='modal-bg';
   bg.onclick=e=>{if(e.target===bg)closeModal(bg)};
-  const tracks=(v.subtitles||[]).map((s,i)=>`<track kind="subtitles" src="${s.url}" srclang="${esc(s.lang)}" label="${esc(s.label)}"${i===0?' default':''}>`).join('');
+  const tracks=(v.subtitles||[]).map((s,i)=>`<track kind="subtitles" src="${esc(safeUrl(s.url))}" srclang="${esc(s.lang)}" label="${esc(s.label)}"${i===0?' default':''}>`).join('');
   const chapPane=v.has_chapters?`<div class="chapters-pane" id="chapters-pane"><h4>Chapters</h4><div id="chapters-list"><em style="padding:10px;display:block;color:var(--muted)">Loading…</em></div></div>`:'';
   bg.innerHTML=`<div class="modal">
     <div class="modal-hdr"><h2>${esc(v.title)}</h2><button onclick="closeModal(this.closest('.modal-bg'))">✕ Close</button></div>
-    <div class="modal-body"><video id="player-video" src="${v.video_url}" controls autoplay crossorigin="anonymous">${tracks}</video>${chapPane}</div>
+    <div class="modal-body"><video id="player-video" src="${esc(safeUrl(v.video_url))}" controls autoplay crossorigin="anonymous">${tracks}</video>${chapPane}</div>
   </div>`;
   document.body.appendChild(bg);
   const vid=bg.querySelector('#player-video');
@@ -1699,8 +2257,8 @@ async function openSettings(){
   let ck={exists:false,cookies:0};try{ck=await(await api('/api/cookies')).json()}catch{}
   const cookiesStatus=ck.exists?`${ck.cookies} cookie(s) loaded`:'no cookies.txt';
   const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
-  bg.innerHTML=`<div class="modal" style="max-width:420px">
-    <div class="modal-hdr"><h2>Settings</h2></div>
+  bg.innerHTML=`<div class="modal" style="max-width:420px;overflow-y:auto">
+    <div class="modal-hdr" style="position:sticky;top:0;background:var(--panel);z-index:1;padding-bottom:6px"><h2>Settings</h2></div>
     <div class="settings-row">
       <label for="cf-transcode">Transcode videos (mp4/H.264)</label>
       <input type="checkbox" id="cf-transcode" ${cur.transcode?'checked':''}>
@@ -1731,6 +2289,51 @@ async function openSettings(){
         <button onclick="clearCookies(this)" style="color:var(--muted)">Clear</button>
       </div>
       <div class="settings-hint">Choose a file or paste (e.g. from "Get cookies.txt LOCALLY"). Refresh when downloads start hitting captchas.</div>
+    </div>
+    <hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">Scheduler</div>
+    <div class="settings-row">
+      <label for="cf-sched-enabled">Auto-check all channels</label>
+      <input type="checkbox" id="cf-sched-enabled" ${cur.scheduler_enabled?'checked':''} onchange="document.getElementById('cf-sched-interval-row').style.display=this.checked?'flex':'none'">
+    </div>
+    <div id="cf-sched-interval-row" class="settings-row" style="display:${cur.scheduler_enabled?'flex':'none'}">
+      <label for="cf-sched-interval">Every</label>
+      <select id="cf-sched-interval" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px">
+        ${[1,2,6,12,24,48,72,168].map(h=>`<option value="${h}"${(cur.scheduler_interval_hours||24)===h?' selected':''}>${h===1?'1 hour':h===168?'1 week':h<24?h+' hours':h===24?'1 day':(h/24)+' days'}</option>`).join('')}
+      </select>
+    </div>
+    <div class="settings-hint" style="margin-bottom:6px">${cur.scheduler_next_check_secs!=null?'Next check in '+fmtCountdown(cur.scheduler_next_check_secs)+'.':''}</div>
+    <div style="display:flex;gap:6px;margin-bottom:4px">
+      <button onclick="runScheduler(this)">▶ Check all channels now</button>
+      <span id="sched-status" style="font-size:11px;color:var(--muted);align-self:center"></span>
+    </div>
+    <div class="settings-row" style="margin-top:6px">
+      <label for="cf-max-concurrent">Max concurrent downloads</label>
+      <input type="number" id="cf-max-concurrent" value="${cur.max_concurrent||3}" min="1" max="10" style="width:56px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:13px">
+    </div>
+    <div class="settings-hint" style="margin-bottom:4px">Extra downloads queue and start automatically when a slot opens.</div>
+    <hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">yt-dlp binary</div>
+    <div class="settings-row">
+      <label for="cf-ytdlp-bundled">Use bundled yt-dlp + deno</label>
+      <input type="checkbox" id="cf-ytdlp-bundled" ${cur.use_bundled_ytdlp?'checked':''}>
+    </div>
+    <div class="settings-hint" style="margin-bottom:6px">Bundled binaries live in ~/.local/share/yt-offline/bin/ and include a JS runtime (deno) needed for YouTube signature deciphering. When off, the yt-dlp on your PATH is used.</div>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+      <button onclick="updateYtdlp(this)">${cur.bundled_ytdlp_installed?'⟳ Update bundled':'⤓ Install bundled'}</button>
+      <span style="font-size:11px;color:var(--muted)">${cur.bundled_ytdlp_installed?'✓ installed':'not installed'}</span>
+      <span id="ytdlp-status" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+    <hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">Plex</div>
+    <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
+      <label>Library path</label>
+      <input type="text" id="cf-plex-path" value="${esc(cur.plex_library_path||'')}" placeholder="/media/plex/YouTube" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 8px;border-radius:4px;font-family:monospace;font-size:12px">
+      <div class="settings-hint">Symlink tree of channels as TV shows. Point a Plex "TV Shows" library here.</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button onclick="generatePlex(this)">⟳ Generate Plex library</button>
+        <span id="plex-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
     </div>
     ${srcRow}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
@@ -1773,13 +2376,64 @@ async function clearCookies(btn){
   }catch(e){setStatus('Error: '+e.message)}finally{btn.disabled=false}
 }
 
+async function generatePlex(btn){
+  const path=document.getElementById('cf-plex-path')?.value.trim();
+  if(!path){document.getElementById('plex-status').textContent='Set a path first';return}
+  btn.disabled=true;
+  document.getElementById('plex-status').textContent='Generating…';
+  try{
+    await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({transcode:document.getElementById('cf-transcode').checked,plex_library_path:path})});
+    const r=await api('/api/plex/generate',{method:'POST'});
+    const d=await r.json();
+    const errs=d.errors?.length?' ('+d.errors.length+' error(s))':'';
+    document.getElementById('plex-status').textContent=d.links_created+' link(s) created'+errs;
+  }catch(e){document.getElementById('plex-status').textContent='Error: '+e.message}
+  finally{btn.disabled=false}
+}
+function fmtCountdown(secs){
+  if(secs<=0)return'now';
+  const h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60);
+  if(h>0)return h+'h '+(m>0?m+'m ':'');
+  return m>0?m+'m':'< 1m';
+}
+async function updateYtdlp(btn){
+  btn.disabled=true;
+  const st=document.getElementById('ytdlp-status');
+  st.textContent='Started — see Downloads bar';
+  try{
+    const r=await fetch('/api/ytdlp/update',{method:'POST'});
+    const t=await r.text();
+    if(!r.ok)throw new Error(t);
+    setStatus('yt-dlp update job started');
+  }catch(e){st.textContent='Error: '+e.message}
+  finally{btn.disabled=false}
+}
+async function runScheduler(btn){
+  btn.disabled=true;
+  const st=document.getElementById('sched-status');
+  st.textContent='Starting…';
+  try{
+    const r=await fetch('/api/scheduler/run',{method:'POST'});
+    const t=await r.text();
+    if(!r.ok&&r.status!==409)throw new Error(t);
+    st.textContent=r.status===409?'Already running.':t;
+    setStatus('Scheduled check started');
+  }catch(e){st.textContent='Error: '+e.message}
+  finally{btn.disabled=false}
+}
 async function saveSettings(btn){
   const transcode=document.getElementById('cf-transcode').checked;
   const bindMode=document.getElementById('cf-bind')?.value;
   const pwdCheckbox=document.getElementById('cf-download-pwd');
   const pwdInput=document.getElementById('cf-download-password');
-  const payload={transcode};
+  const plexPath=document.getElementById('cf-plex-path')?.value;
+  const schedEnabled=document.getElementById('cf-sched-enabled')?.checked||false;
+  const schedInterval=parseInt(document.getElementById('cf-sched-interval')?.value||'24',10);
+  const maxConcurrent=parseInt(document.getElementById('cf-max-concurrent')?.value||'3',10);
+  const useBundledYtdlp=document.getElementById('cf-ytdlp-bundled')?.checked||false;
+  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp};
   if(bindMode)payload.bind_mode=bindMode;
+  if(plexPath!==undefined)payload.plex_library_path=plexPath;
   if(pwdCheckbox&&pwdCheckbox.checked){
     payload.new_download_password=pwdInput?.value||'';
   }
@@ -1875,11 +2529,16 @@ async function repairAll(btn){
 }
 
 /* ── Jobs ───────────────────────────────────────────────────────── */
-function renderJobs(jobs){
+function renderJobs(jobs,queued,maxConcurrent){
   const el=document.getElementById('jobs');
-  if(!jobs.length){el.innerHTML='';return}
+  if(!jobs.length&&!queued?.length){el.innerHTML='';return}
   const fin=jobs.some(j=>j.state!=='running');
   const hdr=fin?`<div style="padding:4px 14px;display:flex;justify-content:flex-end;border-bottom:1px solid var(--border)"><button onclick="clearFinishedJobs()" style="font-size:11px;padding:2px 8px">✕ Clear finished</button></div>`:'';
+  const queuedHtml=(queued&&queued.length)?queued.map(q=>`<div class="job">
+      <span class="badge" style="color:var(--muted)">queued</span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${esc(q.label)} — ${esc(q.url)}</span>
+    </div>`).join(''):'';
+  const limitNote=maxConcurrent>0?`<div style="font-size:11px;color:var(--muted);padding:2px 14px">max ${maxConcurrent} concurrent</div>`:'';
   el.innerHTML=hdr+jobs.map((j,i)=>{
     const dismiss=j.state!=='running'?`<button onclick="removeJob(${i})" style="font-size:11px;padding:1px 6px">✕</button>`:'';
     return `<div class="job">
@@ -1889,22 +2548,46 @@ function renderJobs(jobs){
       <span style="font-size:11px;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_line)}</span>
       ${dismiss}
     </div>`;
-  }).join('');
+  }).join('')+queuedHtml+limitNote;
 }
 async function clearFinishedJobs(){try{await api('/api/jobs/clear',{method:'POST'});await pollProgress()}catch(e){setStatus('Error: '+e.message)}}
 async function removeJob(idx){try{await api('/api/jobs/'+idx,{method:'DELETE'});await pollProgress()}catch(e){setStatus('Error: '+e.message)}}
 
 let wasRunning=false;
 async function pollProgress(){
-  try{const{jobs}=await(await api('/api/progress')).json();renderJobs(jobs);const run=jobs.some(j=>j.state==='running');if(wasRunning&&!run)await loadLibrary();wasRunning=run}catch{}
+  try{
+    const d=await(await api('/api/progress')).json();
+    renderJobs(d.jobs,d.queued,d.max_concurrent);
+    const run=d.jobs.some(j=>j.state==='running')||(d.queued&&d.queued.length>0);
+    if(wasRunning&&!run)await loadLibrary();
+    wasRunning=run;
+    // Poll fast while something's happening, slow when idle. Halves request
+    // count + JSON parses + battery use when the tab sits open all day.
+    schedulePoll(run?600:5000);
+  }catch{schedulePoll(2000)}
 }
-setInterval(pollProgress,600);
+let pollTimer=null;
+function schedulePoll(ms){
+  if(pollTimer)clearTimeout(pollTimer);
+  pollTimer=setTimeout(pollProgress,ms);
+}
+schedulePoll(600);
 
 /* ── Utilities ──────────────────────────────────────────────────── */
 function fmtDur(s){s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return h?`${h}:${p(m)}:${p(sec)}`:`${m}:${p(sec)}`}
 function fmtSize(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';if(b>=1048576)return Math.round(b/1048576)+' MB';return Math.round(b/1024)+' KB'}
+function fmtDate(d){if(!d||d.length<8)return d||'';return d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8)}
 function p(n){return String(n).padStart(2,'0')}
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+/* Sanitize a URL before inserting into an href/src attribute. Allows
+   relative paths and http(s)/data:image/blob:; replaces javascript:, vbscript:,
+   etc. with a safe blank to defang interpolated server-side data. */
+function safeUrl(u){
+  if(!u)return'';
+  const s=String(u).trim();
+  if(/^(?:javascript|vbscript|data:text|data:application):/i.test(s))return'about:blank';
+  return s;
+}
 
 /* ── AGPL §13 source notice ─────────────────────────────────────── */
 // On load, fetch the source URL from the server and render it in the footer.
