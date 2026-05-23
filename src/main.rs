@@ -20,6 +20,7 @@ mod downloader;
 mod library;
 mod maintenance;
 mod plex;
+mod stats;
 mod theme;
 mod web;
 mod ytdlp_bin;

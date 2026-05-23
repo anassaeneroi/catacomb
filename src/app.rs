@@ -88,6 +88,7 @@ pub struct App {
     music_root: PathBuf,
     settings_dir: String,
     settings_plex_path: String,
+    settings_source_url: String,
     plex_status: String,
     db: Database,
     card_density: f32,
@@ -121,6 +122,9 @@ pub struct App {
     // Maintenance (library health) window
     show_maintenance: bool,
     health_report: Option<crate::maintenance::HealthReport>,
+    // Statistics window
+    show_stats: bool,
+    stats_report: Option<crate::stats::StatsReport>,
 }
 
 impl App {
@@ -166,6 +170,7 @@ impl App {
             .as_deref()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
+        let source_url_str = config.web.source_url.clone().unwrap_or_default();
 
         let (cookies_pick_tx, cookies_pick_rx) = std::sync::mpsc::channel::<PathBuf>();
 
@@ -208,6 +213,7 @@ impl App {
             music_root,
             settings_dir,
             settings_plex_path: plex_path_str,
+            settings_source_url: source_url_str,
             plex_status: String::new(),
             db,
             card_density: 1.0,
@@ -234,6 +240,8 @@ impl App {
             cookies_pick_rx,
             show_maintenance: false,
             health_report: None,
+            show_stats: false,
+            stats_report: None,
         }
     }
 
@@ -613,6 +621,17 @@ impl App {
                 if ui.selectable_label(self.show_downloads, dl_label).clicked() {
                     self.show_downloads = !self.show_downloads;
                 }
+                if ui.selectable_label(self.show_stats, "📊 Stats").clicked() {
+                    self.show_stats = !self.show_stats;
+                    if self.show_stats {
+                        self.stats_report = Some(crate::stats::build(
+                            &self.library,
+                            &self.watched,
+                            &self.resume_positions,
+                            crate::stats::now_unix(),
+                        ));
+                    }
+                }
                 if ui.selectable_label(self.show_maintenance, "🩺 Maintenance").clicked() {
                     self.show_maintenance = !self.show_maintenance;
                     if self.show_maintenance {
@@ -626,6 +645,7 @@ impl App {
                         self.settings_dir = self.channels_root.display().to_string();
                         self.settings_plex_path = self.config.plex.library_path
                             .as_deref().map(|p| p.display().to_string()).unwrap_or_default();
+                        self.settings_source_url = self.config.web.source_url.clone().unwrap_or_default();
                         self.plex_status.clear();
                         self.settings_bind_mode =
                             crate::web::bind_mode_of(&self.config.web.bind).to_string();
@@ -1066,6 +1086,84 @@ impl App {
         }
     }
 
+    fn stats_window(&mut self, ctx: &egui::Context) {
+        if !self.show_stats { return; }
+        let mut open = self.show_stats;
+        let report = match &self.stats_report {
+            Some(r) => r.clone(),
+            None => return,
+        };
+        let mut rescan = false;
+        egui::Window::new("📊 Library statistics")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .default_height(520.0)
+            .show(ctx, |ui| {
+                if ui.button("⟳ Recompute").clicked() { rescan = true; }
+                ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("Totals");
+                    egui::Grid::new("stats_totals").num_columns(2).striped(true).show(ui, |ui| {
+                        ui.label("Channels");      ui.label(report.total_channels.to_string()); ui.end_row();
+                        ui.label("Videos");        ui.label(report.total_videos.to_string()); ui.end_row();
+                        ui.label("Playlists");     ui.label(report.total_playlists.to_string()); ui.end_row();
+                        ui.label("Disk used");     ui.label(format_size(report.total_size_bytes)); ui.end_row();
+                        ui.label("Total runtime"); ui.label(format_hours(report.total_duration_secs)); ui.end_row();
+                        ui.label("Watched");
+                        ui.label(format!("{} · {}", report.watched_count, format_hours(report.watched_duration_secs)));
+                        ui.end_row();
+                        ui.label("Continue watching"); ui.label(report.continue_watching_count.to_string()); ui.end_row();
+                    });
+
+                    ui.add_space(8.0);
+                    ui.heading(format!("Downloads — last {} weeks", report.downloads_per_week.len()));
+                    draw_bars(ui, report.downloads_per_week.iter().map(|w| (
+                        format!("{}", week_label(w.week_start_unix)),
+                        w.count as f32,
+                        format!("{} videos · {}", w.count, format_size(w.size_bytes)),
+                    )));
+
+                    if !report.videos_per_year.is_empty() {
+                        ui.add_space(8.0);
+                        ui.heading("Videos by upload year");
+                        draw_bars(ui, report.videos_per_year.iter().map(|y| (
+                            y.year.to_string(),
+                            y.count as f32,
+                            format!("{}: {}", y.year, y.count),
+                        )));
+                    }
+
+                    ui.add_space(8.0);
+                    ui.heading("Top channels by size");
+                    for row in &report.top_channels_by_size {
+                        ui.label(format!(
+                            "  {} — {} videos · {} · {}",
+                            row.name, row.count, format_size(row.size_bytes),
+                            format_hours(row.duration_secs),
+                        ));
+                    }
+
+                    ui.add_space(8.0);
+                    ui.heading("Top channels by count");
+                    for row in &report.top_channels_by_count {
+                        ui.label(format!(
+                            "  {} — {} videos · {} · {}",
+                            row.name, row.count, format_size(row.size_bytes),
+                            format_hours(row.duration_secs),
+                        ));
+                    }
+                });
+            });
+        self.show_stats = open;
+        if rescan {
+            self.stats_report = Some(crate::stats::build(
+                &self.library, &self.watched, &self.resume_positions, crate::stats::now_unix(),
+            ));
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
@@ -1311,6 +1409,25 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.separator();
+                ui.heading("Source code (AGPL §13)");
+                ui.add_space(4.0);
+                ui.label("Repository URL (shown in web UI footer):");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_source_url)
+                        .hint_text("https://codeberg.org/you/your-fork")
+                        .desired_width(400.0),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Every network user must be offered a way to obtain the running source code. \
+                         Leave empty to hide the link.",
+                    )
+                    .small()
+                    .weak(),
+                );
+
+                ui.add_space(8.0);
+                ui.separator();
                 ui.heading("Plex");
                 ui.add_space(4.0);
                 ui.label("Plex library path:");
@@ -1365,6 +1482,14 @@ impl App {
                             None
                         } else {
                             Some(PathBuf::from(plex_trimmed))
+                        };
+
+                        // Source URL (AGPL §13)
+                        let src_trimmed = self.settings_source_url.trim();
+                        self.config.web.source_url = if src_trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(src_trimmed.to_string())
                         };
 
                         // Resolve the chosen interface to a concrete bind address.
@@ -2013,6 +2138,7 @@ impl eframe::App for App {
         }
         self.settings_window(ctx);
         self.maintenance_window(ctx);
+        self.stats_window(ctx);
         self.detail_panel(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             self.video_list(ctx, ui);
@@ -2100,6 +2226,77 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{:.0} KB", bytes as f64 / 1_024.0)
     }
+}
+
+/// Format a number of seconds as `Hh Mm` (or `Mm` under 1 hour, `0h` empty).
+fn format_hours(secs: f64) -> String {
+    if secs < 60.0 { return "0h".to_string(); }
+    let h = (secs / 3600.0) as u64;
+    let m = ((secs as u64 % 3600) / 60) as u64;
+    if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") }
+}
+
+/// Format the week-start unix time as `M/D` for an axis label.
+fn week_label(unix: u64) -> String {
+    // Reproduce just enough calendar math to render M/D without pulling in a
+    // chrono dep: count days since 1970-01-01, then walk the year/month table.
+    let days = (unix / 86_400) as i64;
+    let (mut y, mut d) = (1970i64, days);
+    loop {
+        let ly = is_leap(y as u32);
+        let yd = if ly { 366 } else { 365 };
+        if d < yd { break; }
+        d -= yd; y += 1;
+    }
+    let months = if is_leap(y as u32) {
+        [31,29,31,30,31,30,31,31,30,31,30,31]
+    } else {
+        [31,28,31,30,31,30,31,31,30,31,30,31]
+    };
+    let mut m = 0usize;
+    while m < 12 && d >= months[m] as i64 { d -= months[m] as i64; m += 1; }
+    format!("{}/{}", m as u32 + 1, d + 1)
+}
+fn is_leap(y: u32) -> bool { (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 }
+
+/// Draw a simple bar chart of `(label, value, tooltip)` rows. Heights scale
+/// to the max value in the iterator.
+fn draw_bars<I>(ui: &mut egui::Ui, items: I)
+where I: IntoIterator<Item = (String, f32, String)>,
+{
+    let rows: Vec<_> = items.into_iter().collect();
+    if rows.is_empty() { return; }
+    let max = rows.iter().map(|r| r.1).fold(1.0f32, f32::max);
+    let chart_h = 70.0;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (label, value, tip) in &rows {
+            ui.vertical(|ui| {
+                let h = (value / max) * chart_h;
+                let bar_w = 22.0;
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(bar_w, chart_h + 14.0),
+                    egui::Sense::hover(),
+                );
+                let bar_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.min.x, rect.max.y - 14.0 - h),
+                    egui::pos2(rect.max.x, rect.max.y - 14.0),
+                );
+                ui.painter().rect_filled(
+                    bar_rect, 2.0,
+                    ui.visuals().selection.bg_fill,
+                );
+                ui.painter().text(
+                    egui::pos2(rect.center().x, rect.max.y),
+                    egui::Align2::CENTER_BOTTOM,
+                    label,
+                    egui::FontId::proportional(9.0),
+                    ui.visuals().weak_text_color(),
+                );
+                resp.on_hover_text(tip);
+            });
+        }
+    });
 }
 
 fn format_subs(n: u64) -> String {

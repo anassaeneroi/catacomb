@@ -229,9 +229,9 @@ struct QueuedSnapshot {
 #[derive(Serialize, Deserialize)]
 struct SettingsPayload {
     transcode: bool,
-    /// URL of the source repository, injected by the server for AGPL §13 compliance.
-    /// Clients MUST NOT send this field; the server ignores it on POST.
-    #[serde(skip_deserializing, default)]
+    /// URL of the source repository, shown in the footer for AGPL §13 compliance.
+    /// Editable via the settings UI; empty string on POST clears it.
+    #[serde(default)]
     source_url: Option<String>,
     /// Current binding address and port, sent by server only.
     #[serde(skip_deserializing, default)]
@@ -992,6 +992,10 @@ async fn post_settings(
         cfg.plex.library_path = if p.trim().is_empty() { None } else { Some(std::path::PathBuf::from(p.trim())) };
     }
 
+    if let Some(ref u) = body.source_url {
+        let trimmed = u.trim();
+        cfg.web.source_url = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    }
     cfg.scheduler.enabled = body.scheduler_enabled;
     if body.scheduler_interval_hours > 0 {
         cfg.scheduler.interval_hours = body.scheduler_interval_hours;
@@ -1425,6 +1429,16 @@ async fn post_scheduler_run(State(state): State<Arc<WebState>>) -> impl IntoResp
     (StatusCode::ACCEPTED, format!("started {count} channel checks")).into_response()
 }
 
+/// `GET /api/stats` — aggregate library statistics (totals, top channels,
+/// per-year upload histogram, per-week download activity).
+async fn get_stats(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let lib = state.library.lock().unwrap();
+    let watched = state.watched.lock().unwrap();
+    let positions = state.positions.lock().unwrap();
+    let report = crate::stats::build(&lib, &watched, &positions, crate::stats::now_unix());
+    Json(report)
+}
+
 /// `POST /api/ytdlp/update` — download (or update) the bundled yt-dlp + deno
 /// binaries. Streams output through a regular [`Job`] entry.
 async fn post_ytdlp_update(State(state): State<Arc<WebState>>) -> impl IntoResponse {
@@ -1597,6 +1611,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/maintenance/repair/:id", post(post_maintenance_repair))
         .route("/api/cookies", get(get_cookies).post(post_cookies).delete(delete_cookies))
         .route("/api/scheduler/run", post(post_scheduler_run))
+        .route("/api/stats", get(get_stats))
         .route("/api/ytdlp/update", post(post_ytdlp_update))
         .route("/api/music", get(get_music))
         .route("/api/login", post(post_login))
@@ -1809,6 +1824,7 @@ const HTML_UI: &str = r#"<!DOCTYPE html>
   </select>
   <span id="hdr-stats"></span>
   <button onclick="rescan()" title="Rescan library">⟳</button>
+  <button onclick="openStats()" title="Library statistics">📊</button>
   <button onclick="openMaintenance()" title="Library health">🩺</button>
   <button onclick="openSettings()">⚙</button>
   <span id="status"></span>
@@ -2242,9 +2258,13 @@ async function logout(){try{await fetch('/api/logout',{method:'POST'});location.
 async function openSettings(){
   let cur={transcode:false,source_url:null,current_bind:null,available_binds:[],download_password_required:false};try{cur=await(await api('/api/settings')).json()}catch{}
   const savedTheme=localStorage.getItem('theme')||'dark';
-  const srcRow=cur.source_url
-    ?`<div class="settings-hint" style="margin-top:8px">Source code: <a href="${esc(cur.source_url)}" target="_blank">${esc(cur.source_url)}</a> (AGPL-3.0)</div>`
-    :`<div class="settings-hint" style="margin-top:8px;color:var(--muted)">AGPL-3.0 — set <code>web.source_url</code> in config.toml to link source code</div>`;
+  const srcRow=`<hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">Source code (AGPL §13)</div>
+    <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px">
+      <input type="url" id="cf-source-url" value="${esc(cur.source_url||'')}" placeholder="https://codeberg.org/you/your-fork"
+             style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:12px">
+      <div class="settings-hint">Shown as the &quot;Source&quot; link in the footer. AGPL-3.0 requires every network user be offered a way to obtain the running source code. Leave empty to hide the link.</div>
+    </div>`;
   const bindRows=cur.available_binds?.length?`<div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
       <label>Binding</label>
       <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Current: <code style="background:var(--bg);padding:2px 4px;border-radius:2px">${esc(cur.current_bind||'unknown')}</code></div>
@@ -2431,9 +2451,11 @@ async function saveSettings(btn){
   const schedInterval=parseInt(document.getElementById('cf-sched-interval')?.value||'24',10);
   const maxConcurrent=parseInt(document.getElementById('cf-max-concurrent')?.value||'3',10);
   const useBundledYtdlp=document.getElementById('cf-ytdlp-bundled')?.checked||false;
+  const sourceUrl=document.getElementById('cf-source-url')?.value;
   const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp};
   if(bindMode)payload.bind_mode=bindMode;
   if(plexPath!==undefined)payload.plex_library_path=plexPath;
+  if(sourceUrl!==undefined)payload.source_url=sourceUrl;
   if(pwdCheckbox&&pwdCheckbox.checked){
     payload.new_download_password=pwdInput?.value||'';
   }
@@ -2447,6 +2469,97 @@ async function saveSettings(btn){
     if(pwdCheckbox&&pwdCheckbox.checked&&!pwdInput?.value)msg='Password disabled. '+msg;
     setStatus(msg);await loadLibrary();
   }catch(e){setStatus('Error: '+e.message)}
+}
+
+/* ── Statistics ─────────────────────────────────────────────────── */
+async function openStats(){
+  const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  bg.innerHTML=`<div class="modal" style="max-width:760px;width:100%">
+    <div class="modal-hdr"><h2>📊 Library statistics</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div id="stats-body" style="overflow:auto;max-height:75vh"><em style="color:var(--muted)">Computing…</em></div>
+  </div>`;
+  document.body.appendChild(bg);
+  try{
+    const r=await(await api('/api/stats')).json();
+    renderStats(r);
+  }catch(e){document.getElementById('stats-body').innerHTML=`<div style="color:#f87171">Stats failed: ${esc(e.message)}</div>`}
+}
+
+function fmtHours(secs){
+  if(!secs||secs<60)return'0h';
+  const h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60);
+  return h>0?`${h}h ${m}m`:`${m}m`;
+}
+
+function renderStats(r){
+  const body=document.getElementById('stats-body');if(!body)return;
+  const tot=fmtHours(r.total_duration_secs);
+  const wat=fmtHours(r.watched_duration_secs);
+  const tile=(label,value)=>`<div style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px 12px;flex:1;min-width:120px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">${esc(label)}</div><div style="font-size:18px;font-weight:600;margin-top:2px">${esc(value)}</div></div>`;
+  let h=`<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+    ${tile('Channels',r.total_channels.toLocaleString())}
+    ${tile('Videos',r.total_videos.toLocaleString())}
+    ${tile('Playlists',r.total_playlists.toLocaleString())}
+    ${tile('Disk used',fmtSize(r.total_size_bytes))}
+    ${tile('Total runtime',tot)}
+    ${tile('Watched',`${r.watched_count.toLocaleString()} · ${wat}`)}
+    ${tile('Continue watching',r.continue_watching_count.toLocaleString())}
+  </div>`;
+
+  // Downloads per week — horizontal bar chart.
+  const weeks=r.downloads_per_week||[];
+  const maxWeek=Math.max(1,...weeks.map(w=>w.count));
+  h+=`<h3 style="font-size:13px;margin:4px 0 6px">Downloads — last ${weeks.length} weeks</h3>`;
+  h+=`<div style="display:flex;align-items:flex-end;gap:3px;height:80px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:4px">`;
+  for(const w of weeks){
+    const pct=(w.count/maxWeek)*100;
+    const d=new Date(w.week_start_unix*1000);
+    const lbl=`${d.getMonth()+1}/${d.getDate()}`;
+    const tip=`${lbl}: ${w.count} videos, ${fmtSize(w.size_bytes)}`;
+    h+=`<div title="${esc(tip)}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+      <div style="width:100%;height:${pct}%;background:var(--accent);border-radius:2px 2px 0 0;min-height:${w.count>0?'2px':'0'}"></div>
+      <div style="font-size:9px;color:var(--muted);margin-top:2px">${esc(lbl)}</div>
+    </div>`;
+  }
+  h+=`</div>`;
+
+  // Uploads per year.
+  const years=r.videos_per_year||[];
+  if(years.length){
+    const maxYear=Math.max(1,...years.map(y=>y.count));
+    h+=`<h3 style="font-size:13px;margin:4px 0 6px">Videos by upload year</h3>`;
+    h+=`<div style="display:flex;align-items:flex-end;gap:3px;height:60px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:4px">`;
+    for(const y of years){
+      const pct=(y.count/maxYear)*100;
+      h+=`<div title="${esc(y.year+': '+y.count)}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+        <div style="width:100%;height:${pct}%;background:var(--accent);opacity:.7;border-radius:2px 2px 0 0;min-height:${y.count>0?'2px':'0'}"></div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px">${esc(y.year)}</div>
+      </div>`;
+    }
+    h+=`</div>`;
+  }
+
+  // Two side-by-side top-N tables.
+  const topTable=(title,rows)=>{
+    if(!rows||!rows.length)return'';
+    let t=`<h3 style="font-size:13px;margin:4px 0 6px">${esc(title)}</h3>
+      <table style="width:100%;font-size:12px;border-collapse:collapse;margin-bottom:14px"><tbody>`;
+    for(const row of rows){
+      t+=`<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px">${esc(row.name)}</td>
+        <td style="padding:4px 6px;text-align:right;color:var(--muted)">${row.count} videos</td>
+        <td style="padding:4px 6px;text-align:right;color:var(--muted)">${fmtSize(row.size_bytes)}</td>
+        <td style="padding:4px 6px;text-align:right;color:var(--muted)">${fmtHours(row.duration_secs)}</td>
+      </tr>`;
+    }
+    t+=`</tbody></table>`;
+    return t;
+  };
+  h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div>${topTable('Top channels by size',r.top_channels_by_size)}</div>
+    <div>${topTable('Top channels by count',r.top_channels_by_count)}</div>
+  </div>`;
+  body.innerHTML=h;
 }
 
 /* ── Maintenance (library health) ───────────────────────────────── */
