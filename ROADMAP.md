@@ -4,6 +4,11 @@
 
 **Surpass [Tartube](https://github.com/axcore/tartube) in every dimension.**
 
+A structured analysis of Tartube's codebase, data model, operations, and
+configuration surface lives at [`docs/tartube-spec.md`](docs/tartube-spec.md).
+It enumerates the exact features we need to match — every Phase 1 item
+below traces back to a specific Tartube subsystem.
+
 Tartube is the mature open-source yt-dlp GUI and the obvious benchmark for a
 project in this space. yt-offline has architectural advantages Tartube can't
 catch up on quickly (Rust + axum + a real web UI + bundled toolchain + a
