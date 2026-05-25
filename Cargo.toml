@@ -2,7 +2,7 @@
 name = "yt-offline"
 version = "0.1.0"
 edition = "2021"
-description = "A desktop app for archiving YouTube channels with yt-dlp"
+description = "Self-hosted archive for YouTube, TikTok, Twitch, Vimeo, Bandcamp, SoundCloud, Odysee and more. Desktop GUI + web UI, bundled yt-dlp with curl_cffi impersonation, Plex export, SQLite-backed resume tracking. AGPL-3.0."
 
 [dependencies]
 eframe = "0.29"
