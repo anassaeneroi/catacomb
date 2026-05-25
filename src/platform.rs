@@ -230,9 +230,11 @@ fn classify_tiktok(url: &str) -> UrlKind {
 }
 
 fn classify_twitch(url: &str) -> UrlKind {
-    // twitch.tv/<user>           → Channel
+    // twitch.tv/<user>           → Channel (bare profile)
+    // twitch.tv/<user>/clips     → Channel (clips-only listing)
+    // twitch.tv/<user>/videos    → Channel (VOD listing)
     // twitch.tv/videos/<id>      → Video (VOD)
-    // twitch.tv/<user>/clip/<id> → Video (clip)
+    // twitch.tv/<user>/clip/<id> → Video (single clip)
     if let Some(rest) = url.split("twitch.tv/").nth(1) {
         let first = rest.split('/').next().unwrap_or("").trim_end_matches('?');
         if first.is_empty() { return UrlKind::Unknown; }
@@ -240,10 +242,16 @@ fn classify_twitch(url: &str) -> UrlKind {
         if rest.contains("/clip/") || rest.contains("/video/") {
             return UrlKind::Video;
         }
-        // No nested path means a bare channel page.
         let nested = rest.trim_start_matches(first).trim_start_matches('/');
         let nested = nested.split('?').next().unwrap_or("");
-        if nested.is_empty() || nested == "videos" || nested == "about" {
+        // Bare channel + channel-scoped listing pages all collapse to Channel.
+        // yt-dlp's extractors recognise each variant and pull the right
+        // subset (clips/highlights/uploads/all) without further hints.
+        if nested.is_empty()
+            || nested == "videos"
+            || nested == "about"
+            || nested == "clips"
+        {
             return UrlKind::Channel { handle: first.to_string() };
         }
     }
@@ -421,6 +429,15 @@ mod tests {
     fn twitch_vod_url_is_video() {
         let info = classify_url("https://www.twitch.tv/videos/123456789");
         assert!(matches!(info.kind, UrlKind::Video));
+    }
+
+    #[test]
+    fn twitch_clips_listing_is_channel() {
+        let info = classify_url("https://www.twitch.tv/streamername/clips");
+        match info.kind {
+            UrlKind::Channel { handle } => assert_eq!(handle, "streamername"),
+            _ => panic!("expected Channel with clips listing"),
+        }
     }
 
     #[test]

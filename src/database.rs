@@ -1,6 +1,10 @@
-//! Persistent storage for watched status and playback positions.
+//! Persistent storage for watched status, playback positions, and settings.
 //!
-//! Uses a bundled SQLite database (`yt-offline.db` by default).
+//! Backed by a bundled SQLite database (`yt-offline.db`). Access goes through
+//! a small `r2d2`-managed pool of connections rather than a single shared
+//! `Connection` — that way concurrent read queries from different axum
+//! handlers don't serialize on a mutex, and write queries still take their
+//! turn via SQLite's own per-connection locking.
 //!
 //! # Schema
 //!
@@ -10,13 +14,25 @@
 //! | `positions` | `video_id` (PK), `position_secs`, `updated_at` | Stores resume positions |
 //! | `settings` | `key` (PK), `value` | Persistent app settings (password hash, etc.) |
 
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Thin wrapper around a SQLite connection with schema management.
+type Pool = r2d2::Pool<SqliteConnectionManager>;
+type PooledConn = r2d2::PooledConnection<SqliteConnectionManager>;
+
+/// Default pool size for a file-backed database. Small intentionally — the
+/// app is single-user and our queries are short. A handful is plenty.
+const FILE_POOL_SIZE: u32 = 4;
+
+/// Thin wrapper around an `r2d2` SQLite pool with schema management.
+///
+/// Construction always returns a pool with at least one usable connection
+/// and the schema initialised. Subsequent method calls borrow a connection,
+/// run their query, and return it — no external `Mutex` is needed.
 pub struct Database {
-    conn: Connection,
+    pool: Pool,
 }
 
 impl Database {
@@ -26,7 +42,12 @@ impl Database {
     /// hash and resume positions aren't readable by other local users. A
     /// best-effort: failure is logged but doesn't abort startup.
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let manager = SqliteConnectionManager::file(path);
+        let pool = Pool::builder()
+            .max_size(FILE_POOL_SIZE)
+            .build(manager)
+            .map_err(pool_init_to_rusqlite)?;
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -38,21 +59,38 @@ impl Database {
                 }
             }
         }
-        let db = Database { conn };
+
+        let db = Database { pool };
         db.init_schema()?;
         Ok(db)
     }
 
-    /// Open an in-memory database — used in tests.
+    /// Open an in-memory database — used in tests and as a fallback when the
+    /// real file can't be opened.
+    ///
+    /// In-memory SQLite databases are per-connection by default, so the pool
+    /// is capped at 1 connection here. Otherwise each `get()` would hand back
+    /// a fresh, empty database and our schema/data would vanish between calls.
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        let db = Database { conn };
+        let manager = SqliteConnectionManager::memory();
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .map_err(pool_init_to_rusqlite)?;
+        let db = Database { pool };
         db.init_schema()?;
         Ok(db)
+    }
+
+    /// Acquire a connection from the pool. Panics on pool failure — these
+    /// are effectively unrecoverable (the SQLite file vanished, the disk is
+    /// full / read-only, or the pool is exhausted under runaway load).
+    fn conn(&self) -> PooledConn {
+        self.pool.get().expect("db pool checkout failed")
     }
 
     fn init_schema(&self) -> Result<()> {
-        self.conn.execute_batch(
+        self.conn().execute_batch(
             "CREATE TABLE IF NOT EXISTS watched (
                 video_id TEXT PRIMARY KEY,
                 watched_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -71,49 +109,54 @@ impl Database {
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
         let mut rows = stmt.query([key])?;
         Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
     }
 
     pub fn set_setting(&self, key: &str, value: Option<&str>) -> Result<()> {
+        let conn = self.conn();
         match value {
             Some(v) => {
-                self.conn.execute(
+                conn.execute(
                     "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
                     [key, v],
                 )?;
             }
             None => {
-                self.conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+                conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
             }
         }
         Ok(())
     }
 
     pub fn set_watched(&self, video_id: &str, watched: bool) -> Result<()> {
+        let conn = self.conn();
         if watched {
-            self.conn.execute(
+            conn.execute(
                 "INSERT OR REPLACE INTO watched (video_id) VALUES (?1)",
                 [video_id],
             )?;
         } else {
-            self.conn.execute("DELETE FROM watched WHERE video_id = ?1", [video_id])?;
+            conn.execute("DELETE FROM watched WHERE video_id = ?1", [video_id])?;
         }
         Ok(())
     }
 
     pub fn get_watched(&self) -> Result<HashSet<String>> {
-        let mut stmt = self.conn.prepare("SELECT video_id FROM watched")?;
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT video_id FROM watched")?;
         let ids = stmt
             .query_map([], |row| row.get(0))?
-            .filter_map(Result::ok)
+            .filter_map(std::result::Result::ok)
             .collect();
         Ok(ids)
     }
 
     pub fn set_position(&self, video_id: &str, position_secs: f64) -> Result<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             "INSERT OR REPLACE INTO positions (video_id, position_secs, updated_at)
              VALUES (?1, ?2, CURRENT_TIMESTAMP)",
             rusqlite::params![video_id, position_secs],
@@ -122,16 +165,34 @@ impl Database {
     }
 
     pub fn clear_position(&self, video_id: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM positions WHERE video_id = ?1", [video_id])?;
+        let conn = self.conn();
+        conn.execute("DELETE FROM positions WHERE video_id = ?1", [video_id])?;
         Ok(())
     }
 
     pub fn get_positions(&self) -> Result<HashMap<String, f64>> {
-        let mut stmt = self.conn.prepare("SELECT video_id, position_secs FROM positions")?;
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT video_id, position_secs FROM positions")?;
         let map = stmt
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)))?
-            .filter_map(Result::ok)
+            .filter_map(std::result::Result::ok)
             .collect();
         Ok(map)
     }
 }
+
+/// Translate an `r2d2::Error` from `Pool::build()` into a `rusqlite::Error` so
+/// callers don't have to juggle two error types. Pool-init failures are rare
+/// (bad file path, OS-level problem) and the surfaced error message is what
+/// matters; the variant is incidental.
+fn pool_init_to_rusqlite(e: r2d2::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("sqlite pool init failed: {e}"),
+    )))
+}
+
+// `Connection` is still imported for the type alias path; suppress the
+// unused-import warning when no caller references it directly.
+#[allow(dead_code)]
+type _SilenceConnectionImport = Connection;

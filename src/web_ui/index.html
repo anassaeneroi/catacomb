@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yt-offline</title>
+<style>
+  :root{--bg:#1a1a2e;--panel:#16213e;--card:#0f3460;--accent:#e94560;--text:#eee;--muted:#999;--border:#334}
+  .theme-light{--bg:#f5f5f5;--panel:#fff;--card:#e8e8e8;--accent:#e94560;--text:#111;--muted:#666;--border:#ccc}
+  .theme-solarized{--bg:#002b36;--panel:#073642;--card:#004052;--accent:#268bd2;--text:#839496;--muted:#586e75;--border:#144}
+  .theme-nord{--bg:#2e3440;--panel:#3b4252;--card:#434c5e;--accent:#88c0d0;--text:#eceff4;--muted:#9aa;--border:#4c566a}
+  .theme-amoled{--bg:#000;--panel:#0a0a0a;--card:#111;--accent:#e94560;--text:#eee;--muted:#666;--border:#222}
+  .theme-dracula{--bg:#282a36;--panel:#282a36;--card:#343746;--accent:#bd93f9;--text:#f8f8f2;--muted:#6272a4;--border:#44475a}
+  .theme-trans{--bg:#e8f7fd;--panel:#fef0f4;--card:#fce8f2;--accent:#55cdfc;--text:#cc0066;--muted:#888;--border:#f7a8b8}
+  .theme-emo-nocturnal{--bg:#0a0a0a;--panel:#0d0d0d;--card:#1a1a1a;--accent:#ff0090;--text:#e8e8e8;--muted:#888;--border:#2a2a2a}
+  .theme-emo-coffin{--bg:#0d0009;--panel:#110010;--card:#1a0018;--accent:#cc2222;--text:#c0c0c0;--muted:#666;--border:#3a0030}
+  .theme-emo-scene-queen{--bg:#080818;--panel:#0a0a1e;--card:#111128;--accent:#39ff14;--text:#c8c8ff;--muted:#666;--border:#222244}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+  header{background:var(--panel);padding:8px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap}
+  header h1{font-size:1em;font-weight:700;white-space:nowrap}
+  #search{flex:1;min-width:100px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 9px;border-radius:4px;font-size:13px}
+  #sort{background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 6px;border-radius:4px;font-size:12px}
+  #hdr-stats{font-size:11px;color:var(--muted);white-space:nowrap}
+  #status{font-size:11px;color:var(--muted);white-space:nowrap}
+  button{background:var(--card);color:var(--text);border:1px solid var(--border);padding:5px 10px;border-radius:4px;cursor:pointer;font-size:12px;touch-action:manipulation;white-space:nowrap}
+  button:hover,button:active{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  #menu-btn{display:none;font-size:18px;padding:3px 9px;line-height:1}
+  main{display:flex;flex:1;overflow:hidden;position:relative}
+  aside{width:210px;background:var(--panel);border-right:1px solid var(--border);overflow-y:auto;flex-shrink:0;padding:6px 0;transition:transform .2s}
+  #sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:49}
+  .sidebar-label{padding:2px 10px;font-size:10px;text-transform:uppercase;color:var(--muted);letter-spacing:.07em;margin-top:6px}
+  .ch-item{padding:6px 10px;cursor:pointer;font-size:13px;border-left:3px solid transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ch-item:hover{background:var(--card)}
+  .ch-item.active{border-left-color:var(--accent);background:rgba(128,128,128,.1)}
+  .ch-sub{padding:4px 10px 4px 22px;font-size:12px;color:var(--muted);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ch-sub:hover{color:var(--text);background:rgba(128,128,128,.08)}
+  .ch-sub.active{color:var(--text)}
+  section#content{flex:1;overflow-y:auto;padding:10px;min-width:0}
+  .toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+  .ch-card{background:var(--card);border-radius:8px;overflow:hidden;border:2px solid transparent;transition:border-color .15s;cursor:pointer;display:flex;flex-direction:column}
+  .ch-card:hover{border-color:var(--accent)}
+  .ch-card-thumb{width:100%;aspect-ratio:16/9;background:#111;overflow:hidden;position:relative}
+  .ch-card-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .ch-card-thumb .nothumb{display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:var(--muted);font-size:28px}
+  .ch-card-info{padding:8px 10px 10px;display:flex;flex-direction:column;gap:2px}
+  .ch-card-name{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ch-card-meta{font-size:11px;color:var(--muted)}
+  .card{background:var(--card);border-radius:6px;overflow:hidden;border:2px solid transparent;transition:border-color .15s;display:flex;flex-direction:column;cursor:pointer}
+  .card:hover{border-color:rgba(233,69,96,.5)}
+  .card.selected{border-color:var(--accent)}
+  .card.watched{opacity:.55}
+  .card-thumb{position:relative;width:100%;aspect-ratio:16/9;background:#000;overflow:hidden}
+  .card-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .card-thumb .nothumb{display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:var(--muted);font-size:11px}
+  .card-thumb .dur{position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.75);color:#fff;font-size:11px;padding:1px 5px;border-radius:3px;font-weight:600}
+  .card-thumb .resume-bar{position:absolute;bottom:0;left:0;height:3px;background:var(--accent)}
+  .card-title{font-size:13px;font-weight:600;padding:7px 8px 2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:34px}
+  .card-meta{font-size:11px;color:var(--muted);padding:0 8px 4px;display:flex;gap:5px;flex-wrap:wrap}
+  .card-foot{padding:4px 8px 8px;display:flex;gap:6px}
+  .card-foot button{font-size:11px;padding:4px 8px}
+  .card-foot .play{background:var(--accent);border-color:var(--accent);color:#fff;flex:1}
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:100;padding:10px}
+  .modal{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;max-width:95vw;max-height:95vh;display:flex;flex-direction:column;gap:10px;width:100%;overflow:hidden}
+  .modal-hdr{display:flex;align-items:center;gap:8px;flex-shrink:0}
+  .modal-hdr h2{flex:1;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .modal-body{display:flex;gap:12px;overflow:hidden;flex:1;min-height:0}
+  .modal video{flex:1;min-width:0;max-height:75vh;background:#000}
+  .chapters-pane{width:200px;background:var(--bg);border:1px solid var(--border);border-radius:4px;overflow-y:auto;flex-shrink:0}
+  .chapters-pane h4{font-size:11px;padding:7px 10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg)}
+  .chapter{padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:1px solid var(--border)}
+  .chapter:hover{background:var(--card)}
+  .chapter.active{background:var(--card);border-left:3px solid var(--accent)}
+  .chapter .ch-time{color:var(--muted);font-size:11px;font-family:monospace}
+  .chapter .ch-title{font-weight:500;margin-top:1px}
+  .settings-row{display:flex;align-items:center;gap:8px;padding:6px 0}
+  .settings-row label{flex:1;font-size:13px}
+  .settings-hint{font-size:11px;color:var(--muted)}
+  #details{background:var(--panel);border-top:2px solid var(--accent);padding:10px 14px;flex-shrink:0;max-height:200px;overflow-y:auto;display:none}
+  .det-head{display:flex;align-items:flex-start;gap:8px;margin-bottom:4px}
+  .det-head h3{flex:1;font-size:13px;font-weight:600;margin:0}
+  .det-actions{display:flex;gap:5px;flex-shrink:0;flex-wrap:wrap}
+  .det-meta{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;gap:8px;flex-wrap:wrap}
+  .det-desc{font-size:12px;color:var(--muted);white-space:pre-wrap;overflow-y:auto;max-height:90px}
+  .meta-grid{display:grid;grid-template-columns:max-content 1fr;gap:5px 12px;font-size:12px;padding:4px}
+  .meta-grid dt{color:var(--muted);font-weight:600;white-space:nowrap}
+  .meta-grid dd{color:var(--text);word-break:break-word;overflow-wrap:anywhere}
+  .meta-grid dd a{color:var(--accent);text-decoration:none}
+  .meta-grid dd a:hover{text-decoration:underline}
+  .meta-tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:6px}
+  .meta-tab{padding:4px 10px;cursor:pointer;font-size:12px;border:1px solid transparent;border-bottom:none;border-radius:4px 4px 0 0}
+  .meta-tab.active{background:var(--card);border-color:var(--border)}
+  .meta-raw{font-family:monospace;font-size:11px;background:var(--bg);padding:10px;border-radius:4px;white-space:pre;overflow:auto;max-height:60vh}
+  #jobs{background:var(--panel);border-top:1px solid var(--border);flex-shrink:0;max-height:40vh;overflow-y:auto}
+  .job{display:flex;align-items:center;gap:8px;padding:5px 14px;font-size:12px;border-bottom:1px solid var(--border);flex-wrap:wrap;min-width:0}
+  .badge{font-weight:700;min-width:48px;flex-shrink:0}
+  .badge.running{color:#facc15}.badge.done{color:#4ade80}.badge.failed{color:#f87171}
+  progress{flex:1;height:5px;accent-color:var(--accent);min-width:40px}
+  footer{background:var(--panel);border-top:1px solid var(--border);padding:8px 12px;display:flex;gap:8px;align-items:center;flex-shrink:0}
+  footer input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 9px;border-radius:4px;font-size:13px}
+  .preview-thumb{width:100%;max-width:280px;aspect-ratio:16/9;object-fit:cover;border-radius:4px;background:#000;flex-shrink:0}
+  .empty{text-align:center;color:var(--muted);padding:40px;font-size:13px}
+  @media(max-width:640px){
+    #menu-btn{display:block}
+    aside{position:fixed;top:0;left:0;height:100%;z-index:50;transform:translateX(-100%);width:240px}
+    aside.open{transform:translateX(0)}
+    #sidebar-overlay.open{display:block}
+    #hdr-stats,#sort{display:none}
+    .grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+    #details{max-height:160px}
+    .chapters-pane{display:none}
+    .modal video{max-height:55vh}
+    section#content{padding:8px}
+    footer{padding:6px 10px}
+  }
+</style>
+</head>
+<body>
+<header>
+  <button id="menu-btn" onclick="toggleSidebar()">☰</button>
+  <h1>yt-offline</h1>
+  <input type="search" id="search" placeholder="Filter…" oninput="renderGrid()">
+  <select id="sort" onchange="renderGrid()">
+    <option value="date-desc">Newest</option>
+    <option value="date-asc">Oldest</option>
+    <option value="title">Title</option>
+    <option value="dur-asc">Shortest</option>
+    <option value="dur-desc">Longest</option>
+    <option value="size-asc">Smallest</option>
+    <option value="size-desc">Largest</option>
+  </select>
+  <span id="hdr-stats"></span>
+  <button onclick="rescan()" title="Rescan library">⟳</button>
+  <button onclick="openStats()" title="Library statistics">📊</button>
+  <button onclick="openMaintenance()" title="Library health">🩺</button>
+  <button onclick="openSettings()">⚙</button>
+  <span id="status"></span>
+</header>
+<div id="sidebar-overlay" onclick="closeSidebar()"></div>
+<main>
+  <aside id="sidebar"></aside>
+  <section id="content">
+    <div class="toolbar">
+      <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="bulk" onchange="toggleBulk()"> Select</label>
+      <span id="bulk-actions" style="display:none;gap:6px">
+        <button onclick="bulkWatched(true)">✓ Mark watched</button>
+        <button onclick="bulkWatched(false)">○ Unwatch</button>
+        <span id="sel-count" style="font-size:12px;color:var(--muted)"></span>
+      </span>
+    </div>
+    <div class="grid" id="grid"></div>
+  </section>
+</main>
+<div id="details"></div>
+<div id="jobs"></div>
+<footer>
+  <input type="url" id="dl-url" placeholder="YouTube URL…" oninput="refreshTwitchClipsVisibility()" onkeydown="if(event.key==='Enter')previewDownload()">
+  <button class="primary" onclick="previewDownload()">⬇ Download</button>
+  <select id="dl-quality" title="Download quality" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px" onchange="updateDlMode()">
+    <option value="best">Best quality</option>
+    <option value="1080p">1080p</option>
+    <option value="720p">720p</option>
+    <option value="480p">480p</option>
+    <option value="360p">360p</option>
+    <option value="music">🎵 Music</option>
+  </select>
+  <label id="fast-mode-label" style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Stop at the first already-downloaded video. Faster for large channels but may miss new videos if gaps exist in the archive."><input type="checkbox" id="dl-full-scan"> Fast mode</label>
+  <label id="live-mode-label" style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Record an ongoing live broadcast (Twitch/YouTube Live) from the start instead of joining live. Waits if the stream has not begun yet."><input type="checkbox" id="dl-live"> 🔴 Live</label>
+  <label id="twitch-clips-label" style="display:none;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Twitch only: pull the channel's Clips listing instead of its VODs. Rewrites the URL to twitch.tv/&lt;channel&gt;/clips before submitting."><input type="checkbox" id="dl-twitch-clips"> Clips only</label>
+  <span id="agpl-notice" style="font-size:10px;color:var(--muted);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+</footer>
+
+<script>
+'use strict';
+let library=[], channelUrls=[], activeChannelIdx=null, activePlaylistIdx=null, showContinue=false, showChannels=false, showMusic=false, showRecent=false;
+let musicTracks=[];
+let bulkMode=false, selected=new Set(), selectedId=null;
+let currentPlayingId=null, saveTimer=null;
+
+/* ── Sidebar (mobile) ──────────────────────────────────────────── */
+function toggleSidebar(){document.getElementById('sidebar').classList.toggle('open');document.getElementById('sidebar-overlay').classList.toggle('open')}
+function closeSidebar(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sidebar-overlay').classList.remove('open')}
+
+/* ── API ────────────────────────────────────────────────────────── */
+async function api(path,opts){const r=await fetch(path,opts);if(!r.ok)throw new Error(await r.text());return r}
+
+/* ── Library ────────────────────────────────────────────────────── */
+// Cache the ETag of the most-recent library response so subsequent polls
+// can short-circuit with 304 Not Modified when nothing has changed. Saves
+// megabytes of JSON for large libraries on every periodic refresh.
+let libraryEtag=null;
+async function loadLibrary(){
+  try{
+    const opts=libraryEtag?{headers:{'If-None-Match':libraryEtag}}:{};
+    const r=await api('/api/library',opts);
+    if(r.status===304){
+      // Nothing changed; keep our existing `library` array.
+      loadMusic();
+      return;
+    }
+    libraryEtag=r.headers.get('ETag')||libraryEtag;
+    const data=await r.json();
+    library=data.channels;
+    channelUrls=library.map(ch=>ch.channel_url||null);
+    const total=library.reduce((s,c)=>s+c.size_bytes,0);
+    document.getElementById('hdr-stats').textContent=total>0?fmtSize(total)+' total':'';
+    renderSidebar();renderGrid();
+    if(selectedId)renderDetails();
+  }catch(e){setStatus('Error: '+e.message)}
+  loadMusic();
+}
+function setStatus(s){document.getElementById('status').textContent=s}
+
+/* ── Sidebar ────────────────────────────────────────────────────── */
+function renderSidebar(){
+  const el=document.getElementById('sidebar');
+  const allVids=library.flatMap(ch=>[...ch.videos,...ch.playlists.flatMap(p=>p.videos)]);
+  const contVids=allVids.filter(v=>v.resume_pos&&v.resume_pos>5&&!v.watched);
+  const total=library.reduce((s,c)=>s+c.total_videos,0);
+  const hasDated=allVids.some(v=>v.mtime_unix);
+  let h=`<div class="sidebar-label">Library</div>`;
+  if(contVids.length)h+=`<div class="ch-item${showContinue?' active':''}" onclick="setContinue()">▶ Continue (${contVids.length})</div>`;
+  if(hasDated)h+=`<div class="ch-item${showRecent?' active':''}" onclick="setRecent()">🕒 Recent additions</div>`;
+  h+=`<div class="ch-item${showChannels?' active':''}" onclick="setChannels()">⊟ Channels (${library.length})</div>`;
+  h+=`<div class="ch-item${!showContinue&&!showChannels&&!showRecent&&activeChannelIdx===null&&!showMusic?' active':''}" onclick="setView(null,null)">⊞ All (${total})</div>`;
+  h+=`<div class="ch-item${showMusic?' active':''}" onclick="setMusic()">♫ Music (${musicTracks.length})</div>`;
+  // Group sidebar entries by platform so a multi-platform library reads as
+  // distinct sections rather than one flat list.
+  let lastPlatform=null;
+  for(let i=0;i<library.length;i++){
+    const ch=library[i];
+    if(ch.platform!==lastPlatform){
+      h+=`<div class="sidebar-label" style="margin-top:8px">${esc(ch.platform_icon||'')} ${esc(ch.platform_label||'Channels')}</div>`;
+      lastPlatform=ch.platform;
+    }
+    const active=activeChannelIdx===i&&activePlaylistIdx===null&&!showContinue;
+    const size=ch.size_bytes>0?' · '+fmtSize(ch.size_bytes):'';
+    h+=`<div class="ch-item${active?' active':''}" onclick="setView(${i},null)" title="${esc(ch.platform_label||'')}">${esc(ch.name)} (${ch.total_videos}${size})</div>`;
+    if(activeChannelIdx===i&&!showContinue){
+      for(let pi=0;pi<ch.playlists.length;pi++){
+        const pl=ch.playlists[pi];
+        h+=`<div class="ch-sub${activePlaylistIdx===pi?' active':''}" onclick="setView(${i},${pi})">└ ${esc(pl.name)} (${pl.videos.length})</div>`;
+      }
+      h+=`<div class="ch-sub" style="color:var(--accent)" onclick="downloadChannelByIdx(${i})">⬇ Check for new videos</div>`;
+    }
+  }
+  el.innerHTML=h;
+}
+function setContinue(){showContinue=true;showChannels=false;showMusic=false;showRecent=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setRecent(){showRecent=true;showContinue=false;showChannels=false;showMusic=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setChannels(){showChannels=true;showContinue=false;showMusic=false;showRecent=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setView(ci,pi){showContinue=false;showChannels=false;showMusic=false;showRecent=false;activeChannelIdx=ci;activePlaylistIdx=pi;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setMusic(){showMusic=true;showContinue=false;showChannels=false;showRecent=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+
+/* ── Grid ───────────────────────────────────────────────────────── */
+function currentVideos(){
+  const q=document.getElementById('search').value.toLowerCase();
+  const sort=document.getElementById('sort').value;
+  let vids=[];
+  if(showContinue){
+    for(const ch of library)
+      for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
+        if(v.resume_pos&&v.resume_pos>5&&!v.watched&&(!q||v.title.toLowerCase().includes(q)||v.id.includes(q)))
+          vids.push({...v,channel:ch.name});
+    vids.sort((a,b)=>(b.resume_pos||0)-(a.resume_pos||0));
+    return vids;
+  }
+  if(showRecent){
+    // Most-recently-modified across the whole library, capped at 100.
+    for(const ch of library)
+      for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
+        if(v.mtime_unix&&(!q||v.title.toLowerCase().includes(q)||v.id.includes(q)))
+          vids.push({...v,channel:ch.name});
+    vids.sort((a,b)=>(b.mtime_unix||0)-(a.mtime_unix||0));
+    return vids.slice(0,100);
+  }
+  for(let i=0;i<library.length;i++){
+    const ch=library[i];
+    if(activeChannelIdx!==null&&i!==activeChannelIdx)continue;
+    const pool=activePlaylistIdx!==null?(ch.playlists[activePlaylistIdx]?.videos||[]):[...ch.videos,...ch.playlists.flatMap(p=>p.videos)];
+    for(const v of pool)
+      if(!q||v.title.toLowerCase().includes(q)||v.id.includes(q))vids.push({...v,channel:ch.name});
+  }
+  if(sort==='date-desc')vids.sort((a,b)=>(b.upload_date||'').localeCompare(a.upload_date||''));
+  if(sort==='date-asc')vids.sort((a,b)=>{const ax=a.upload_date||'￿',bx=b.upload_date||'￿';return ax.localeCompare(bx)});
+  if(sort==='dur-asc')vids.sort((a,b)=>(a.duration_secs??0)-(b.duration_secs??0));
+  if(sort==='dur-desc')vids.sort((a,b)=>(b.duration_secs??0)-(a.duration_secs??0));
+  if(sort==='size-asc')vids.sort((a,b)=>(a.file_size??0)-(b.file_size??0));
+  if(sort==='size-desc')vids.sort((a,b)=>(b.file_size??0)-(a.file_size??0));
+  if(sort==='title')vids.sort((a,b)=>a.title.localeCompare(b.title));
+  return vids;
+}
+
+function renderGrid(){
+  if(showChannels){renderChannelGrid();return}
+  if(showMusic){renderMusicGrid();return}
+  const vids=currentVideos();
+  setStatus(vids.length+' video'+(vids.length!==1?'s':''));
+  const grid=document.getElementById('grid');
+  if(!vids.length){grid.innerHTML='<div class="empty">Nothing here.</div>';return}
+  const showChCol=activeChannelIdx===null&&!showContinue;
+  grid.innerHTML=vids.map(v=>{
+    const chk=bulkMode?`<input type="checkbox" ${selected.has(v.id)?'checked':''} onchange="toggleSel('${v.id}',this.checked)">`:'';
+    const meta=[
+      showChCol?esc(v.channel):null,
+      v.upload_date?fmtDate(v.upload_date):null,
+      v.duration_secs!=null?fmtDur(v.duration_secs):null,
+      v.file_size!=null?fmtSize(v.file_size):null,
+      v.has_live_chat?'💬':null,
+      !v.has_video?'<span style="color:#f87171">no file</span>':null,
+    ].filter(Boolean).join(' · ');
+    const thumb=v.thumb_url?`<img src="${v.thumb_url}" loading="lazy" alt="">`:'<div class="nothumb">no thumbnail</div>';
+    const dur=v.duration_secs!=null?`<span class="dur">${fmtDur(v.duration_secs)}</span>`:'';
+    const resumeBar=v.resume_pos&&v.duration_secs?`<div class="resume-bar" style="width:${Math.min(100,v.resume_pos/v.duration_secs*100).toFixed(1)}%"></div>`:'';
+    const playBtn=v.has_video&&v.video_url?`<button class="play" onclick="playVideo('${v.id}')">▶ Play</button>`:'';
+    return `<div class="card${v.watched?' watched':''}${selectedId===v.id?' selected':''}" onclick="selectVideo('${v.id}')">
+      <div class="card-thumb">${thumb}${dur}${resumeBar}</div>
+      <div class="card-title">${chk} ${esc(v.title)}</div>
+      <div class="card-meta">${meta||'&nbsp;'}</div>
+      <div class="card-foot" onclick="event.stopPropagation()">
+        ${playBtn}
+        <button onclick="toggleWatched('${v.id}')">${v.watched?'✓':'○'}</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+/* ── Watched / bulk ─────────────────────────────────────────────── */
+async function toggleWatched(id){try{await api('/api/watched/'+id,{method:'POST'});await loadLibrary()}catch(e){setStatus('Error: '+e.message)}}
+function renderChannelGrid(){
+  const q=(document.getElementById('search')?.value||'').toLowerCase();
+  const grid=document.getElementById('grid');
+  const chs=q?library.filter(ch=>ch.name.toLowerCase().includes(q)||ch.uploader?.toLowerCase().includes(q)):library;
+  setStatus(chs.length+' channel'+(chs.length!==1?'s':''));
+  if(!chs.length){grid.innerHTML='<div class="empty">Nothing here.</div>';return}
+  grid.innerHTML='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;padding:4px">'+chs.map((ch,i)=>{
+    const idx=library.indexOf(ch);
+    const thumb=ch.thumb_url?`<img src="${ch.thumb_url}" loading="lazy" alt="">`:'<div class="nothumb">📺</div>';
+    const size=ch.size_bytes>0?` · ${fmtSize(ch.size_bytes)}`:'';
+    const label=ch.uploader&&ch.uploader!==ch.name?esc(ch.uploader):esc(ch.name);
+    return `<div class="ch-card" onclick="setView(${idx},null)">
+      <div class="ch-card-thumb">${thumb}</div>
+      <div class="ch-card-info">
+        <div class="ch-card-name" title="${esc(ch.name)}">${label}</div>
+        <div class="ch-card-meta">${ch.total_videos} video${ch.total_videos!==1?'s':''}${size}</div>
+      </div>
+    </div>`;
+  }).join('')+'</div>';
+}
+async function loadMusic(){
+  try{const d=await(await api('/api/music')).json();musicTracks=d.tracks||[];renderSidebar();if(showMusic)renderMusicGrid()}catch(e){console.warn('music load:',e)}
+}
+function renderMusicGrid(){
+  const q=(document.getElementById('search')?.value||'').toLowerCase();
+  const grid=document.getElementById('grid');
+  const tracks=q?musicTracks.filter(t=>t.title.toLowerCase().includes(q)||t.artist.toLowerCase().includes(q)):musicTracks;
+  setStatus(tracks.length+' track'+(tracks.length!==1?'s':''));
+  if(!tracks.length){grid.innerHTML='<div class="empty">No music yet. Use 🎵 Music mode in the download bar.</div>';return}
+  let currentArtist='',h='<div style="width:100%;padding:4px">';
+  for(const t of tracks){
+    if(t.artist!==currentArtist){
+      currentArtist=t.artist;
+      h+=`<div style="font-weight:700;margin:12px 0 4px;color:var(--text)">${esc(t.artist)}</div><hr style="border-color:var(--border);margin:0 0 8px">`;
+    }
+    const dur=t.duration_secs!=null?fmtDur(t.duration_secs):'';
+    const playBtn=t.audio_url?`<button class="play" onclick="playAudio('${esc(t.id)}','${esc(t.title)}','${esc(safeUrl(t.audio_url))}')">▶</button>`:'';
+    h+=`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">
+      ${playBtn}
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.title)}</span>
+      <span style="color:var(--muted);font-size:12px;flex-shrink:0">${dur}</span>
+    </div>`;
+  }
+  h+='</div>';
+  grid.innerHTML=h;
+}
+function playAudio(id,title,url){
+  const bg=document.createElement('div');bg.className='modal-bg';
+  bg.onclick=e=>{if(e.target===bg)closeModal(bg)};
+  bg.innerHTML=`<div class="modal" style="max-width:420px">
+    <div class="modal-hdr"><h2>${esc(title)}</h2><button onclick="closeModal(this.closest('.modal-bg'))">✕ Close</button></div>
+    <div class="modal-body"><audio id="audio-player" src="${url}" controls autoplay style="width:100%"></audio></div>
+  </div>`;
+  document.body.appendChild(bg);
+}
+function toggleBulk(){bulkMode=document.getElementById('bulk').checked;selected.clear();document.getElementById('bulk-actions').style.display=bulkMode?'flex':'none';renderGrid()}
+function toggleSel(id,on){if(on)selected.add(id);else selected.delete(id);document.getElementById('sel-count').textContent=selected.size+' selected'}
+async function bulkWatched(on){await Promise.all([...selected].map(id=>api('/api/watched/'+id,{method:'POST'})));selected.clear();await loadLibrary()}
+
+/* ── Download preview ───────────────────────────────────────────── */
+async function previewDownload(){
+  const url=document.getElementById('dl-url').value.trim();
+  if(!url)return;
+  setStatus('Fetching preview…');
+  const bg=document.createElement('div');bg.className='modal-bg';
+  bg.innerHTML=`<div class="modal" style="max-width:420px">
+    <div class="modal-hdr"><h2>Fetching info…</h2></div>
+    <div style="color:var(--muted);font-size:13px">Contacting YouTube, please wait…</div>
+    <button onclick="this.closest('.modal-bg').remove();setStatus('')">Cancel</button>
+  </div>`;
+  document.body.appendChild(bg);
+  try{
+    const r=await fetch('/api/preview?url='+encodeURIComponent(url));
+    if(!r.ok)throw new Error(await r.text());
+    const d=await r.json();
+    const info=[d.type,d.entry_count?d.entry_count+' videos':null,d.duration?fmtDur(d.duration):null,d.view_count?d.view_count.toLocaleString()+' views':null].filter(Boolean).join(' · ');
+    bg.innerHTML=`<div class="modal" style="max-width:480px">
+      <div class="modal-hdr"><h2>Confirm download</h2></div>
+      <div class="modal-body" style="align-items:flex-start;gap:12px">
+        ${d.thumbnail?`<img class="preview-thumb" src="${esc(safeUrl(d.thumbnail))}" onerror="this.remove()">`:''}
+        <div>
+          <div style="font-weight:600;margin-bottom:6px">${esc(d.title||'Unknown')}</div>
+          ${d.channel?`<div style="font-size:12px;color:var(--muted);margin-bottom:4px">${esc(d.channel)}</div>`:''}
+          <div style="font-size:12px;color:var(--muted)">${esc(info)}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button onclick="this.closest('.modal-bg').remove();setStatus('')">Cancel</button>
+        <button class="primary" onclick="confirmDownload('${esc(url)}',this)">⬇ Download</button>
+      </div>
+    </div>`;
+    setStatus('');
+  }catch(e){
+    bg.innerHTML=`<div class="modal" style="max-width:400px">
+      <div class="modal-hdr"><h2>Preview failed</h2></div>
+      <div style="color:#f87171;font-size:13px;margin-bottom:8px">${esc(e.message)}</div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button onclick="this.closest('.modal-bg').remove()">Cancel</button>
+        <button class="primary" onclick="confirmDownload('${esc(url)}',this)">Download anyway</button>
+      </div>
+    </div>`;
+    setStatus('');
+  }
+}
+function fullScan(){return !(document.getElementById('dl-full-scan')?.checked||false)}
+function dlLive(){return document.getElementById('dl-live')?.checked||false}
+function dlTwitchClips(){return document.getElementById('dl-twitch-clips')?.checked||false}
+// Show the Twitch "Clips only" toggle only when the URL currently in the
+// download field looks like a Twitch channel (not a specific VOD/clip).
+function refreshTwitchClipsVisibility(){
+  const url=(document.getElementById('dl-url')?.value||'').toLowerCase();
+  const isTwitchChannel=url.includes('twitch.tv/')
+    && !url.includes('/videos/')
+    && !url.includes('/clip/');
+  const lbl=document.getElementById('twitch-clips-label');
+  if(lbl)lbl.style.display=isTwitchChannel?'flex':'none';
+}
+function dlQuality(){return document.getElementById('dl-quality')?.value||'best'}
+function updateDlMode(){
+  const isMusic=dlQuality()==='music';
+  document.getElementById('fast-mode-label').style.display=isMusic?'none':'flex';
+  // Live recording makes no sense for music-only mode.
+  document.getElementById('live-mode-label').style.display=isMusic?'none':'flex';
+}
+async function confirmDownload(url,btn){
+  if(btn)btn.closest('.modal-bg').remove();
+  try{
+    const quality=dlQuality();
+    // Twitch clips-only: rewrite a bare twitch.tv/<user> URL to
+    // twitch.tv/<user>/clips so yt-dlp's TwitchClips extractor handles it.
+    // Skip the rewrite when the URL already targets a specific video/clip.
+    let finalUrl=url;
+    if(dlTwitchClips()
+       && /twitch\.tv\//i.test(url)
+       && !/\/(?:videos|clip)\//i.test(url)
+       && !/\/clips(?:\/?$|\?)/i.test(url)){
+      finalUrl=url.replace(/\/+$/,'')+'/clips';
+    }
+    const body={url:finalUrl,full_scan:fullScan(),quality,live:dlLive()};
+    await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    document.getElementById('dl-url').value='';
+    refreshTwitchClipsVisibility();
+    setStatus('Download queued…')
+  }catch(e){setStatus('Error: '+e.message)}
+}
+async function downloadChannel(url){try{await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,full_scan:true,quality:'best'})});setStatus('Checking for new videos…')}catch(e){setStatus('Error: '+e.message)}}
+function rebuildChannelUrl(ch){
+  // Prefer the stored source URL (works for every platform). Fall back to
+  // the legacy YouTube heuristic only when the channel pre-dates the
+  // multi-platform changes and has no .source-url sidecar.
+  if(ch.source_url)return ch.source_url;
+  return(/^UC.{22}$/.test(ch.name))
+    ?'https://www.youtube.com/channel/'+ch.name
+    :'https://www.youtube.com/@'+ch.name;
+}
+async function downloadChannelByIdx(i){await downloadChannel(rebuildChannelUrl(library[i]))}
+
+/* ── Rescan ─────────────────────────────────────────────────────── */
+async function rescan(){try{await api('/api/rescan',{method:'POST'});await loadLibrary()}catch(e){setStatus('Error: '+e.message)}}
+
+/* ── Find video ─────────────────────────────────────────────────── */
+function findVideo(id){for(const ch of library)for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])if(v.id===id)return v;return null}
+
+/* ── Player ─────────────────────────────────────────────────────── */
+function playVideo(id){
+  const v=findVideo(id);if(!v||!v.video_url)return;
+  currentPlayingId=id;
+  const bg=document.createElement('div');bg.className='modal-bg';
+  bg.onclick=e=>{if(e.target===bg)closeModal(bg)};
+  const tracks=(v.subtitles||[]).map((s,i)=>`<track kind="subtitles" src="${esc(safeUrl(s.url))}" srclang="${esc(s.lang)}" label="${esc(s.label)}"${i===0?' default':''}>`).join('');
+  const chapPane=v.has_chapters?`<div class="chapters-pane" id="chapters-pane"><h4>Chapters</h4><div id="chapters-list"><em style="padding:10px;display:block;color:var(--muted)">Loading…</em></div></div>`:'';
+  // Show upload date + duration in the modal header so the viewer has
+  // basic context without opening the metadata pane.
+  const headerMeta=[
+    v.upload_date?fmtDate(v.upload_date):null,
+    v.duration_secs!=null?fmtDur(v.duration_secs):null,
+  ].filter(Boolean).join(' · ');
+  const metaLine=headerMeta?`<span style="font-size:11px;color:var(--muted);margin-left:8px">${esc(headerMeta)}</span>`:'';
+  bg.innerHTML=`<div class="modal">
+    <div class="modal-hdr"><h2>${esc(v.title)}${metaLine}</h2><button onclick="closeModal(this.closest('.modal-bg'))">✕ Close</button></div>
+    <div class="modal-body"><video id="player-video" src="${esc(safeUrl(v.video_url))}" controls autoplay crossorigin="anonymous">${tracks}</video>${chapPane}</div>
+  </div>`;
+  document.body.appendChild(bg);
+  const vid=bg.querySelector('#player-video');
+  if(v.resume_pos&&v.resume_pos>5)vid.addEventListener('loadedmetadata',()=>{vid.currentTime=v.resume_pos},{once:true});
+  if(saveTimer)clearInterval(saveTimer);
+  saveTimer=setInterval(()=>savePosition(vid),5000);
+  vid.addEventListener('pause',()=>savePosition(vid));
+  if(v.has_chapters)loadChapters(id);
+}
+
+async function savePosition(vid){
+  if(!vid||vid.readyState<1||!currentPlayingId)return;
+  const pos=vid.currentTime,dur=vid.duration;
+  if(!pos||!dur)return;
+  const nearEnd=dur>0&&pos>dur*0.95;
+  try{
+    await fetch('/api/resume/'+encodeURIComponent(currentPlayingId),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({position:nearEnd?0:pos})});
+    if(nearEnd){const v=findVideo(currentPlayingId);if(v&&!v.watched)await api('/api/watched/'+encodeURIComponent(currentPlayingId),{method:'POST'})}
+  }catch{}
+}
+
+function closeModal(el){
+  if(saveTimer){clearInterval(saveTimer);saveTimer=null}
+  const vid=el.querySelector('video');
+  if(vid){savePosition(vid);vid.pause();vid.src=''}
+  currentPlayingId=null;
+  el.remove();
+  loadLibrary();
+}
+
+async function loadChapters(id){
+  try{
+    const chapters=((await(await fetch('/api/chapters/'+encodeURIComponent(id))).json()).chapters)||[];
+    const list=document.getElementById('chapters-list');if(!list)return;
+    if(!chapters.length){list.innerHTML='<em style="padding:10px;display:block;color:var(--muted)">No chapters</em>';return}
+    list.innerHTML=chapters.map(c=>`<div class="chapter" onclick="jumpToChapter(${c.start})"><div class="ch-time">${fmtDur(c.start)}</div><div class="ch-title">${esc(c.title)}</div></div>`).join('');
+    const vid=document.getElementById('player-video');
+    if(vid)vid.addEventListener('timeupdate',()=>{
+      const t=vid.currentTime;let ai=-1;
+      for(let i=0;i<chapters.length;i++){if(t>=chapters[i].start)ai=i;else break}
+      list.querySelectorAll('.chapter').forEach((el,i)=>{el.classList.toggle('active',i===ai)});
+      const a=list.querySelector('.chapter.active');if(a)a.scrollIntoView({block:'nearest'});
+    });
+  }catch{}
+}
+function jumpToChapter(s){const v=document.getElementById('player-video');if(v){v.currentTime=s;v.play()}}
+
+/* ── Select / Details ───────────────────────────────────────────── */
+function selectVideo(id){selectedId=selectedId===id?null:id;renderGrid();renderDetails()}
+function closeDetails(){selectedId=null;renderGrid();renderDetails()}
+
+function renderDetails(){
+  const el=document.getElementById('details');
+  if(!selectedId){el.style.display='none';return}
+  const v=findVideo(selectedId);if(!v){el.style.display='none';return}
+  el.style.display='block';
+  const meta=[
+    v.duration_secs!=null?fmtDur(v.duration_secs):null,
+    v.file_size!=null?fmtSize(v.file_size):null,
+    v.resume_pos&&v.duration_secs?'Resume at '+fmtDur(v.resume_pos):null,
+    v.watched?'watched':'unwatched',
+    v.has_live_chat?'💬 live chat':null,
+    !v.has_video?'no file':null,
+  ].filter(Boolean);
+  const playBtn=v.has_video&&v.video_url?`<button class="primary" onclick="playVideo('${v.id}')">▶ Play</button>`:'';
+  el.innerHTML=`<div class="det-head">
+    <h3>${esc(v.title)}</h3>
+    <div class="det-actions">
+      ${playBtn}
+      <button onclick="toggleWatched('${v.id}')">${v.watched?'✓ Watched':'○ Unwatched'}</button>
+      <button onclick="showMetadata('${v.id}')">📋 Metadata</button>
+      <button onclick="closeDetails()">✕</button>
+    </div>
+  </div>
+  <div class="det-meta">${meta.map(esc).join('<span style="color:var(--border)"> | </span>')}</div>
+  <div class="det-desc" id="det-desc"><em style="color:var(--muted)">Loading…</em></div>`;
+  fetchDescription(selectedId);
+}
+
+async function fetchDescription(id){
+  try{const t=await(await fetch('/api/description/'+encodeURIComponent(id))).text();const el=document.getElementById('det-desc');if(el)el.textContent=t.trim()||'(no description)'}
+  catch{const el=document.getElementById('det-desc');if(el)el.textContent='(could not load description)'}
+}
+
+/* ── Metadata viewer ────────────────────────────────────────────── */
+async function showMetadata(id){
+  let data;try{const r=await fetch('/api/metadata/'+encodeURIComponent(id));if(!r.ok)throw new Error(await r.text());data=await r.json()}catch(e){setStatus('Error: '+e.message);return}
+  const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  const fields=[
+    ['Title',data.title],['ID',data.id],['Channel',data.channel||data.uploader],
+    ['Channel URL',data.channel_url?`<a href="${esc(data.channel_url)}" target="_blank">${esc(data.channel_url)}</a>`:null],
+    ['Original URL',data.webpage_url?`<a href="${esc(data.webpage_url)}" target="_blank">${esc(data.webpage_url)}</a>`:null],
+    ['Upload date',data.upload_date?`${data.upload_date.slice(0,4)}-${data.upload_date.slice(4,6)}-${data.upload_date.slice(6,8)}`:null],
+    ['Duration',data.duration!=null?fmtDur(data.duration):null],
+    ['Views',data.view_count!=null?data.view_count.toLocaleString():null],
+    ['Likes',data.like_count!=null?data.like_count.toLocaleString():null],
+    ['Comments',data.comment_count!=null?data.comment_count.toLocaleString():null],
+    ['Format',data.format],['Resolution',data.resolution||(data.width&&data.height?`${data.width}x${data.height}`:null)],
+    ['FPS',data.fps],['Video codec',data.vcodec],['Audio codec',data.acodec],
+    ['Filesize',data.filesize_approx?fmtSize(data.filesize_approx):null],
+    ['Categories',Array.isArray(data.categories)?data.categories.join(', '):null],
+    ['Tags',Array.isArray(data.tags)?data.tags.slice(0,30).join(', '):null],
+    ['Age limit',data.age_limit],['Live status',data.live_status],['Availability',data.availability],
+  ].filter(([,v])=>v!=null&&v!=='');
+  const sum=`<dl class="meta-grid">${fields.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${typeof v==='string'&&v.startsWith('<a')?v:esc(v)}</dd>`).join('')}</dl>`;
+  const raw=`<pre class="meta-raw">${esc(JSON.stringify(data,null,2))}</pre>`;
+  bg.innerHTML=`<div class="modal" style="max-width:700px">
+    <div class="modal-hdr"><h2>Metadata</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div class="meta-tabs">
+      <div class="meta-tab active" onclick="switchMetaTab(this,'summary')">Summary</div>
+      <div class="meta-tab" onclick="switchMetaTab(this,'raw')">Raw JSON</div>
+    </div>
+    <div id="meta-summary" style="overflow:auto;max-height:65vh">${sum}</div>
+    <div id="meta-raw" style="display:none">${raw}</div>
+  </div>`;
+  document.body.appendChild(bg);
+}
+function switchMetaTab(tab,which){tab.parentElement.querySelectorAll('.meta-tab').forEach(t=>t.classList.remove('active'));tab.classList.add('active');document.getElementById('meta-summary').style.display=which==='summary'?'':'none';document.getElementById('meta-raw').style.display=which==='raw'?'':'none'}
+
+/* ── Settings ───────────────────────────────────────────────────── */
+const THEMES=[['dark','Dark'],['light','Light'],['dracula','Dracula'],['trans','Trans'],['emo-nocturnal','Emo: Nocturnal'],['emo-coffin','Emo: Coffin'],['emo-scene-queen','Emo: Scene Queen'],['solarized','Solarized'],['nord','Nord'],['amoled','AMOLED']];
+function applyTheme(t){document.body.className=t==='dark'?'':'theme-'+t;localStorage.setItem('theme',t)}
+
+async function logout(){try{await fetch('/api/logout',{method:'POST'});location.reload()}catch{}}
+
+async function openSettings(){
+  let cur={transcode:false,source_url:null,current_bind:null,available_binds:[],download_password_required:false};try{cur=await(await api('/api/settings')).json()}catch{}
+  const savedTheme=localStorage.getItem('theme')||'dark';
+  const srcRow=`<hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">Source code (AGPL §13)</div>
+    <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px">
+      <input type="url" id="cf-source-url" value="${esc(cur.source_url||'')}" placeholder="https://codeberg.org/you/your-fork"
+             style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-size:12px">
+      <div class="settings-hint">Shown as the &quot;Source&quot; link in the footer. AGPL-3.0 requires every network user be offered a way to obtain the running source code. Leave empty to hide the link.</div>
+    </div>`;
+  const bindRows=cur.available_binds?.length?`<div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
+      <label>Binding</label>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Current: <code style="background:var(--bg);padding:2px 4px;border-radius:2px">${esc(cur.current_bind||'unknown')}</code></div>
+      <select id="cf-bind" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px;width:100%">
+        ${cur.available_binds.map(b=>`<option value="${esc(b.id)}">${esc(b.label)}</option>`).join('')}
+      </select>
+      <div class="settings-hint">Change requires restart. Access from: tailscale, LAN, or all interfaces.</div>
+    </div>`:''
+  const logoutBtn=cur.download_password_required?`<button onclick="logout()">Log out</button>`:'';
+  let ck={exists:false,cookies:0};try{ck=await(await api('/api/cookies')).json()}catch{}
+  const cookiesStatus=ck.exists?`${ck.cookies} cookie(s) loaded`:'no cookies.txt';
+  const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  bg.innerHTML=`<div class="modal" style="max-width:420px;overflow-y:auto">
+    <div class="modal-hdr" style="position:sticky;top:0;background:var(--panel);z-index:1;padding-bottom:6px"><h2>Settings</h2></div>
+    <div class="settings-row">
+      <label for="cf-transcode">Transcode videos (mp4/H.264)</label>
+      <input type="checkbox" id="cf-transcode" ${cur.transcode?'checked':''}>
+    </div>
+    <div class="settings-hint" style="margin-bottom:10px">Requires ffmpeg. Lets Chrome play MKV files. Seeking disabled while transcoding.</div>
+    <div class="settings-row">
+      <label>Theme</label>
+      <select id="cf-theme" onchange="applyTheme(this.value)" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px">
+        ${THEMES.map(([id,label])=>`<option value="${id}"${savedTheme===id?' selected':''}>${label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="settings-row">
+      <label for="cf-download-pwd">Require password to access UI</label>
+      <input type="checkbox" id="cf-download-pwd" ${cur.download_password_required?'checked':''} onchange="document.getElementById('cf-pwd-input').style.display=this.checked?'flex':'none'">
+    </div>
+    <div id="cf-pwd-input" style="display:${cur.download_password_required?'flex':'none'};flex-direction:column;gap:4px;margin-bottom:10px">
+      <input type="password" id="cf-download-password" placeholder="New password (leave empty to disable)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 8px;border-radius:4px">
+      <div class="settings-hint">Gates the whole UI and all API access. Leave empty to disable on save; changing it logs out other sessions.</div>
+    </div>
+    ${bindRows}
+    <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
+      <label>Cookies (cookies.txt)</label>
+      <div class="settings-hint" id="cookies-status">${cookiesStatus}</div>
+      <input type="file" id="cf-cookies-file" accept=".txt,text/plain" onchange="loadCookieFile(this)" style="font-size:11px;color:var(--muted)">
+      <textarea id="cf-cookies" placeholder="…or paste Netscape-format cookies.txt here" style="width:100%;height:70px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-family:monospace;font-size:11px;resize:vertical"></textarea>
+      <div style="display:flex;gap:6px">
+        <button onclick="saveCookies(this)">Update cookies</button>
+        <button onclick="clearCookies(this)" style="color:var(--muted)">Clear</button>
+      </div>
+      <div class="settings-hint">Choose a file or paste (e.g. from "Get cookies.txt LOCALLY"). Refresh when downloads start hitting captchas.</div>
+    </div>
+    <hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">Scheduler</div>
+    <div class="settings-row">
+      <label for="cf-sched-enabled">Auto-check all channels</label>
+      <input type="checkbox" id="cf-sched-enabled" ${cur.scheduler_enabled?'checked':''} onchange="document.getElementById('cf-sched-interval-row').style.display=this.checked?'flex':'none'">
+    </div>
+    <div id="cf-sched-interval-row" class="settings-row" style="display:${cur.scheduler_enabled?'flex':'none'}">
+      <label for="cf-sched-interval">Every</label>
+      <select id="cf-sched-interval" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px">
+        ${[1,2,6,12,24,48,72,168].map(h=>`<option value="${h}"${(cur.scheduler_interval_hours||24)===h?' selected':''}>${h===1?'1 hour':h===168?'1 week':h<24?h+' hours':h===24?'1 day':(h/24)+' days'}</option>`).join('')}
+      </select>
+    </div>
+    <div class="settings-hint" style="margin-bottom:6px">${cur.scheduler_next_check_secs!=null?'Next check in '+fmtCountdown(cur.scheduler_next_check_secs)+'.':''}</div>
+    <div style="display:flex;gap:6px;margin-bottom:4px">
+      <button onclick="runScheduler(this)">▶ Check all channels now</button>
+      <span id="sched-status" style="font-size:11px;color:var(--muted);align-self:center"></span>
+    </div>
+    <div class="settings-row" style="margin-top:6px">
+      <label for="cf-max-concurrent">Max concurrent downloads</label>
+      <input type="number" id="cf-max-concurrent" value="${cur.max_concurrent||3}" min="1" max="10" style="width:56px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:13px">
+    </div>
+    <div class="settings-hint" style="margin-bottom:4px">Extra downloads queue and start automatically when a slot opens.</div>
+    <hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">yt-dlp binary</div>
+    <div class="settings-row">
+      <label for="cf-ytdlp-bundled">Use bundled yt-dlp + deno</label>
+      <input type="checkbox" id="cf-ytdlp-bundled" ${cur.use_bundled_ytdlp?'checked':''}>
+    </div>
+    <div class="settings-hint" style="margin-bottom:6px">Bundled binaries live in ~/.local/share/yt-offline/bin/ and include a JS runtime (deno) needed for YouTube signature deciphering. When off, the yt-dlp on your PATH is used.</div>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+      <button onclick="updateYtdlp(this)">${cur.bundled_ytdlp_installed?'⟳ Update bundled':'⤓ Install bundled'}</button>
+      <span style="font-size:11px;color:var(--muted)">${cur.bundled_ytdlp_installed?'✓ installed':'not installed'}</span>
+      <span id="ytdlp-status" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+    <hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">Plex</div>
+    <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
+      <label>Library path</label>
+      <input type="text" id="cf-plex-path" value="${esc(cur.plex_library_path||'')}" placeholder="/media/plex/YouTube" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 8px;border-radius:4px;font-family:monospace;font-size:12px">
+      <div class="settings-hint">Symlink tree of channels as TV shows. Point a Plex "TV Shows" library here.</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button onclick="generatePlex(this)">⟳ Generate Plex library</button>
+        <span id="plex-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+    </div>
+    ${srcRow}
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      ${logoutBtn}
+      <button onclick="this.closest('.modal-bg').remove()">Cancel</button>
+      <button class="primary" onclick="saveSettings(this)">Save</button>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+}
+
+function loadCookieFile(input){
+  const f=input.files&&input.files[0];if(!f)return;
+  const r=new FileReader();
+  r.onload=()=>{document.getElementById('cf-cookies').value=r.result;setStatus('Loaded '+f.name+' — click Update cookies to save')};
+  r.onerror=()=>setStatus('Could not read file');
+  r.readAsText(f);
+}
+
+async function saveCookies(btn){
+  const t=document.getElementById('cf-cookies').value;
+  if(!t.trim()){setStatus('Paste cookies first');return}
+  btn.disabled=true;
+  try{
+    const r=await fetch('/api/cookies',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookies:t})});
+    if(!r.ok)throw new Error(await r.text());
+    const d=await r.json();
+    document.getElementById('cf-cookies').value='';
+    document.getElementById('cookies-status').textContent=d.cookies+' cookie(s) loaded';
+    setStatus('Cookies updated ('+d.cookies+' entries)');
+  }catch(e){setStatus('Cookies error: '+e.message)}finally{btn.disabled=false}
+}
+async function clearCookies(btn){
+  if(!confirm('Remove cookies.txt? Downloads requiring login will fail until you add new cookies.'))return;
+  btn.disabled=true;
+  try{
+    await api('/api/cookies',{method:'DELETE'});
+    document.getElementById('cookies-status').textContent='no cookies.txt';
+    setStatus('Cookies cleared');
+  }catch(e){setStatus('Error: '+e.message)}finally{btn.disabled=false}
+}
+
+async function generatePlex(btn){
+  const path=document.getElementById('cf-plex-path')?.value.trim();
+  if(!path){document.getElementById('plex-status').textContent='Set a path first';return}
+  btn.disabled=true;
+  document.getElementById('plex-status').textContent='Generating…';
+  try{
+    await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({transcode:document.getElementById('cf-transcode').checked,plex_library_path:path})});
+    const r=await api('/api/plex/generate',{method:'POST'});
+    const d=await r.json();
+    const errs=d.errors?.length?' ('+d.errors.length+' error(s))':'';
+    document.getElementById('plex-status').textContent=d.links_created+' link(s) created'+errs;
+  }catch(e){document.getElementById('plex-status').textContent='Error: '+e.message}
+  finally{btn.disabled=false}
+}
+function fmtCountdown(secs){
+  if(secs<=0)return'now';
+  const h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60);
+  if(h>0)return h+'h '+(m>0?m+'m ':'');
+  return m>0?m+'m':'< 1m';
+}
+async function updateYtdlp(btn){
+  btn.disabled=true;
+  const st=document.getElementById('ytdlp-status');
+  st.textContent='Started — see Downloads bar';
+  try{
+    const r=await fetch('/api/ytdlp/update',{method:'POST'});
+    const t=await r.text();
+    if(!r.ok)throw new Error(t);
+    setStatus('yt-dlp update job started');
+  }catch(e){st.textContent='Error: '+e.message}
+  finally{btn.disabled=false}
+}
+async function runScheduler(btn){
+  btn.disabled=true;
+  const st=document.getElementById('sched-status');
+  st.textContent='Starting…';
+  try{
+    const r=await fetch('/api/scheduler/run',{method:'POST'});
+    const t=await r.text();
+    if(!r.ok&&r.status!==409)throw new Error(t);
+    st.textContent=r.status===409?'Already running.':t;
+    setStatus('Scheduled check started');
+  }catch(e){st.textContent='Error: '+e.message}
+  finally{btn.disabled=false}
+}
+async function saveSettings(btn){
+  const transcode=document.getElementById('cf-transcode').checked;
+  const bindMode=document.getElementById('cf-bind')?.value;
+  const pwdCheckbox=document.getElementById('cf-download-pwd');
+  const pwdInput=document.getElementById('cf-download-password');
+  const plexPath=document.getElementById('cf-plex-path')?.value;
+  const schedEnabled=document.getElementById('cf-sched-enabled')?.checked||false;
+  const schedInterval=parseInt(document.getElementById('cf-sched-interval')?.value||'24',10);
+  const maxConcurrent=parseInt(document.getElementById('cf-max-concurrent')?.value||'3',10);
+  const useBundledYtdlp=document.getElementById('cf-ytdlp-bundled')?.checked||false;
+  const sourceUrl=document.getElementById('cf-source-url')?.value;
+  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp};
+  if(bindMode)payload.bind_mode=bindMode;
+  if(plexPath!==undefined)payload.plex_library_path=plexPath;
+  if(sourceUrl!==undefined)payload.source_url=sourceUrl;
+  if(pwdCheckbox&&pwdCheckbox.checked){
+    payload.new_download_password=pwdInput?.value||'';
+  }
+  const settingPwd=pwdCheckbox&&pwdCheckbox.checked&&pwdInput?.value;
+  try{
+    await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    btn.closest('.modal-bg').remove();
+    if(settingPwd){setStatus('Password set — signing in again…');location.reload();return}
+    let msg='Saved.';
+    if(bindMode)msg='Settings saved. Restart required for binding change.';
+    if(pwdCheckbox&&pwdCheckbox.checked&&!pwdInput?.value)msg='Password disabled. '+msg;
+    setStatus(msg);await loadLibrary();
+  }catch(e){setStatus('Error: '+e.message)}
+}
+
+/* ── Statistics ─────────────────────────────────────────────────── */
+async function openStats(){
+  const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  bg.innerHTML=`<div class="modal" style="max-width:760px;width:100%">
+    <div class="modal-hdr"><h2>📊 Library statistics</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div id="stats-body" style="overflow:auto;max-height:75vh"><em style="color:var(--muted)">Computing…</em></div>
+  </div>`;
+  document.body.appendChild(bg);
+  try{
+    const r=await(await api('/api/stats')).json();
+    renderStats(r);
+  }catch(e){document.getElementById('stats-body').innerHTML=`<div style="color:#f87171">Stats failed: ${esc(e.message)}</div>`}
+}
+
+function fmtHours(secs){
+  if(!secs||secs<60)return'0h';
+  const h=Math.floor(secs/3600),m=Math.floor((secs%3600)/60);
+  return h>0?`${h}h ${m}m`:`${m}m`;
+}
+
+function renderStats(r){
+  const body=document.getElementById('stats-body');if(!body)return;
+  const tot=fmtHours(r.total_duration_secs);
+  const wat=fmtHours(r.watched_duration_secs);
+  const tile=(label,value)=>`<div style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px 12px;flex:1;min-width:120px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">${esc(label)}</div><div style="font-size:18px;font-weight:600;margin-top:2px">${esc(value)}</div></div>`;
+  let h=`<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+    ${tile('Channels',r.total_channels.toLocaleString())}
+    ${tile('Videos',r.total_videos.toLocaleString())}
+    ${tile('Playlists',r.total_playlists.toLocaleString())}
+    ${tile('Disk used',fmtSize(r.total_size_bytes))}
+    ${tile('Total runtime',tot)}
+    ${tile('Watched',`${r.watched_count.toLocaleString()} · ${wat}`)}
+    ${tile('Continue watching',r.continue_watching_count.toLocaleString())}
+  </div>`;
+
+  // Downloads per week — horizontal bar chart.
+  const weeks=r.downloads_per_week||[];
+  const maxWeek=Math.max(1,...weeks.map(w=>w.count));
+  h+=`<h3 style="font-size:13px;margin:4px 0 6px">Downloads — last ${weeks.length} weeks</h3>`;
+  h+=`<div style="display:flex;align-items:flex-end;gap:3px;height:80px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:4px">`;
+  for(const w of weeks){
+    const pct=(w.count/maxWeek)*100;
+    const d=new Date(w.week_start_unix*1000);
+    const lbl=`${d.getMonth()+1}/${d.getDate()}`;
+    const tip=`${lbl}: ${w.count} videos, ${fmtSize(w.size_bytes)}`;
+    h+=`<div title="${esc(tip)}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+      <div style="width:100%;height:${pct}%;background:var(--accent);border-radius:2px 2px 0 0;min-height:${w.count>0?'2px':'0'}"></div>
+      <div style="font-size:9px;color:var(--muted);margin-top:2px">${esc(lbl)}</div>
+    </div>`;
+  }
+  h+=`</div>`;
+
+  // Uploads per year.
+  const years=r.videos_per_year||[];
+  if(years.length){
+    const maxYear=Math.max(1,...years.map(y=>y.count));
+    h+=`<h3 style="font-size:13px;margin:4px 0 6px">Videos by upload year</h3>`;
+    h+=`<div style="display:flex;align-items:flex-end;gap:3px;height:60px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:4px">`;
+    for(const y of years){
+      const pct=(y.count/maxYear)*100;
+      h+=`<div title="${esc(y.year+': '+y.count)}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
+        <div style="width:100%;height:${pct}%;background:var(--accent);opacity:.7;border-radius:2px 2px 0 0;min-height:${y.count>0?'2px':'0'}"></div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px">${esc(y.year)}</div>
+      </div>`;
+    }
+    h+=`</div>`;
+  }
+
+  // Two side-by-side top-N tables.
+  const topTable=(title,rows)=>{
+    if(!rows||!rows.length)return'';
+    let t=`<h3 style="font-size:13px;margin:4px 0 6px">${esc(title)}</h3>
+      <table style="width:100%;font-size:12px;border-collapse:collapse;margin-bottom:14px"><tbody>`;
+    for(const row of rows){
+      t+=`<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px">${esc(row.name)}</td>
+        <td style="padding:4px 6px;text-align:right;color:var(--muted)">${row.count} videos</td>
+        <td style="padding:4px 6px;text-align:right;color:var(--muted)">${fmtSize(row.size_bytes)}</td>
+        <td style="padding:4px 6px;text-align:right;color:var(--muted)">${fmtHours(row.duration_secs)}</td>
+      </tr>`;
+    }
+    t+=`</tbody></table>`;
+    return t;
+  };
+  h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div>${topTable('Top channels by size',r.top_channels_by_size)}</div>
+    <div>${topTable('Top channels by count',r.top_channels_by_count)}</div>
+  </div>`;
+  body.innerHTML=h;
+}
+
+/* ── Maintenance (library health) ───────────────────────────────── */
+async function openMaintenance(){
+  const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  bg.innerHTML=`<div class="modal" style="max-width:760px;width:100%">
+    <div class="modal-hdr"><h2>Library health</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div id="maint-body" style="overflow:auto;max-height:75vh"><em style="color:var(--muted)">Scanning…</em></div>
+  </div>`;
+  document.body.appendChild(bg);
+  try{
+    const r=await(await api('/api/maintenance/scan')).json();
+    renderMaintenance(r);
+  }catch(e){document.getElementById('maint-body').innerHTML=`<div style="color:#f87171">Scan failed: ${esc(e.message)}</div>`}
+}
+
+function renderMaintenance(r){
+  const body=document.getElementById('maint-body');if(!body)return;
+  const dups=r.duplicates||[],miss=r.missing||[];
+  let h='';
+  h+=`<h3 style="font-size:13px;margin:4px 0 8px">Duplicates (${dups.length})</h3>`;
+  if(!dups.length){h+='<div style="color:var(--muted);font-size:12px;margin-bottom:12px">No duplicate video IDs found.</div>'}
+  else{
+    for(const g of dups){
+      h+=`<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px">
+        <div style="font-weight:600;font-size:12px;margin-bottom:6px">${esc(g.title)} <span style="color:var(--muted)">[${esc(g.id)}]</span></div>`;
+      g.copies.forEach((c,i)=>{
+        const tag=c.recommended_keep?'<span style="color:#4ade80">keep</span>':'<span style="color:#f87171">remove</span>';
+        const size=c.file_size?fmtSize(c.file_size):'no video';
+        h+=`<label style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
+          <input type="checkbox" class="dup-chk" data-files='${esc(JSON.stringify(c.files))}' ${c.recommended_keep?'':'checked'}>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.location||'(unknown)')} · ${size} · ${c.files.length} files</span>
+          ${tag}
+        </label>`;
+      });
+      h+=`</div>`;
+    }
+    h+=`<button class="primary" onclick="removeDuplicates(this)">🗑 Remove checked copies</button>`;
+  }
+  h+=`<h3 style="font-size:13px;margin:16px 0 8px">Missing assets (${miss.length})</h3>`;
+  if(!miss.length){h+='<div style="color:var(--muted);font-size:12px">Every video has its thumbnail, metadata, and description.</div>'}
+  else{
+    if(miss.length>1)h+=`<button onclick="repairAll(this)" style="margin-bottom:8px">⬇ Fetch all missing (${miss.length})</button>`;
+    for(const m of miss){
+      const need=[m.missing_thumbnail?'thumbnail':null,m.missing_info?'metadata':null,m.missing_description?'description':null].filter(Boolean).join(', ');
+      h+=`<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.title)} <span style="color:var(--muted)">— missing ${need}</span></span>
+        <button onclick="repairVideo('${esc(m.id)}',this)">⬇ Fetch</button>
+      </div>`;
+    }
+  }
+  body.innerHTML=h;
+}
+
+async function removeDuplicates(btn){
+  const chks=[...document.querySelectorAll('.dup-chk:checked')];
+  let paths=[];
+  for(const c of chks){try{paths=paths.concat(JSON.parse(c.dataset.files))}catch{}}
+  if(!paths.length){setStatus('Nothing selected.');return}
+  if(!confirm(`Delete ${paths.length} file(s)? This cannot be undone.`))return;
+  btn.disabled=true;
+  try{
+    const r=await(await api('/api/maintenance/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths})})).json();
+    setStatus(`Removed ${r.removed} file(s)`+(r.errors&&r.errors.length?`, ${r.errors.length} error(s)`:''));
+    await loadLibrary();
+    const fresh=await(await api('/api/maintenance/scan')).json();renderMaintenance(fresh);
+  }catch(e){setStatus('Error: '+e.message)}finally{btn.disabled=false}
+}
+
+async function repairVideo(id,btn){
+  if(btn){btn.disabled=true;btn.textContent='⏳ Queued'}
+  try{await api('/api/maintenance/repair/'+encodeURIComponent(id),{method:'POST'});setStatus('Repair queued — see Downloads')}
+  catch(e){setStatus('Error: '+e.message);if(btn){btn.disabled=false;btn.textContent='⬇ Fetch'}}
+}
+async function repairAll(btn){
+  btn.disabled=true;
+  const buttons=[...document.querySelectorAll('#maint-body button')].filter(b=>b.textContent.includes('Fetch')&&b!==btn);
+  for(const b of buttons){const id=b.getAttribute('onclick')?.match(/repairVideo\('([^']+)'/)?.[1];if(id)await repairVideo(id,b)}
+  setStatus('All repairs queued — see Downloads');
+}
+
+/* ── Jobs ───────────────────────────────────────────────────────── */
+function renderJobs(jobs,queued,maxConcurrent){
+  const el=document.getElementById('jobs');
+  if(!jobs.length&&!queued?.length){el.innerHTML='';return}
+  const fin=jobs.some(j=>j.state!=='running');
+  const hdr=fin?`<div style="padding:4px 14px;display:flex;justify-content:flex-end;border-bottom:1px solid var(--border)"><button onclick="clearFinishedJobs()" style="font-size:11px;padding:2px 8px">✕ Clear finished</button></div>`:'';
+  const queuedHtml=(queued&&queued.length)?queued.map(q=>`<div class="job">
+      <span class="badge" style="color:var(--muted)">queued</span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${esc(q.label)} — ${esc(q.url)}</span>
+    </div>`).join(''):'';
+  const limitNote=maxConcurrent>0?`<div style="font-size:11px;color:var(--muted);padding:2px 14px">max ${maxConcurrent} concurrent</div>`:'';
+  el.innerHTML=hdr+jobs.map((j,i)=>{
+    const dismiss=j.state!=='running'?`<button onclick="removeJob(${i})" style="font-size:11px;padding:1px 6px">✕</button>`:'';
+    return `<div class="job">
+      <span class="badge ${j.state}">${j.state}</span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.label)} — ${esc(j.url)}</span>
+      ${j.state==='running'?`<progress value="${j.progress}" max="1"></progress>`:''}
+      <span style="font-size:11px;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_line)}</span>
+      ${dismiss}
+    </div>`;
+  }).join('')+queuedHtml+limitNote;
+}
+async function clearFinishedJobs(){try{await api('/api/jobs/clear',{method:'POST'});await pollProgress()}catch(e){setStatus('Error: '+e.message)}}
+async function removeJob(idx){try{await api('/api/jobs/'+idx,{method:'DELETE'});await pollProgress()}catch(e){setStatus('Error: '+e.message)}}
+
+let wasRunning=false;
+async function pollProgress(){
+  try{
+    const d=await(await api('/api/progress')).json();
+    renderJobs(d.jobs,d.queued,d.max_concurrent);
+    const run=d.jobs.some(j=>j.state==='running')||(d.queued&&d.queued.length>0);
+    if(wasRunning&&!run)await loadLibrary();
+    wasRunning=run;
+    // Poll fast while something's happening, slow when idle. Halves request
+    // count + JSON parses + battery use when the tab sits open all day.
+    schedulePoll(run?600:5000);
+  }catch{schedulePoll(2000)}
+}
+let pollTimer=null;
+function schedulePoll(ms){
+  if(pollTimer)clearTimeout(pollTimer);
+  pollTimer=setTimeout(pollProgress,ms);
+}
+schedulePoll(600);
+
+/* ── Utilities ──────────────────────────────────────────────────── */
+function fmtDur(s){s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return h?`${h}:${p(m)}:${p(sec)}`:`${m}:${p(sec)}`}
+function fmtSize(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';if(b>=1048576)return Math.round(b/1048576)+' MB';return Math.round(b/1024)+' KB'}
+function fmtDate(d){if(!d||d.length<8)return d||'';return d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8)}
+function p(n){return String(n).padStart(2,'0')}
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+/* Sanitize a URL before inserting into an href/src attribute. Allows
+   relative paths and http(s)/data:image/blob:; replaces javascript:, vbscript:,
+   etc. with a safe blank to defang interpolated server-side data. */
+function safeUrl(u){
+  if(!u)return'';
+  const s=String(u).trim();
+  if(/^(?:javascript|vbscript|data:text|data:application):/i.test(s))return'about:blank';
+  return s;
+}
+
+/* ── AGPL §13 source notice ─────────────────────────────────────── */
+// On load, fetch the source URL from the server and render it in the footer.
+// This satisfies the AGPL §13 requirement that network users are offered
+// access to the Corresponding Source of the software they interact with.
+async function loadSourceNotice(){
+  try{
+    const s=await(await fetch('/api/settings')).json();
+    const el=document.getElementById('agpl-notice');
+    if(!el)return;
+    if(s.source_url){
+      el.innerHTML=`Licensed under <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank">AGPL-3.0</a> &mdash; <a href="${esc(s.source_url)}" target="_blank">Source code</a>`;
+    } else {
+      el.textContent='Licensed under AGPL-3.0 — set web.source_url in config.toml to link source code';
+    }
+  }catch{}
+}
+
+/* ── Init ───────────────────────────────────────────────────────── */
+applyTheme(localStorage.getItem('theme')||'dark');
+loadLibrary();
+loadSourceNotice();
+</script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yt-offline — Sign in</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#1a1a2e;color:#eee;font:14px/1.5 system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh}
+  .box{background:#16213e;border:1px solid #334;border-radius:8px;padding:28px;width:300px;display:flex;flex-direction:column;gap:12px}
+  h1{font-size:1.1em;text-align:center}
+  input{background:#0f3460;border:1px solid #334;color:#eee;padding:9px 11px;border-radius:4px;font-size:14px}
+  button{background:#e94560;border:none;color:#fff;padding:9px;border-radius:4px;cursor:pointer;font-size:14px;font-weight:600}
+  .err{color:#f87171;font-size:12px;text-align:center;min-height:16px}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>yt-offline</h1>
+  <input type="password" id="pwd" placeholder="Password" autofocus onkeydown="if(event.key==='Enter')login()">
+  <button onclick="login()">Sign in</button>
+  <div class="err" id="err"></div>
+</div>
+<script>
+'use strict';
+async function login(){
+  const pwd=document.getElementById('pwd').value;
+  const err=document.getElementById('err');
+  err.textContent='';
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
+    if(r.ok){location.reload()}else{err.textContent='Invalid password'}
+  }catch{err.textContent='Connection error'}
+}
+</script>
+</body>
+</html>

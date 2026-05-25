@@ -88,6 +88,10 @@ pub struct App {
     dl_music_mode: bool,
     /// Record an ongoing live stream from the start instead of joining live.
     dl_live: bool,
+    /// For Twitch channel URLs: target the `/clips` listing instead of the
+    /// default profile (VODs / past broadcasts). Has no effect on other
+    /// platforms or on single-video URLs.
+    dl_twitch_clips: bool,
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
     thumb_request_tx: Sender<PathBuf>,
     thumb_result_rx: Receiver<(PathBuf, Option<egui::ColorImage>)>,
@@ -225,6 +229,7 @@ impl App {
             dl_quality: DownloadQuality::Best,
             dl_music_mode: false,
             dl_live: false,
+            dl_twitch_clips: false,
             textures: HashMap::new(),
             thumb_request_tx,
             thumb_result_rx,
@@ -947,11 +952,32 @@ impl App {
                              so yt-dlp records from the beginning instead of joining mid-stream. \
                              Also waits if the stream hasn't begun yet.",
                         );
+                    if info.platform == Platform::Twitch
+                        && matches!(info.kind, UrlKind::Channel { .. })
+                    {
+                        ui.checkbox(&mut self.dl_twitch_clips, "Clips only (Twitch)")
+                            .on_hover_text(
+                                "Pull only the channel's Clips section instead of the \
+                                 default VOD/highlights mix. Rewrites the URL to \
+                                 twitch.tv/<channel>/clips before submitting.",
+                            );
+                    }
                 }
 
                 let ready = !self.dl_url.trim().is_empty();
                 if ui.add_enabled(ready, egui::Button::new("⬇  Start download")).clicked() {
-                    let url = self.dl_url.trim().to_string();
+                    let mut url = self.dl_url.trim().to_string();
+                    // Twitch clips-only: rewrite `twitch.tv/<user>` to
+                    // `twitch.tv/<user>/clips`. yt-dlp's TwitchClips extractor
+                    // handles the rest and we still classify it as Channel so
+                    // the output folder is unchanged.
+                    if self.dl_twitch_clips
+                        && info.platform == Platform::Twitch
+                        && matches!(info.kind, UrlKind::Channel { .. })
+                        && !url.contains("/clips")
+                    {
+                        url = format!("{}/clips", url.trim_end_matches('/'));
+                    }
                     let dest = dest_preview.clone();
                     if self.dl_music_mode {
                         self.downloader.start_music(url);
@@ -1708,6 +1734,16 @@ impl App {
                 });
 
                 ui.horizontal(|ui| {
+                    if let Some(date) = video.upload_date.as_deref().map(format_upload_date) {
+                        if !date.is_empty() {
+                            ui.label(
+                                egui::RichText::new(format!("📅 {date}"))
+                                    .small()
+                                    .weak(),
+                            );
+                            ui.label(egui::RichText::new("·").weak());
+                        }
+                    }
                     if let Some(secs) = video.duration_secs {
                         ui.label(egui::RichText::new(format_duration(secs)).small().weak());
                         ui.label(egui::RichText::new("·").weak());
@@ -2076,6 +2112,12 @@ impl App {
                                 ui.label(egui::RichText::new("·").weak());
                             }
                             ui.label(egui::RichText::new(&card.id).small().monospace().weak());
+                            if let Some(date) = card.upload_date.as_deref().map(format_upload_date) {
+                                if !date.is_empty() {
+                                    ui.label(egui::RichText::new("·").weak());
+                                    ui.label(egui::RichText::new(date).small().weak());
+                                }
+                            }
                             if let Some(secs) = card.duration_secs {
                                 ui.label(egui::RichText::new("·").weak());
                                 ui.label(egui::RichText::new(format_duration(secs)).small().weak());
@@ -2304,6 +2346,16 @@ fn format_duration(secs: f64) -> String {
     let m = (secs % 3600) / 60;
     let s = secs % 60;
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+/// Convert yt-dlp's native `YYYYMMDD` upload-date string into `YYYY-MM-DD`
+/// for display. Returns an empty string when input doesn't look like a date
+/// so callers can decide whether to skip the row entirely.
+fn format_upload_date(yyyymmdd: &str) -> String {
+    if yyyymmdd.len() < 8 || !yyyymmdd.chars().all(|c| c.is_ascii_digit()) {
+        return String::new();
+    }
+    format!("{}-{}-{}", &yyyymmdd[..4], &yyyymmdd[4..6], &yyyymmdd[6..8])
 }
 
 fn format_size(bytes: u64) -> String {
