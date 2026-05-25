@@ -1,43 +1,66 @@
-//! Management of bundled yt-dlp + deno binaries.
+//! Management of the bundled yt-dlp + deno binaries.
 //!
-//! When [`crate::config::BackupSection::use_bundled_ytdlp`] is enabled, all
-//! yt-dlp invocations use a binary under `~/.local/share/yt-offline/bin/`
-//! instead of the system PATH. A bundled `deno` lives alongside so yt-dlp can
-//! evaluate the JavaScript signature-deciphering code YouTube serves with the
-//! player — without depending on a system-wide JS runtime.
+//! When [`crate::config::BackupSection::use_bundled_ytdlp`] is enabled the
+//! app invokes its own yt-dlp instead of whatever's on PATH. To get the
+//! full feature set — most importantly `curl_cffi`-backed `--impersonate`
+//! support — we install yt-dlp into a self-contained Python virtualenv
+//! under `~/.local/share/yt-offline/venv/`. A bundled `deno` lives at
+//! `~/.local/share/yt-offline/bin/deno` so yt-dlp can evaluate the
+//! JavaScript signature-deciphering code YouTube serves with the player.
 //!
-//! Both binaries are downloaded on demand from the official GitHub releases by
-//! [`install_command`], which returns a shell pipeline that curls and unpacks
-//! them. The pipeline is run as a regular yt-dlp [`crate::downloader::Job`] so
-//! the user sees progress in the same UI.
+//! Layout:
+//! ```text
+//! ~/.local/share/yt-offline/
+//!   bin/                 ← prepended to PATH so yt-dlp finds deno
+//!     deno
+//!   venv/
+//!     bin/yt-dlp         ← the real entry point (or Scripts\yt-dlp.exe on Windows)
+//!     lib/python*/site-packages/{yt_dlp, curl_cffi, ...}
+//! ```
+//!
+//! [`install_command`] returns the shell pipeline that builds this tree.
+//! It's run as a regular [`crate::downloader::Job`] so the user sees
+//! progress in the same UI as their other downloads.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Directory holding the bundled binaries (`yt-dlp`, `deno`).
-pub fn bundled_dir() -> PathBuf {
+/// Root directory holding everything bundled — venv + bin.
+pub fn bundled_root() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local").join("share").join("yt-offline").join("bin")
+    home.join(".local").join("share").join("yt-offline")
 }
 
-/// File name of the yt-dlp executable on this platform.
-fn ytdlp_filename() -> &'static str {
-    if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" }
+/// Directory holding non-Python binaries (currently just `deno`). Also the
+/// path we prepend to `PATH` when spawning yt-dlp so it can locate deno.
+pub fn bundled_dir() -> PathBuf {
+    bundled_root().join("bin")
 }
 
-/// Full path the bundled yt-dlp binary should live at.
+/// Root of the Python virtualenv that hosts the bundled yt-dlp install.
+pub fn bundled_venv() -> PathBuf {
+    bundled_root().join("venv")
+}
+
+/// Full path to the bundled yt-dlp entry point. On Unix this lives at
+/// `venv/bin/yt-dlp`; on Windows it's `venv/Scripts/yt-dlp.exe`.
 pub fn bundled_ytdlp_path() -> PathBuf {
-    bundled_dir().join(ytdlp_filename())
+    let venv = bundled_venv();
+    if cfg!(windows) {
+        venv.join("Scripts").join("yt-dlp.exe")
+    } else {
+        venv.join("bin").join("yt-dlp")
+    }
 }
 
 /// Returns the yt-dlp invocation target for [`std::process::Command::new`].
 ///
-/// With `use_bundled = true` returns the absolute path to the bundled binary
-/// (even if it does not yet exist — yt-dlp simply fails to launch and the
-/// error surfaces in the job log, prompting the user to click Update).
-/// Otherwise returns the bare `"yt-dlp"` string so the system PATH is used.
+/// With `use_bundled = true` returns the absolute path to the venv-installed
+/// yt-dlp (even if it doesn't yet exist — the spawn error surfaces in the
+/// job log and prompts the user to click Install). Otherwise returns the
+/// bare `"yt-dlp"` string so the system PATH is used.
 pub fn ytdlp_invocation(use_bundled: bool) -> PathBuf {
     if use_bundled {
         bundled_ytdlp_path()
@@ -46,7 +69,7 @@ pub fn ytdlp_invocation(use_bundled: bool) -> PathBuf {
     }
 }
 
-/// True if the bundled yt-dlp binary currently exists on disk.
+/// True if the bundled yt-dlp has been installed.
 pub fn bundled_installed() -> bool {
     bundled_ytdlp_path().exists()
 }
@@ -62,6 +85,8 @@ pub fn ensure_bundled_executable() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // The venv's `bin/` already gets +x via pip; we only need to
+        // re-apply on the extras we placed in `bundled_dir/`.
         let dir = bundled_dir();
         let Ok(entries) = std::fs::read_dir(&dir) else { return };
         for entry in entries.flatten() {
@@ -80,17 +105,6 @@ pub fn ensure_bundled_executable() {
     }
 }
 
-/// GitHub release asset name for yt-dlp on this platform.
-fn ytdlp_asset() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "yt-dlp.exe"
-    } else if cfg!(target_os = "macos") {
-        "yt-dlp_macos"
-    } else {
-        "yt-dlp_linux"
-    }
-}
-
 /// GitHub release asset name for deno on this platform.
 fn deno_asset() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -103,37 +117,46 @@ fn deno_asset() -> &'static str {
     }
 }
 
-/// Build a [`Command`] that installs or updates the bundled yt-dlp + deno
-/// binaries by running a curl/unzip pipeline through `bash -c` (or PowerShell
-/// on Windows). On success, both binaries are present in [`bundled_dir`] with
-/// executable bit set.
+/// Build a [`Command`] that installs (or upgrades) the bundled yt-dlp into
+/// a Python virtualenv with `curl_cffi` (for `--impersonate` support) and
+/// the rest of `yt-dlp[default]`, plus a sibling `deno` for JS deciphering.
+///
+/// Runs through `bash -c` on Unix and PowerShell on Windows.
 pub fn install_command() -> Command {
-    let dir = bundled_dir();
-    let dir_str = dir.display().to_string();
-    let ytdlp_url = format!(
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/{}",
-        ytdlp_asset()
-    );
+    let root = bundled_root();
+    let root_str = root.display().to_string();
+    let bin_str = bundled_dir().display().to_string();
+    let venv_str = bundled_venv().display().to_string();
     let deno_url = format!(
         "https://github.com/denoland/deno/releases/latest/download/{}",
         deno_asset()
     );
-    let ytdlp_name = ytdlp_filename();
 
     #[cfg(windows)]
     {
         let script = format!(
             "$ErrorActionPreference='Stop'; \
-             New-Item -ItemType Directory -Force -Path '{dir}' | Out-Null; \
-             Write-Host '==> downloading yt-dlp'; \
-             Invoke-WebRequest -Uri '{yurl}' -OutFile '{dir}\\{ybin}'; \
+             New-Item -ItemType Directory -Force -Path '{root}' | Out-Null; \
+             New-Item -ItemType Directory -Force -Path '{bin}' | Out-Null; \
+             $py = (Get-Command py -ErrorAction SilentlyContinue) ?? (Get-Command python -ErrorAction SilentlyContinue); \
+             if (-not $py) {{ Write-Error 'python is not installed'; exit 1 }}; \
+             if (-not (Test-Path '{venv}\\Scripts\\python.exe')) {{ \
+               Write-Host '==> creating Python venv'; \
+               & $py.Source -m venv '{venv}'; \
+             }}; \
+             Write-Host '==> installing yt-dlp + curl_cffi'; \
+             & '{venv}\\Scripts\\python.exe' -m pip install --upgrade pip; \
+             & '{venv}\\Scripts\\python.exe' -m pip install --upgrade 'yt-dlp[default]' curl_cffi; \
              Write-Host '==> downloading deno'; \
-             Invoke-WebRequest -Uri '{durl}' -OutFile '{dir}\\deno.zip'; \
+             Invoke-WebRequest -Uri '{durl}' -OutFile '{bin}\\deno.zip'; \
              Write-Host '==> extracting deno'; \
-             Expand-Archive -Force '{dir}\\deno.zip' '{dir}'; \
-             Remove-Item '{dir}\\deno.zip'; \
-             Write-Host '==> versions'; & '{dir}\\{ybin}' --version; & '{dir}\\deno.exe' --version",
-            dir = dir_str, yurl = ytdlp_url, durl = deno_url, ybin = ytdlp_name,
+             Expand-Archive -Force '{bin}\\deno.zip' '{bin}'; \
+             Remove-Item '{bin}\\deno.zip'; \
+             Write-Host '==> versions'; \
+             & '{venv}\\Scripts\\yt-dlp.exe' --version; \
+             & '{bin}\\deno.exe' --version; \
+             Write-Host '==> done'",
+            root = root_str, bin = bin_str, venv = venv_str, durl = deno_url,
         );
         let mut cmd = Command::new("powershell");
         cmd.arg("-NoProfile").arg("-Command").arg(script);
@@ -141,83 +164,87 @@ pub fn install_command() -> Command {
     }
     #[cfg(not(windows))]
     {
-        // Download each file in the background and poll the growing file size
-        // every 3 s so the job log shows visible progress during the transfer
-        // instead of going silent for minutes.
+        // Set up yt-dlp inside a venv so we get the full pip-installable
+        // distribution — including `curl_cffi`, which is what enables
+        // `--impersonate` support. The standalone PyInstaller binary we
+        // previously shipped lacks curl_cffi and errors out on impersonate
+        // targets. The venv strategy is also what yt-dlp's own docs
+        // recommend for getting a "full" install.
         //
-        // For yt-dlp we additionally fetch its published `SHA2-256SUMS` file
-        // and verify the binary against it — that file is signed-by-presence
-        // in the same GitHub release, so any tampering would have to compromise
-        // both URLs to slip a bad binary through. Deno doesn't publish a
-        // similarly convenient single-file checksum manifest, so we just print
-        // its SHA-256 for visual inspection.
-        let sums_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS";
-        let ytdlp_asset_name = ytdlp_asset();
+        // Pip-installed packages come with their own SHA-256 checks via
+        // PyPI's metadata, so we skip the manual checksum step we used to
+        // do for the standalone binary.
+        //
+        // Deno is unchanged: it's a single static binary that we drop into
+        // `bin/` alongside the (unused) directory; yt-dlp finds it via PATH
+        // when we prepend `bin/` in [`crate::downloader::Downloader::spawn_job`].
         let script = format!(
             r#"set -e
-command -v curl     >/dev/null || {{ echo 'error: curl not installed';     exit 1; }}
-command -v unzip    >/dev/null || {{ echo 'error: unzip not installed';    exit 1; }}
-command -v sha256sum >/dev/null || {{ echo 'error: sha256sum not installed'; exit 1; }}
-mkdir -p '{dir}'
-
-# ── yt-dlp ──────────────────────────────────────────────────────────────────
-echo '==> downloading yt-dlp'
-curl -fL --no-progress-meter --connect-timeout 30 --max-time 600 --retry 3 \
-  -o '{dir}/{ybin}' '{yurl}' &
-DLPID=$!
-while kill -0 $DLPID 2>/dev/null; do
-  sleep 3
-  SZ=$(wc -c < '{dir}/{ybin}' 2>/dev/null || echo 0)
-  echo "    yt-dlp: $SZ bytes received..."
-done
-wait $DLPID
-echo "    done: $(wc -c < '{dir}/{ybin}') bytes"
-
-echo '==> verifying yt-dlp SHA-256'
-curl -fL --no-progress-meter --connect-timeout 30 --max-time 60 \
-  -o '{dir}/yt-dlp.sums' '{sums}'
-EXPECTED=$(awk -v n="{yasset}" '$2==n {{ print $1 }}' '{dir}/yt-dlp.sums' | head -n1)
-ACTUAL=$(sha256sum '{dir}/{ybin}' | awk '{{ print $1 }}')
-rm '{dir}/yt-dlp.sums'
-if [ -z "$EXPECTED" ]; then
-  echo "    warn: no checksum entry for {yasset} in SHA2-256SUMS"
-  echo "    actual SHA-256: $ACTUAL"
-elif [ "$EXPECTED" != "$ACTUAL" ]; then
-  echo "    error: SHA-256 mismatch"
-  echo "    expected: $EXPECTED"
-  echo "    actual:   $ACTUAL"
-  rm -f '{dir}/{ybin}'
+command -v curl  >/dev/null || {{ echo 'error: curl not installed';  exit 1; }}
+command -v unzip >/dev/null || {{ echo 'error: unzip not installed'; exit 1; }}
+if ! command -v python3 >/dev/null; then
+  echo 'error: python3 is not installed.'
+  echo '       Install it from your distro package manager and try again.'
   exit 1
-else
-  echo "    ok: $ACTUAL"
 fi
-chmod +x '{dir}/{ybin}'
+# Detect whether the venv module is actually usable. On Debian/Ubuntu it
+# ships in the `python3-venv` package and fails noisily when missing.
+if ! python3 -c 'import venv' 2>/dev/null; then
+  echo 'error: the Python "venv" module is not installed.'
+  echo '       Install python3-venv (Debian/Ubuntu) or the equivalent.'
+  exit 1
+fi
+
+mkdir -p '{root}'
+mkdir -p '{bin}'
+
+# Remove any legacy PyInstaller binary from the prior install layout so
+# bundled_ytdlp_path()'s new venv-based path is the only one resolvable.
+rm -f '{bin}/yt-dlp'
+
+if [ ! -x '{venv}/bin/python' ]; then
+  echo '==> creating Python venv at {venv}'
+  python3 -m venv '{venv}'
+fi
+
+echo '==> upgrading pip in venv'
+'{venv}/bin/python' -m pip install --upgrade --quiet pip
+
+echo '==> installing yt-dlp[default] + curl_cffi (this fetches a few packages)'
+'{venv}/bin/python' -m pip install --upgrade --quiet --progress-bar off 'yt-dlp[default]' curl_cffi
 
 # ── deno ────────────────────────────────────────────────────────────────────
 echo '==> downloading deno'
 curl -fL --no-progress-meter --connect-timeout 30 --max-time 600 --retry 3 \
-  -o '{dir}/deno.zip' '{durl}' &
+  -o '{bin}/deno.zip' '{durl}' &
 DLPID=$!
 while kill -0 $DLPID 2>/dev/null; do
   sleep 3
-  SZ=$(wc -c < '{dir}/deno.zip' 2>/dev/null || echo 0)
+  SZ=$(wc -c < '{bin}/deno.zip' 2>/dev/null || echo 0)
   echo "    deno.zip: $SZ bytes received..."
 done
 wait $DLPID
-echo "    done: $(wc -c < '{dir}/deno.zip') bytes"
-echo "    deno.zip SHA-256: $(sha256sum '{dir}/deno.zip' | awk '{{ print $1 }}')"
+echo "    done: $(wc -c < '{bin}/deno.zip') bytes"
+if command -v sha256sum >/dev/null; then
+  echo "    deno.zip SHA-256: $(sha256sum '{bin}/deno.zip' | awk '{{ print $1 }}')"
+fi
 
 echo '==> extracting deno'
-unzip -o '{dir}/deno.zip' -d '{dir}'
-chmod +x '{dir}/deno'
-rm '{dir}/deno.zip'
+unzip -o '{bin}/deno.zip' -d '{bin}'
+chmod +x '{bin}/deno'
+rm '{bin}/deno.zip'
 
 echo '==> versions'
-'{dir}/{ybin}' --version
-'{dir}/deno' --version
+'{venv}/bin/yt-dlp' --version
+'{bin}/deno' --version
+echo '==> verifying curl_cffi (impersonation) is available'
+if '{venv}/bin/yt-dlp' --list-impersonate-targets 2>/dev/null | grep -qi 'chrome'; then
+  echo '    ok: impersonation targets available'
+else
+  echo '    warn: curl_cffi did not load; --impersonate will be skipped'
+fi
 echo '==> done'"#,
-            dir = dir_str, yurl = ytdlp_url, durl = deno_url, ybin = ytdlp_name,
-            sums = sums_url, yasset = ytdlp_asset_name,
+            root = root_str, bin = bin_str, venv = venv_str, durl = deno_url,
         );
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(script);

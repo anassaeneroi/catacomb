@@ -184,14 +184,13 @@ impl Downloader {
         }
     }
 
-    /// Append `--impersonate Chrome-146:Macos-26` only when the active yt-dlp
-    /// supports it. The standalone PyInstaller binary we ship as the bundled
-    /// option doesn't include `curl_cffi`, so passing `--impersonate` to it
-    /// errors out with `Impersonate target "chrome-146:macos-26" is not
-    /// available`. System yt-dlp (typically pip-installed with curl_cffi)
-    /// works fine.
+    /// Append `--impersonate Chrome-146:Macos-26` to bypass YouTube's bot
+    /// detection. Both the bundled venv (which pip-installs `curl_cffi` via
+    /// [`ytdlp_bin::install_command`]) and a system yt-dlp with curl_cffi
+    /// support this. We leave it on unconditionally now; yt-dlp's
+    /// `--list-impersonate-targets` warning surfaces in the install log if
+    /// curl_cffi is unavailable, so the user has a clear path forward.
     fn apply_impersonation(&self, cmd: &mut Command) {
-        if self.use_bundled_ytdlp { return; }
         cmd.arg("--impersonate").arg("Chrome-146:Macos-26");
     }
 
