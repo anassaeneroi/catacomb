@@ -571,8 +571,13 @@ For the record (to keep momentum honest):
 Working definition: a yt-offline release is "at Tartube parity" when
 the following are all true.
 
-- [ ] **Per-target download options** with cascade resolution and a
-      per-channel editor.
+- [x] **Per-target download options** with cascade resolution and a
+      per-channel editor. *v1 shipped 2026-05-25: 9 fields per channel
+      (quality cap, audio-only, rate limit, min/max filesize, date-after,
+      match-filter, subtitle langs, raw extra args), persisted in the
+      `channel_options` SQLite table, attached at scan time, applied at
+      every dispatch site (scheduled re-checks, right-click checks).
+      Editor surfaces in both UIs.*
 - [ ] **Folder hierarchy** with N-level nesting, drag-to-reparent, and
       per-folder default options.
 - [ ] **Smart folders** for Bookmarks / Favourites / Waiting / New /

@@ -16,6 +16,7 @@
 mod app;
 mod config;
 mod database;
+mod download_options;
 mod downloader;
 mod library;
 mod maintenance;

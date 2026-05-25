@@ -1006,7 +1006,10 @@ async fn post_download(
             _       => DownloadQuality::Best,
         };
         let info = classify_url(&url);
-        dl.start(url, &info, body.full_scan, quality, body.live);
+        // Submit from the web download dialog: the user just chose the
+        // quality/live/full_scan values. We don't yet know which channel
+        // the URL belongs to, so channel options aren't applied here.
+        dl.start(url, &info, body.full_scan, quality, body.live, None);
     }
     (StatusCode::ACCEPTED, "ok").into_response()
 }
@@ -1452,7 +1455,10 @@ async fn get_description(
 }
 
 async fn post_rescan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    let new_lib = library::scan_channels(&state.channels_root);
+    let mut new_lib = library::scan_channels(&state.channels_root);
+    if let Ok(map) = state.db.get_all_channel_options() {
+        library::apply_channel_options(&mut new_lib, &map);
+    }
     // Refresh watched from DB after rescan
     if let Ok(w) = state.db.get_watched() {
         *state.watched.lock().unwrap() = w;
@@ -1500,7 +1506,10 @@ async fn post_maintenance_remove(
 ) -> impl IntoResponse {
     let (removed, errors) = maintenance::remove_files(&state.library_root, &body.paths);
     // Refresh the library so the removed copies disappear from the UI.
-    let new_lib = library::scan_channels(&state.channels_root);
+    let mut new_lib = library::scan_channels(&state.channels_root);
+    if let Ok(map) = state.db.get_all_channel_options() {
+        library::apply_channel_options(&mut new_lib, &map);
+    }
     *state.library.lock().unwrap() = new_lib;
     bump_library_version(&state);
     Json(serde_json::json!({ "removed": removed, "errors": errors }))
@@ -1523,22 +1532,95 @@ async fn post_maintenance_repair(
 }
 
 /// `POST /api/scheduler/run` — trigger an immediate scheduled channel check.
+/// `GET /api/channels/:platform/:handle/options` — fetch the stored
+/// download-option overrides for a single channel. Returns the default
+/// (empty) options when nothing is stored.
+async fn get_channel_options(
+    State(state): State<Arc<WebState>>,
+    Path((platform, handle)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let opts = match state.db.get_channel_options(&platform, &handle) {
+        Ok(Some(json)) => crate::download_options::DownloadOptions::from_json(&json),
+        _ => crate::download_options::DownloadOptions::default(),
+    };
+    Json(opts).into_response()
+}
+
+/// `POST /api/channels/:platform/:handle/options` — upsert the overrides.
+/// An empty-by-default body is stored as DELETE so we don't keep useless rows.
+async fn post_channel_options(
+    State(state): State<Arc<WebState>>,
+    Path((platform, handle)): Path<(String, String)>,
+    Json(body): Json<crate::download_options::DownloadOptions>,
+) -> impl IntoResponse {
+    let result = if body.is_empty() {
+        state.db.delete_channel_options(&platform, &handle)
+    } else {
+        match serde_json::to_string(&body) {
+            Ok(json) => state.db.set_channel_options(&platform, &handle, &json),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}")).into_response(),
+        }
+    };
+    if let Err(e) = result {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response();
+    }
+    // Push the new options onto the live library snapshot so a re-check
+    // triggered before the next rescan still sees them.
+    {
+        let mut lib = state.library.lock().unwrap();
+        for ch in lib.iter_mut() {
+            if ch.platform.dir_name() == platform && ch.name == handle {
+                ch.download_options = body.clone();
+                break;
+            }
+        }
+    }
+    bump_library_version(&state);
+    (StatusCode::OK, "ok").into_response()
+}
+
+/// `DELETE /api/channels/:platform/:handle/options` — clear overrides, returning
+/// the channel to global defaults.
+async fn delete_channel_options(
+    State(state): State<Arc<WebState>>,
+    Path((platform, handle)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if let Err(e) = state.db.delete_channel_options(&platform, &handle) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response();
+    }
+    {
+        let mut lib = state.library.lock().unwrap();
+        for ch in lib.iter_mut() {
+            if ch.platform.dir_name() == platform && ch.name == handle {
+                ch.download_options = Default::default();
+                break;
+            }
+        }
+    }
+    bump_library_version(&state);
+    (StatusCode::OK, "cleared").into_response()
+}
+
 async fn post_scheduler_run(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     if state.downloader.lock().unwrap().any_running() {
         return (StatusCode::CONFLICT, "downloads already running").into_response();
     }
-    let urls: Vec<String> = state.library.lock().unwrap()
-        .iter()
-        .map(|ch| crate::downloader::recheck_url(ch))
-        .collect();
-    if urls.is_empty() {
+    // Snapshot (url, options) pairs so we can iterate without holding the
+    // library lock through start().
+    let scheduled: Vec<(String, crate::download_options::DownloadOptions)> =
+        state.library.lock().unwrap()
+            .iter()
+            .map(|ch| (crate::downloader::recheck_url(ch), ch.download_options.clone()))
+            .collect();
+    if scheduled.is_empty() {
         return (StatusCode::OK, "no channels to check").into_response();
     }
-    let count = urls.len();
+    let count = scheduled.len();
     let mut dl = state.downloader.lock().unwrap();
-    for url in urls {
+    for (url, opts) in scheduled {
         let info = classify_url(&url);
-        dl.start(url, &info, true, DownloadQuality::Best, false);
+        let quality = opts.quality.unwrap_or(DownloadQuality::Best);
+        dl.start(url, &info, true, quality, false, Some(&opts));
     }
     *state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
     (StatusCode::ACCEPTED, format!("started {count} channel checks")).into_response()
@@ -1647,9 +1729,12 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("config.toml");
 
-    let library = library::scan_channels(&channels_root);
+    let mut library = library::scan_channels(&channels_root);
     let db = Database::open(&db_path)
         .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
+    if let Ok(map) = db.get_all_channel_options() {
+        library::apply_channel_options(&mut library, &map);
+    }
     let watched = db.get_watched().unwrap_or_default();
     let positions = db.get_positions().unwrap_or_default();
 
@@ -1705,15 +1790,17 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
                 last.map_or(true, |t| t.elapsed() >= interval_dur)
             };
             if !due { continue; }
-            let urls: Vec<String> = sched_state.library.lock().unwrap()
-                .iter()
-                .map(|ch| crate::downloader::recheck_url(ch))
-                .collect();
-            if urls.is_empty() { continue; }
+            let scheduled: Vec<(String, crate::download_options::DownloadOptions)> =
+                sched_state.library.lock().unwrap()
+                    .iter()
+                    .map(|ch| (crate::downloader::recheck_url(ch), ch.download_options.clone()))
+                    .collect();
+            if scheduled.is_empty() { continue; }
             let mut dl = sched_state.downloader.lock().unwrap();
-            for url in urls {
+            for (url, opts) in scheduled {
                 let info = classify_url(&url);
-                dl.start(url, &info, true, DownloadQuality::Best, false);
+                let quality = opts.quality.unwrap_or(DownloadQuality::Best);
+                dl.start(url, &info, true, quality, false, Some(&opts));
             }
             *sched_state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
         }
@@ -1742,6 +1829,10 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/maintenance/repair/:id", post(post_maintenance_repair))
         .route("/api/cookies", get(get_cookies).post(post_cookies).delete(delete_cookies))
         .route("/api/scheduler/run", post(post_scheduler_run))
+        .route(
+            "/api/channels/:platform/:handle/options",
+            get(get_channel_options).post(post_channel_options).delete(delete_channel_options),
+        )
         .route("/api/stats", get(get_stats))
         .route("/api/ytdlp/update", post(post_ytdlp_update))
         .route("/api/music", get(get_music))

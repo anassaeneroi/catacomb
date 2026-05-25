@@ -243,6 +243,7 @@ function renderSidebar(){
         h+=`<div class="ch-sub${activePlaylistIdx===pi?' active':''}" onclick="setView(${i},${pi})">└ ${esc(pl.name)} (${pl.videos.length})</div>`;
       }
       h+=`<div class="ch-sub" style="color:var(--accent)" onclick="downloadChannelByIdx(${i})">⬇ Check for new videos</div>`;
+      h+=`<div class="ch-sub" onclick="openChannelOptions(${i})">⚙ Channel options…</div>`;
     }
   }
   el.innerHTML=h;
@@ -484,6 +485,102 @@ function rebuildChannelUrl(ch){
     :'https://www.youtube.com/@'+ch.name;
 }
 async function downloadChannelByIdx(i){await downloadChannel(rebuildChannelUrl(library[i]))}
+
+/* ── Per-channel download options ──────────────────────────────── */
+async function openChannelOptions(idx){
+  const ch=library[idx]; if(!ch)return;
+  const platform=ch.platform, handle=ch.name;
+  let opts={};
+  try{
+    opts=await(await api(`/api/channels/${encodeURIComponent(platform)}/${encodeURIComponent(handle)}/options`)).json();
+  }catch(e){setStatus('Could not load options: '+e.message);return}
+  const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  const q=opts.quality||'';
+  const qOpt=(val,label)=>`<option value="${val}"${q===val?' selected':''}>${label}</option>`;
+  const langs=(opts.subtitle_langs||[]).join(', ');
+  const extras=(opts.extra_args||[]).join('\n');
+  bg.innerHTML=`<div class="modal" style="max-width:480px;width:100%;overflow-y:auto;max-height:90vh">
+    <div class="modal-hdr"><h2>⚙ ${esc(ch.platform_label||ch.platform)} · ${esc(handle)}</h2>
+      <button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div class="settings-hint" style="margin-bottom:10px">Overrides apply during scheduled re-checks and "Check for new videos". Explicit downloads from the URL bar still use the dialog's own picker.</div>
+    <div class="settings-row"><label>Quality cap</label>
+      <select id="opt-quality" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 6px;border-radius:4px">
+        ${qOpt('','— Global default —')}
+        ${qOpt('Best','Best')}
+        ${qOpt('Res1080','1080p')}
+        ${qOpt('Res720','720p')}
+        ${qOpt('Res480','480p')}
+        ${qOpt('Res360','360p')}
+      </select></div>
+    <div class="settings-row"><label>Audio-only</label>
+      <input type="checkbox" id="opt-audio" ${opts.audio_only?'checked':''}></div>
+    <div class="settings-hint" style="margin-bottom:4px">Useful for music channels — saves disk + skips video re-encode.</div>
+    <div class="settings-row"><label>Bandwidth cap (KB/s)</label>
+      <input type="number" id="opt-rate" value="${opts.limit_rate_kb||''}" placeholder="off" min="0" style="width:90px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
+    <div class="settings-row"><label>Min size (MB)</label>
+      <input type="number" id="opt-minsz" value="${opts.min_filesize_mb||''}" placeholder="off" min="0" style="width:90px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
+    <div class="settings-row"><label>Max size (MB)</label>
+      <input type="number" id="opt-maxsz" value="${opts.max_filesize_mb||''}" placeholder="off" min="0" style="width:90px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
+    <div class="settings-row"><label>Only videos after (YYYYMMDD)</label>
+      <input type="text" id="opt-date" value="${esc(opts.date_after||'')}" placeholder="e.g. 20240101" pattern="[0-9]{8}" style="width:120px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
+    <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:4px">
+      <label>Match filter (yt-dlp --match-filter)</label>
+      <input type="text" id="opt-filter" value="${esc(opts.match_filter||'')}" placeholder="e.g. duration > 60 & view_count > 100" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-family:monospace;font-size:12px"></div>
+    <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:4px">
+      <label>Subtitle languages (comma separated, blank = all)</label>
+      <input type="text" id="opt-subs" value="${esc(langs)}" placeholder="en, ja" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
+    <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:4px">
+      <label>Extra yt-dlp args (one per line)</label>
+      <textarea id="opt-extra" rows="3" placeholder="--no-mtime
+--ignore-config" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-family:monospace;font-size:12px">${esc(extras)}</textarea></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button onclick="clearChannelOptions('${esc(platform)}','${esc(handle)}',this)">Clear all</button>
+      <button onclick="this.closest('.modal-bg').remove()">Cancel</button>
+      <button class="primary" onclick="saveChannelOptions('${esc(platform)}','${esc(handle)}',this)">Save</button>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+}
+function readChannelOptionsForm(){
+  const intOrNull=id=>{const v=parseInt(document.getElementById(id)?.value,10);return Number.isFinite(v)&&v>0?v:null};
+  const strOrNull=id=>{const v=(document.getElementById(id)?.value||'').trim();return v?v:null};
+  const subs=(document.getElementById('opt-subs')?.value||'').split(',').map(s=>s.trim()).filter(Boolean);
+  const extra=(document.getElementById('opt-extra')?.value||'').split('\n').map(s=>s.trim()).filter(Boolean);
+  const q=document.getElementById('opt-quality')?.value||'';
+  return {
+    quality:q?q:null,
+    audio_only:document.getElementById('opt-audio')?.checked||false,
+    limit_rate_kb:intOrNull('opt-rate'),
+    min_filesize_mb:intOrNull('opt-minsz'),
+    max_filesize_mb:intOrNull('opt-maxsz'),
+    date_after:strOrNull('opt-date'),
+    match_filter:strOrNull('opt-filter'),
+    subtitle_langs:subs,
+    extra_args:extra,
+  };
+}
+async function saveChannelOptions(platform,handle,btn){
+  btn.disabled=true;
+  try{
+    const body=readChannelOptionsForm();
+    const r=await api(`/api/channels/${encodeURIComponent(platform)}/${encodeURIComponent(handle)}/options`,{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok)throw new Error(await r.text());
+    btn.closest('.modal-bg').remove();
+    setStatus('Channel options saved');
+    await loadLibrary();
+  }catch(e){setStatus('Error: '+e.message);btn.disabled=false}
+}
+async function clearChannelOptions(platform,handle,btn){
+  if(!confirm('Clear all channel option overrides? The channel will fall back to global defaults.'))return;
+  btn.disabled=true;
+  try{
+    await api(`/api/channels/${encodeURIComponent(platform)}/${encodeURIComponent(handle)}/options`,{method:'DELETE'});
+    btn.closest('.modal-bg').remove();
+    setStatus('Channel options cleared');
+    await loadLibrary();
+  }catch(e){setStatus('Error: '+e.message);btn.disabled=false}
+}
 
 /* ── Rescan ─────────────────────────────────────────────────────── */
 async function rescan(){try{await api('/api/rescan',{method:'POST'});await loadLibrary()}catch(e){setStatus('Error: '+e.message)}}

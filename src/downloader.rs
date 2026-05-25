@@ -30,11 +30,12 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
+use crate::download_options::DownloadOptions;
 use crate::platform::{self, Platform, UrlInfo, UrlKind};
 use crate::ytdlp_bin;
 
 /// Video quality level passed as a `-f` format selector to yt-dlp.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, Debug)]
 pub enum DownloadQuality {
     /// No `-f` flag — yt-dlp picks the best available streams (default).
     #[default]
@@ -294,7 +295,22 @@ impl Downloader {
     /// added, `--break-on-existing` is suppressed (each recording is unique),
     /// and the output filename gains a UTC timestamp suffix so re-recordings
     /// of the same channel don't collide.
-    pub fn start(&mut self, url: String, info: &UrlInfo, full_scan: bool, quality: DownloadQuality, live: bool) {
+    ///
+    /// `channel_options` carries per-channel overrides (rate limit, filters,
+    /// extra args, …) and is applied after the standard flag set so it can
+    /// win. Pass `None` when the caller doesn't know which channel the URL
+    /// belongs to (e.g. an arbitrary URL pasted into the download dialog).
+    /// The channel-options `quality` field overrides the `quality` parameter
+    /// only when the caller explicitly opts in by passing it through.
+    pub fn start(
+        &mut self,
+        url: String,
+        info: &UrlInfo,
+        full_scan: bool,
+        quality: DownloadQuality,
+        live: bool,
+        channel_options: Option<&DownloadOptions>,
+    ) {
         let platform_dir = platform::platform_root(&self.channels_root, info.platform);
         // Per-platform download archive keeps cross-platform IDs from colliding
         // (TikTok IDs are numeric, YouTube IDs are 11-char base64, etc.).
@@ -391,6 +407,12 @@ impl Downloader {
             .arg(archive_path.display().to_string());
         self.apply_impersonation(info.platform, &mut cmd);
         self.apply_platform_extras(info.platform, &mut cmd);
+        // Per-channel option overrides win when present — they're applied
+        // last so a `--limit-rate` / `--match-filter` / passthrough arg from
+        // the channel settings takes priority over the global defaults.
+        if let Some(opts) = channel_options {
+            opts.apply(&mut cmd);
+        }
         cmd.arg("-o").arg(&out_arg).arg(&url);
         Self::apply_retry_flags(&mut cmd);
 

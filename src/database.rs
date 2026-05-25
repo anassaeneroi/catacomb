@@ -103,9 +103,70 @@ impl Database {
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS channel_options (
+                platform TEXT NOT NULL,
+                handle   TEXT NOT NULL,
+                options_json TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (platform, handle)
             );",
         )?;
         Ok(())
+    }
+
+    /// Fetch the raw JSON-encoded download-options blob for a channel.
+    /// `platform` is the [`crate::platform::Platform::dir_name`] string;
+    /// `handle` is the on-disk folder name. Returns `None` when no options
+    /// row exists.
+    pub fn get_channel_options(&self, platform: &str, handle: &str) -> Result<Option<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT options_json FROM channel_options WHERE platform = ?1 AND handle = ?2",
+        )?;
+        let mut rows = stmt.query([platform, handle])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
+    /// Upsert the download-options JSON blob for a channel.
+    pub fn set_channel_options(&self, platform: &str, handle: &str, options_json: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO channel_options (platform, handle, options_json, updated_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)",
+            [platform, handle, options_json],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a channel's options row, falling its behavior back to global defaults.
+    pub fn delete_channel_options(&self, platform: &str, handle: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM channel_options WHERE platform = ?1 AND handle = ?2",
+            [platform, handle],
+        )?;
+        Ok(())
+    }
+
+    /// Bulk fetch of every channel's options, returned as
+    /// `((platform, handle) → options_json)`. Used by the library scanner to
+    /// attach options to each scanned [`crate::library::Channel`] without
+    /// per-channel SQL round trips.
+    pub fn get_all_channel_options(&self) -> Result<HashMap<(String, String), String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT platform, handle, options_json FROM channel_options")?;
+        let map = stmt
+            .query_map([], |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .filter_map(std::result::Result::ok)
+            .map(|(k, v)| (k, v))
+            .collect();
+        Ok(map)
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {

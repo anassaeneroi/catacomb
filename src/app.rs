@@ -139,6 +139,30 @@ pub struct App {
     // Statistics window
     show_stats: bool,
     stats_report: Option<crate::stats::StatsReport>,
+    // Per-channel download-options dialog state
+    show_channel_options: bool,
+    /// `(platform, handle)` identifying the channel being edited.
+    channel_options_target: Option<(Platform, String)>,
+    /// Editable form fields, mirroring [`DownloadOptions`] with string-typed
+    /// "text" buffers so the user can type partial values (e.g. an empty
+    /// limit-rate field) without us forcing zeroes back.
+    channel_options_form: ChannelOptionsForm,
+}
+
+/// Scratch struct for the per-channel options dialog. Distinct from
+/// [`crate::download_options::DownloadOptions`] because the user is allowed
+/// to leave numeric fields blank (which we render as `None`).
+#[derive(Default, Clone)]
+struct ChannelOptionsForm {
+    quality_idx: usize,           // 0=default, 1=Best, 2=1080p, 3=720p, 4=480p, 5=360p
+    audio_only: bool,
+    limit_rate_kb: String,
+    min_filesize_mb: String,
+    max_filesize_mb: String,
+    date_after: String,
+    match_filter: String,
+    subtitle_langs: String,       // comma-separated
+    extra_args: String,           // one per line
 }
 
 impl App {
@@ -169,7 +193,7 @@ impl App {
             let dir = platform::platform_root(&channels_root, p);
             let _ = std::fs::create_dir_all(&dir);
         }
-        let library = library::scan_channels(&channels_root);
+        let mut library = library::scan_channels(&channels_root);
         let status = format!(
             "{} channels, {} videos",
             library.len(),
@@ -179,6 +203,11 @@ impl App {
         let db_path = channels_root.join("yt-offline.db");
         let db = Database::open(&db_path)
             .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
+        // Hydrate per-channel download options from SQLite onto the scanned
+        // library before publishing it to the UI.
+        if let Ok(map) = db.get_all_channel_options() {
+            library::apply_channel_options(&mut library, &map);
+        }
         let watched = db.get_watched().unwrap_or_default();
         let resume_positions = db.get_positions().unwrap_or_default();
 
@@ -269,11 +298,74 @@ impl App {
             health_report: None,
             show_stats: false,
             stats_report: None,
+            show_channel_options: false,
+            channel_options_target: None,
+            channel_options_form: ChannelOptionsForm::default(),
+        }
+    }
+
+    /// Convert a [`DownloadOptions`] into the editable form state. Numeric
+    /// `None`s become empty strings.
+    fn options_to_form(opts: &crate::download_options::DownloadOptions) -> ChannelOptionsForm {
+        let quality_idx = match opts.quality {
+            None => 0,
+            Some(DownloadQuality::Best) => 1,
+            Some(DownloadQuality::Res1080) => 2,
+            Some(DownloadQuality::Res720) => 3,
+            Some(DownloadQuality::Res480) => 4,
+            Some(DownloadQuality::Res360) => 5,
+        };
+        let num = |v: Option<u32>| v.map(|n| n.to_string()).unwrap_or_default();
+        ChannelOptionsForm {
+            quality_idx,
+            audio_only: opts.audio_only,
+            limit_rate_kb: num(opts.limit_rate_kb),
+            min_filesize_mb: num(opts.min_filesize_mb),
+            max_filesize_mb: num(opts.max_filesize_mb),
+            date_after: opts.date_after.clone().unwrap_or_default(),
+            match_filter: opts.match_filter.clone().unwrap_or_default(),
+            subtitle_langs: opts.subtitle_langs.join(", "),
+            extra_args: opts.extra_args.join("\n"),
+        }
+    }
+
+    /// Inverse of [`options_to_form`]. Empty/whitespace string fields map
+    /// back to `None`.
+    fn form_to_options(f: &ChannelOptionsForm) -> crate::download_options::DownloadOptions {
+        let quality = match f.quality_idx {
+            1 => Some(DownloadQuality::Best),
+            2 => Some(DownloadQuality::Res1080),
+            3 => Some(DownloadQuality::Res720),
+            4 => Some(DownloadQuality::Res480),
+            5 => Some(DownloadQuality::Res360),
+            _ => None,
+        };
+        let parse_num = |s: &str| s.trim().parse::<u32>().ok().filter(|&n| n > 0);
+        let trim_opt = |s: &str| {
+            let t = s.trim();
+            if t.is_empty() { None } else { Some(t.to_string()) }
+        };
+        crate::download_options::DownloadOptions {
+            quality,
+            audio_only: f.audio_only,
+            limit_rate_kb: parse_num(&f.limit_rate_kb),
+            min_filesize_mb: parse_num(&f.min_filesize_mb),
+            max_filesize_mb: parse_num(&f.max_filesize_mb),
+            date_after: trim_opt(&f.date_after),
+            match_filter: trim_opt(&f.match_filter),
+            subtitle_langs: f.subtitle_langs.split(',')
+                .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            extra_args: f.extra_args.lines()
+                .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         }
     }
 
     fn rescan(&mut self) {
-        self.library = library::scan_channels(&self.channels_root);
+        let mut new_lib = library::scan_channels(&self.channels_root);
+        if let Ok(map) = self.db.get_all_channel_options() {
+            library::apply_channel_options(&mut new_lib, &map);
+        }
+        self.library = new_lib;
         self.music_library = library::scan_music(&self.music_root);
         self.sidebar_view = SidebarView::All;
         self.selected_video = None;
@@ -588,15 +680,19 @@ impl App {
     }
 
     fn run_scheduled_check(&mut self) {
-        let mut count = 0;
-        let urls: Vec<String> = self.library.iter()
-            .map(|ch| crate::downloader::recheck_url(ch))
+        // Snapshot each channel's URL + options first so we don't hold an
+        // immutable borrow of `self.library` while calling
+        // `self.downloader.start` (which takes &mut self).
+        let scheduled: Vec<(String, crate::download_options::DownloadOptions)> = self.library.iter()
+            .map(|ch| (crate::downloader::recheck_url(ch), ch.download_options.clone()))
             .collect();
-        for url in urls {
+        let count = scheduled.len();
+        for (url, opts) in scheduled {
             let info = classify_url(&url);
-            // Scheduled re-check: never treat as live.
-            self.downloader.start(url, &info, true, DownloadQuality::Best, false);
-            count += 1;
+            // Channel options' quality override (if any) wins over the
+            // hard-coded Best for scheduled re-checks.
+            let quality = opts.quality.unwrap_or(DownloadQuality::Best);
+            self.downloader.start(url, &info, true, quality, false, Some(&opts));
         }
         self.status = format!("Scheduled check: started {} channel downloads", count);
     }
@@ -793,6 +889,10 @@ impl App {
 
                     // Collect any right-click download action outside the loop
                     let mut pending_ch_download: Option<(String, String)> = None; // (url, channel_name)
+                    // Same trick for the "Channel options…" menu item — capture
+                    // the channel index, open the dialog after the loop so we
+                    // don't recursively borrow `self` from inside the closure.
+                    let mut pending_open_options: Option<usize> = None;
 
                     for i in 0..self.library.len() {
                         let (name, total, has_playlists, size_bytes, channel_url, platform) = {
@@ -844,6 +944,7 @@ impl App {
                         // Right-click context menu
                         let url_for_menu = channel_url.clone();
                         let name_for_menu = name.clone();
+                        let channel_idx = i;
                         resp.context_menu(|ui| {
                             {
                                 let url = &url_for_menu;
@@ -851,6 +952,10 @@ impl App {
                                     pending_ch_download = Some((url.clone(), name_for_menu.clone()));
                                     ui.close_menu();
                                 }
+                            }
+                            if ui.button("⚙ Channel options…").clicked() {
+                                pending_open_options = Some(channel_idx);
+                                ui.close_menu();
                             }
                             if ui.button("📁 Open folder").clicked() {
                                 let path = self.library[i].path.clone();
@@ -878,10 +983,25 @@ impl App {
                         }
                     }
 
-                    // Process deferred right-click download action
+                    if let Some(ci) = pending_open_options {
+                        if let Some(ch) = self.library.get(ci) {
+                            self.channel_options_target = Some((ch.platform, ch.name.clone()));
+                            self.channel_options_form = Self::options_to_form(&ch.download_options);
+                            self.show_channel_options = true;
+                        }
+                    }
+
+                    // Process deferred right-click download action. The
+                    // channel's own options + quality override apply for
+                    // user-triggered re-checks just like for scheduled ones.
                     if let Some((url, ch_name)) = pending_ch_download {
                         let info = classify_url(&url);
-                        self.downloader.start(url, &info, !self.dl_full_scan, DownloadQuality::Best, false);
+                        let opts = self.library.iter()
+                            .find(|c| c.name == ch_name)
+                            .map(|c| c.download_options.clone())
+                            .unwrap_or_default();
+                        let quality = opts.quality.unwrap_or(DownloadQuality::Best);
+                        self.downloader.start(url, &info, !self.dl_full_scan, quality, false, Some(&opts));
                         self.status = format!("Checking {} for new videos…", ch_name);
                     }
                 });
@@ -983,7 +1103,12 @@ impl App {
                         self.downloader.start_music(url);
                         self.status = "Downloading music…".to_string();
                     } else {
-                        self.downloader.start(url, &info, !self.dl_full_scan, self.dl_quality, self.dl_live);
+                        // Explicit submit: user already chose quality/live in
+                        // the dialog. We don't know which channel the URL
+                        // belongs to yet (yt-dlp resolves it), so no
+                        // channel-options lookup — caller-side overrides
+                        // win.
+                        self.downloader.start(url, &info, !self.dl_full_scan, self.dl_quality, self.dl_live, None);
                         self.status = format!("Downloading: {dest}");
                     }
                 }
@@ -1267,6 +1392,168 @@ impl App {
             self.stats_report = Some(crate::stats::build(
                 &self.library, &self.watched, &self.resume_positions, crate::stats::now_unix(),
             ));
+        }
+    }
+
+    /// Per-channel download-options editor. Lives as a separate `egui::Window`
+    /// rather than a modal because egui doesn't really do modals.
+    fn channel_options_window(&mut self, ctx: &egui::Context) {
+        if !self.show_channel_options { return; }
+        let Some((platform, handle)) = self.channel_options_target.clone() else {
+            self.show_channel_options = false;
+            return;
+        };
+        let mut open = self.show_channel_options;
+        let mut save = false;
+        let mut clear = false;
+        let mut cancel = false;
+        egui::Window::new(format!("⚙ {} · {}", platform.display_name(), handle))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Overrides apply to scheduled re-checks and the right-click \
+                         \"Check for new videos\" action. Explicit downloads from the \
+                         URL bar still use the dialog's own picker.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.separator();
+                let form = &mut self.channel_options_form;
+                egui::Grid::new("ch_opts_grid").num_columns(2).spacing([12.0, 6.0]).striped(true).show(ui, |ui| {
+                    ui.label("Quality cap");
+                    egui::ComboBox::from_id_salt("ch_opts_quality")
+                        .selected_text(match form.quality_idx {
+                            1 => "Best",
+                            2 => "1080p",
+                            3 => "720p",
+                            4 => "480p",
+                            5 => "360p",
+                            _ => "— Global default —",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (idx, label) in [
+                                (0, "— Global default —"),
+                                (1, "Best"),
+                                (2, "1080p"),
+                                (3, "720p"),
+                                (4, "480p"),
+                                (5, "360p"),
+                            ] {
+                                ui.selectable_value(&mut form.quality_idx, idx, label);
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("Audio-only");
+                    ui.checkbox(&mut form.audio_only, "Extract audio (best format)");
+                    ui.end_row();
+
+                    ui.label("Bandwidth cap (KB/s)");
+                    ui.add(egui::TextEdit::singleline(&mut form.limit_rate_kb).desired_width(100.0).hint_text("off"));
+                    ui.end_row();
+
+                    ui.label("Min size (MB)");
+                    ui.add(egui::TextEdit::singleline(&mut form.min_filesize_mb).desired_width(100.0).hint_text("off"));
+                    ui.end_row();
+
+                    ui.label("Max size (MB)");
+                    ui.add(egui::TextEdit::singleline(&mut form.max_filesize_mb).desired_width(100.0).hint_text("off"));
+                    ui.end_row();
+
+                    ui.label("Date after (YYYYMMDD)");
+                    ui.add(egui::TextEdit::singleline(&mut form.date_after).desired_width(120.0).hint_text("e.g. 20240101"));
+                    ui.end_row();
+                });
+
+                ui.add_space(6.0);
+                ui.label("Match filter (yt-dlp --match-filter):");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.channel_options_form.match_filter)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("e.g. duration > 60 & view_count > 100")
+                        .font(egui::TextStyle::Monospace),
+                );
+
+                ui.add_space(6.0);
+                ui.label("Subtitle languages (comma separated, blank = all):");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.channel_options_form.subtitle_langs)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("en, ja"),
+                );
+
+                ui.add_space(6.0);
+                ui.label("Extra yt-dlp args (one per line):");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.channel_options_form.extra_args)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("--no-mtime\n--ignore-config")
+                        .font(egui::TextStyle::Monospace),
+                );
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("🗑 Clear all").clicked() { clear = true; }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Save").clicked() { save = true; }
+                        if ui.button("Cancel").clicked() { cancel = true; }
+                    });
+                });
+            });
+
+        // Apply the decisions outside the closure so we can mutate self.
+        if save {
+            let opts = Self::form_to_options(&self.channel_options_form);
+            let platform_dir = platform.dir_name();
+            let result = if opts.is_empty() {
+                self.db.delete_channel_options(platform_dir, &handle)
+            } else {
+                match serde_json::to_string(&opts) {
+                    Ok(json) => self.db.set_channel_options(platform_dir, &handle, &json),
+                    Err(e) => {
+                        self.status = format!("Channel options: encode error: {e}");
+                        Ok(())
+                    }
+                }
+            };
+            match result {
+                Ok(()) => {
+                    // Reflect immediately on the in-memory library so the next
+                    // re-check sees the change without waiting for a rescan.
+                    for ch in self.library.iter_mut() {
+                        if ch.platform == platform && ch.name == handle {
+                            ch.download_options = opts.clone();
+                            break;
+                        }
+                    }
+                    self.status = format!("Channel options saved for {handle}");
+                    self.show_channel_options = false;
+                }
+                Err(e) => self.status = format!("Channel options: {e}"),
+            }
+        } else if clear {
+            let platform_dir = platform.dir_name();
+            if let Err(e) = self.db.delete_channel_options(platform_dir, &handle) {
+                self.status = format!("Channel options: {e}");
+            } else {
+                for ch in self.library.iter_mut() {
+                    if ch.platform == platform && ch.name == handle {
+                        ch.download_options = Default::default();
+                        break;
+                    }
+                }
+                self.status = format!("Channel options cleared for {handle}");
+                self.show_channel_options = false;
+            }
+        } else if cancel || !open {
+            self.show_channel_options = false;
         }
     }
 
@@ -2269,6 +2556,7 @@ impl eframe::App for App {
         self.settings_window(ctx);
         self.maintenance_window(ctx);
         self.stats_window(ctx);
+        self.channel_options_window(ctx);
         self.detail_panel(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             self.video_list(ctx, ui);

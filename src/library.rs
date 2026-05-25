@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::download_options::DownloadOptions;
 use crate::platform::{self, Platform};
 
 const VIDEO_EXTS: &[&str] = &["mkv", "mp4", "webm", "m4v", "mov", "avi"];
@@ -117,6 +118,12 @@ pub struct Channel {
     pub total_videos_cached: usize,
     /// Cached sum of all video file sizes.
     pub total_size_cached: u64,
+    /// Per-channel download-option overrides loaded from the SQLite
+    /// `channel_options` table. Empty by default, meaning "use globals".
+    /// The scanner leaves this as `default()`; callers populate it after the
+    /// scan by reading the DB once via
+    /// [`crate::database::Database::get_all_channel_options`].
+    pub download_options: DownloadOptions,
 }
 
 impl Channel {
@@ -130,6 +137,24 @@ impl Channel {
         self.videos
             .iter()
             .chain(self.playlists.iter().flat_map(|p| p.videos.iter()))
+    }
+}
+
+/// Mutate `channels` in place, filling each one's [`Channel::download_options`]
+/// from the supplied `(platform_dir_name, handle) → options_json` map.
+///
+/// The caller normally builds the map with
+/// [`crate::database::Database::get_all_channel_options`] right after a
+/// scan / rescan and before publishing the library to the UI.
+pub fn apply_channel_options(
+    channels: &mut [Channel],
+    options_map: &std::collections::HashMap<(String, String), String>,
+) {
+    for ch in channels {
+        let key = (ch.platform.dir_name().to_string(), ch.name.clone());
+        if let Some(json) = options_map.get(&key) {
+            ch.download_options = DownloadOptions::from_json(json);
+        }
     }
 }
 
@@ -196,6 +221,7 @@ pub fn scan_channels(youtube_root: &Path) -> Vec<Channel> {
             meta,
             total_videos_cached,
             total_size_cached,
+            download_options: DownloadOptions::default(),
         })
     })
     .into_iter()
