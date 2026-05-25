@@ -173,7 +173,15 @@ pub fn generate(channels: &[Channel], plex_root: &Path) -> GenerateResult {
 
         if all_videos.is_empty() { continue; }
 
-        let show_name = sanitize(&ch.name);
+        // Prefix the show folder with the platform name when it's not YouTube
+        // so multi-platform libraries don't collide on shared creator names
+        // (e.g. a YouTube and a TikTok account both called "MusicianName").
+        let base_name = sanitize(&ch.name);
+        let show_name = if ch.platform == crate::platform::Platform::YouTube {
+            base_name
+        } else {
+            format!("{} - {}", ch.platform.display_name(), base_name)
+        };
         let show_dir = plex_root.join(&show_name);
 
         if let Err(e) = std::fs::create_dir_all(&show_dir) {

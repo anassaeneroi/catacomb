@@ -14,7 +14,8 @@ use eframe::egui;
 
 use crate::config::Config;
 use crate::database::Database;
-use crate::downloader::{detect_url_kind, DownloadQuality, Downloader, JobState, UrlKind};
+use crate::downloader::{DownloadQuality, Downloader, JobState};
+use crate::platform::{self, classify_url, Platform, UrlKind};
 use crate::library::{self, Video};
 use crate::theme;
 
@@ -67,6 +68,10 @@ pub struct App {
     config: Config,
     config_path: PathBuf,
     channels_root: PathBuf,
+    /// Parent of `channels_root`. Owns every platform's sibling directory
+    /// (`channels/`, `tiktok/`, …). Used as the maintenance scan root so
+    /// non-YouTube content is included.
+    library_root: PathBuf,
     library: Vec<library::Channel>,
     sidebar_view: SidebarView,
     selected_video: Option<String>,
@@ -145,6 +150,16 @@ impl App {
         let channels_root = config.backup.directory.clone();
         let settings_dir = channels_root.display().to_string();
         let _ = std::fs::create_dir_all(&channels_root);
+        let library_root = channels_root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| channels_root.clone());
+        let _ = std::fs::create_dir_all(&library_root);
+        // Pre-create every platform's folder so scans see them.
+        for &p in Platform::all() {
+            let dir = platform::platform_root(&channels_root, p);
+            let _ = std::fs::create_dir_all(&dir);
+        }
         let library = library::scan_channels(&channels_root);
         let status = format!(
             "{} channels, {} videos",
@@ -192,6 +207,7 @@ impl App {
             config,
             config_path,
             channels_root: channels_root.clone(),
+            library_root,
             library,
             sidebar_view: SidebarView::All,
             selected_video: None,
@@ -547,11 +563,11 @@ impl App {
     fn run_scheduled_check(&mut self) {
         let mut count = 0;
         let urls: Vec<String> = self.library.iter()
-            .map(|ch| crate::downloader::check_url_for_folder(&ch.name))
+            .map(|ch| crate::downloader::recheck_url(ch))
             .collect();
         for url in urls {
-            let kind = detect_url_kind(&url);
-            self.downloader.start(url, &kind, true, DownloadQuality::Best);
+            let info = classify_url(&url);
+            self.downloader.start(url, &info, true, DownloadQuality::Best);
             count += 1;
         }
         self.status = format!("Scheduled check: started {} channel downloads", count);
@@ -636,7 +652,7 @@ impl App {
                     self.show_maintenance = !self.show_maintenance;
                     if self.show_maintenance {
                         self.health_report =
-                            Some(crate::maintenance::scan(&self.channels_root, &self.library));
+                            Some(crate::maintenance::scan(&self.library_root, &self.library));
                     }
                 }
                 if ui.selectable_label(self.show_settings, "⚙ Settings").clicked() {
@@ -734,17 +750,19 @@ impl App {
                     let mut pending_ch_download: Option<(String, String)> = None; // (url, channel_name)
 
                     for i in 0..self.library.len() {
-                        let (name, total, has_playlists, size_bytes, channel_url) = {
+                        let (name, total, has_playlists, size_bytes, channel_url, platform) = {
                             let ch = &self.library[i];
-                            // Always derive the check URL from the folder name so yt-dlp
-                            // writes to the existing folder, not a new UCxxx one.
-                            let url = crate::downloader::check_url_for_folder(&ch.name);
+                            // Prefer the stored `.source-url` over folder-name guessing so
+                            // re-checks work across platforms (and across legacy YouTube
+                            // libraries where the URL was never recorded).
+                            let url = crate::downloader::recheck_url(ch);
                             (
                                 ch.name.clone(),
                                 ch.total_videos(),
                                 !ch.playlists.is_empty(),
                                 Self::channel_total_size(ch),
                                 url,
+                                ch.platform,
                             )
                         };
 
@@ -756,12 +774,24 @@ impl App {
                         } else {
                             String::new()
                         };
-                        let label = format!("{}  ({}{})", name, total, size_str);
+                        // Show platform icon for non-YouTube channels so the sidebar
+                        // reads as a unified library while still making the source
+                        // obvious at a glance.
+                        let prefix = if platform == Platform::YouTube {
+                            String::new()
+                        } else {
+                            format!("{} ", platform.icon())
+                        };
+                        let label = format!("{prefix}{}  ({}{})", name, total, size_str);
 
                         let ch_selected_no_pl = matches!(self.sidebar_view, SidebarView::Channel(ci) if ci == i);
                         let resp = ui
                             .selectable_label(ch_selected_no_pl, label)
-                            .on_hover_text(self.library[i].path.display().to_string());
+                            .on_hover_text(format!(
+                                "{}\n{}",
+                                self.library[i].path.display(),
+                                platform.display_name(),
+                            ));
                         if resp.clicked() {
                             self.sidebar_view = SidebarView::Channel(i);
                             self.selected_video = None;
@@ -805,8 +835,8 @@ impl App {
 
                     // Process deferred right-click download action
                     if let Some((url, ch_name)) = pending_ch_download {
-                        let kind = detect_url_kind(&url);
-                        self.downloader.start(url, &kind, !self.dl_full_scan, DownloadQuality::Best);
+                        let info = classify_url(&url);
+                        self.downloader.start(url, &info, !self.dl_full_scan, DownloadQuality::Best);
                         self.status = format!("Checking {} for new videos…", ch_name);
                     }
                 });
@@ -827,18 +857,22 @@ impl App {
                         .desired_width(f32::INFINITY),
                 );
 
-                let kind = detect_url_kind(self.dl_url.trim());
-                let (type_label, dest_preview) = match &kind {
+                let info = classify_url(self.dl_url.trim());
+                let plat_dir = info.platform.dir_name();
+                let (type_label, dest_preview) = match &info.kind {
                     UrlKind::Channel { handle } => {
-                        ("Channel", format!("→ channels/{}/", handle))
+                        ("Channel", format!("→ {plat_dir}/{handle}/"))
                     }
-                    UrlKind::Playlist => ("Playlist", "→ channels/<channel>/<playlist>/".to_string()),
-                    UrlKind::Video => ("Video", "→ channels/<channel>/".to_string()),
+                    UrlKind::Playlist => ("Playlist", format!("→ {plat_dir}/<creator>/<playlist>/")),
+                    UrlKind::Video => ("Video", format!("→ {plat_dir}/<creator>/")),
                     UrlKind::Unknown => ("—", String::new()),
                 };
 
                 if !self.dl_url.trim().is_empty() {
                     ui.horizontal(|ui| {
+                        ui.label("Source:");
+                        ui.strong(format!("{} {}", info.platform.icon(), info.platform.display_name()));
+                        ui.separator();
                         ui.label("Type:");
                         ui.strong(type_label);
                     });
@@ -877,7 +911,7 @@ impl App {
                         self.downloader.start_music(url);
                         self.status = "Downloading music…".to_string();
                     } else {
-                        self.downloader.start(url, &kind, !self.dl_full_scan, self.dl_quality);
+                        self.downloader.start(url, &info, !self.dl_full_scan, self.dl_quality);
                         self.status = format!("Downloading: {dest}");
                     }
                 }
@@ -1062,7 +1096,7 @@ impl App {
         let mut changed = false;
         if !to_remove.is_empty() {
             let (removed, errors) =
-                crate::maintenance::remove_files(&self.channels_root, &to_remove);
+                crate::maintenance::remove_files(&self.library_root, &to_remove);
             self.status = if errors.is_empty() {
                 format!("Removed {removed} file(s)")
             } else {
@@ -1082,7 +1116,7 @@ impl App {
         if changed || rescan_health {
             self.rescan();
             self.health_report =
-                Some(crate::maintenance::scan(&self.channels_root, &self.library));
+                Some(crate::maintenance::scan(&self.library_root, &self.library));
         }
     }
 
@@ -1527,8 +1561,16 @@ impl App {
                         self.downloader.use_bundled_ytdlp = self.config.backup.use_bundled_ytdlp;
                         if dir_changed {
                             self.channels_root = new_dir.clone();
+                            self.library_root = new_dir
+                                .parent()
+                                .map(|p| p.to_path_buf())
+                                .unwrap_or_else(|| new_dir.clone());
                             self.downloader.channels_root = new_dir;
                             let _ = std::fs::create_dir_all(&self.channels_root);
+                            let _ = std::fs::create_dir_all(&self.library_root);
+                            for &p in Platform::all() {
+                                let _ = std::fs::create_dir_all(platform::platform_root(&self.channels_root, p));
+                            }
                             self.rescan();
                         }
                         // Re-bind a running server so the new interface takes effect now.

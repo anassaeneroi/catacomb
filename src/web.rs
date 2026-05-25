@@ -44,7 +44,8 @@ use argon2::password_hash::SaltString;
 
 use crate::config::Config;
 use crate::database::Database;
-use crate::downloader::{detect_url_kind, DownloadQuality, Downloader, JobState};
+use crate::downloader::{DownloadQuality, Downloader, JobState};
+use crate::platform::classify_url;
 use crate::library;
 use crate::maintenance;
 
@@ -73,7 +74,12 @@ pub struct WebState {
     pub positions: Mutex<HashMap<String, f64>>,
     /// Shared SQLite connection, opened once at startup instead of per request.
     pub db: Mutex<Database>,
+    /// YouTube channels directory (the legacy `channels/` folder, kept for
+    /// backward compat). Other platforms live as siblings under [`library_root`].
     pub channels_root: PathBuf,
+    /// Parent of `channels_root`. Backs the `/files/` static-file mount so
+    /// non-YouTube platforms are reachable at `/files/<platform>/<creator>/...`.
+    pub library_root: PathBuf,
     pub config_path: PathBuf,
     pub config: Mutex<Config>,
     /// Whether to transcode MKV→mp4 on the fly for playback (requires ffmpeg).
@@ -137,6 +143,17 @@ struct LibraryResponse {
 #[derive(Serialize)]
 struct ChannelInfo {
     name: String,
+    /// dir_name() of the channel's source platform. Used by the UI to render
+    /// the platform icon and group entries.
+    platform: &'static str,
+    /// Human-readable platform name (e.g. "YouTube", "TikTok").
+    platform_label: &'static str,
+    /// Platform icon used in the sidebar.
+    platform_icon: &'static str,
+    /// Original URL the channel was downloaded from, if a `.source-url` sidecar
+    /// exists. Used by the UI's "Check for new videos" action to avoid relying
+    /// on a folder-name heuristic.
+    source_url: Option<String>,
     total_videos: usize,
     size_bytes: u64,
     subscriber_count: Option<u64>,
@@ -280,8 +297,12 @@ pub struct BindOption {
 }
 
 // Build a `/files/<rel>` URL from an absolute path, percent-encoding each segment.
-fn file_url(channels_root: &StdPath, full: &StdPath) -> Option<String> {
-    let rel = full.strip_prefix(channels_root).ok()?;
+//
+// `library_root` is the parent of channels_root so that paths like
+// `<root>/channels/handle/video.mkv` become `/files/channels/handle/video.mkv`
+// and `<root>/tiktok/user/clip.mp4` becomes `/files/tiktok/user/clip.mp4`.
+fn file_url(library_root: &StdPath, full: &StdPath) -> Option<String> {
+    let rel = full.strip_prefix(library_root).ok()?;
     let mut parts: Vec<String> = Vec::new();
     for c in rel.components() {
         if let std::path::Component::Normal(s) = c {
@@ -781,7 +802,10 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let lib = state.library.lock().unwrap();
     let watched = state.watched.lock().unwrap();
     let positions = state.positions.lock().unwrap();
-    let root = state.channels_root.as_path();
+    // file_url() now resolves relative to library_root (= parent of
+    // channels_root) so non-YouTube platforms are reachable at
+    // `/files/<platform>/<creator>/<video>`.
+    let root = state.library_root.as_path();
     let transcode = state.transcode.load(Ordering::Relaxed);
 
     let to_info = |v: &library::Video, watched: &HashSet<String>| {
@@ -834,6 +858,10 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
             .find_map(|v| v.thumb_path.as_deref().and_then(|p| file_url(root, p)));
         ChannelInfo {
             name: ch.name.clone(),
+            platform: ch.platform.dir_name(),
+            platform_label: ch.platform.display_name(),
+            platform_icon: ch.platform.icon(),
+            source_url: ch.source_url.clone(),
             total_videos: ch.total_videos(),
             size_bytes: ch.total_size_cached,
             subscriber_count: ch.meta.as_ref().and_then(|m| m.subscriber_count),
@@ -911,8 +939,8 @@ async fn post_download(
             "360p"  => DownloadQuality::Res360,
             _       => DownloadQuality::Best,
         };
-        let kind = detect_url_kind(&url);
-        dl.start(url, &kind, body.full_scan, quality);
+        let info = classify_url(&url);
+        dl.start(url, &info, body.full_scan, quality);
     }
     (StatusCode::ACCEPTED, "ok").into_response()
 }
@@ -1084,9 +1112,9 @@ async fn get_sub_vtt(
     State(state): State<Arc<WebState>>,
     Path(rel): Path<String>,
 ) -> Response {
-    let path = state.channels_root.join(&rel);
+    let path = state.library_root.join(&rel);
     // Reject path traversal outside the library.
-    let ok = match (state.channels_root.canonicalize(), path.canonicalize()) {
+    let ok = match (state.library_root.canonicalize(), path.canonicalize()) {
         (Ok(root), Ok(p)) => p.starts_with(root),
         _ => false,
     };
@@ -1369,7 +1397,7 @@ async fn post_plex_generate(State(state): State<Arc<WebState>>) -> impl IntoResp
 /// `GET /api/maintenance/scan` — report duplicate videos and missing assets.
 async fn get_maintenance_scan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let lib = state.library.lock().unwrap();
-    let report = maintenance::scan(&state.channels_root, &lib);
+    let report = maintenance::scan(&state.library_root, &lib);
     Json(report)
 }
 
@@ -1384,7 +1412,7 @@ async fn post_maintenance_remove(
     State(state): State<Arc<WebState>>,
     Json(body): Json<RemoveRequest>,
 ) -> impl IntoResponse {
-    let (removed, errors) = maintenance::remove_files(&state.channels_root, &body.paths);
+    let (removed, errors) = maintenance::remove_files(&state.library_root, &body.paths);
     // Refresh the library so the removed copies disappear from the UI.
     let new_lib = library::scan_channels(&state.channels_root);
     *state.library.lock().unwrap() = new_lib;
@@ -1414,7 +1442,7 @@ async fn post_scheduler_run(State(state): State<Arc<WebState>>) -> impl IntoResp
     }
     let urls: Vec<String> = state.library.lock().unwrap()
         .iter()
-        .map(|ch| crate::downloader::check_url_for_folder(&ch.name))
+        .map(|ch| crate::downloader::recheck_url(ch))
         .collect();
     if urls.is_empty() {
         return (StatusCode::OK, "no channels to check").into_response();
@@ -1422,8 +1450,8 @@ async fn post_scheduler_run(State(state): State<Arc<WebState>>) -> impl IntoResp
     let count = urls.len();
     let mut dl = state.downloader.lock().unwrap();
     for url in urls {
-        let kind = detect_url_kind(&url);
-        dl.start(url, &kind, true, DownloadQuality::Best);
+        let info = classify_url(&url);
+        dl.start(url, &info, true, DownloadQuality::Best);
     }
     *state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
     (StatusCode::ACCEPTED, format!("started {count} channel checks")).into_response()
@@ -1513,6 +1541,20 @@ pub fn run_with_shutdown(config: Config) -> std::sync::mpsc::Sender<()> {
 async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     let channels_root = config.backup.directory.clone();
     let _ = std::fs::create_dir_all(&channels_root);
+    // library_root holds every platform folder side-by-side (channels/,
+    // tiktok/, twitch/, …). The implicit anchor is the parent of the
+    // user-configured channels dir.
+    let library_root = channels_root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| channels_root.clone());
+    let _ = std::fs::create_dir_all(&library_root);
+    // Pre-create every platform's folder so the static-file mount can serve
+    // them without 404ing on first access.
+    for &p in crate::platform::Platform::all() {
+        let dir = crate::platform::platform_root(&channels_root, p);
+        let _ = std::fs::create_dir_all(&dir);
+    }
     let db_path = channels_root.join("yt-offline.db");
     let config_path = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -1544,6 +1586,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         positions: Mutex::new(positions),
         db: Mutex::new(db),
         channels_root: channels_root.clone(),
+        library_root: library_root.clone(),
         config_path,
         config: Mutex::new(config),
         transcode,
@@ -1576,13 +1619,13 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
             if !due { continue; }
             let urls: Vec<String> = sched_state.library.lock().unwrap()
                 .iter()
-                .map(|ch| crate::downloader::check_url_for_folder(&ch.name))
+                .map(|ch| crate::downloader::recheck_url(ch))
                 .collect();
             if urls.is_empty() { continue; }
             let mut dl = sched_state.downloader.lock().unwrap();
             for url in urls {
-                let kind = detect_url_kind(&url);
-                dl.start(url, &kind, true, DownloadQuality::Best);
+                let info = classify_url(&url);
+                dl.start(url, &info, true, DownloadQuality::Best);
             }
             *sched_state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
         }
@@ -1616,7 +1659,10 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/music", get(get_music))
         .route("/api/login", post(post_login))
         .route("/api/logout", post(post_logout))
-        .nest_service("/files", ServeDir::new(&channels_root))
+        // Serve from library_root (parent of channels_root) so URLs become
+        // `/files/<platform>/<creator>/...` for every platform, not just
+        // YouTube. ServeDir rejects `..` and refuses symlink escapes.
+        .nest_service("/files", ServeDir::new(&library_root))
         .nest_service("/music-files", ServeDir::new(&music_root))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         // Cap any uploaded body at 4 MiB. cookies.txt and POSTed JSON payloads
@@ -1901,12 +1947,18 @@ function renderSidebar(){
   h+=`<div class="ch-item${showChannels?' active':''}" onclick="setChannels()">⊟ Channels (${library.length})</div>`;
   h+=`<div class="ch-item${!showContinue&&!showChannels&&activeChannelIdx===null?' active':''}" onclick="setView(null,null)">⊞ All (${total})</div>`;
   h+=`<div class="ch-item${showMusic?' active':''}" onclick="setMusic()">♫ Music (${musicTracks.length})</div>`;
-  h+=`<div class="sidebar-label" style="margin-top:8px">Channels</div>`;
+  // Group sidebar entries by platform so a multi-platform library reads as
+  // distinct sections rather than one flat list.
+  let lastPlatform=null;
   for(let i=0;i<library.length;i++){
     const ch=library[i];
+    if(ch.platform!==lastPlatform){
+      h+=`<div class="sidebar-label" style="margin-top:8px">${esc(ch.platform_icon||'')} ${esc(ch.platform_label||'Channels')}</div>`;
+      lastPlatform=ch.platform;
+    }
     const active=activeChannelIdx===i&&activePlaylistIdx===null&&!showContinue;
     const size=ch.size_bytes>0?' · '+fmtSize(ch.size_bytes):'';
-    h+=`<div class="ch-item${active?' active':''}" onclick="setView(${i},null)">${esc(ch.name)} (${ch.total_videos}${size})</div>`;
+    h+=`<div class="ch-item${active?' active':''}" onclick="setView(${i},null)" title="${esc(ch.platform_label||'')}">${esc(ch.name)} (${ch.total_videos}${size})</div>`;
     if(activeChannelIdx===i&&!showContinue){
       for(let pi=0;pi<ch.playlists.length;pi++){
         const pl=ch.playlists[pi];
@@ -2105,13 +2157,16 @@ async function confirmDownload(url,btn){
   }catch(e){setStatus('Error: '+e.message)}
 }
 async function downloadChannel(url){try{await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,full_scan:true,quality:'best'})});setStatus('Checking for new videos…')}catch(e){setStatus('Error: '+e.message)}}
-function checkUrlForChannel(name){
-  // Mirror check_url_for_folder in downloader.rs: UC+22 chars = channel ID, else handle
-  return(/^UC.{22}$/.test(name))
-    ?'https://www.youtube.com/channel/'+name
-    :'https://www.youtube.com/@'+name;
+function rebuildChannelUrl(ch){
+  // Prefer the stored source URL (works for every platform). Fall back to
+  // the legacy YouTube heuristic only when the channel pre-dates the
+  // multi-platform changes and has no .source-url sidecar.
+  if(ch.source_url)return ch.source_url;
+  return(/^UC.{22}$/.test(ch.name))
+    ?'https://www.youtube.com/channel/'+ch.name
+    :'https://www.youtube.com/@'+ch.name;
 }
-async function downloadChannelByIdx(i){await downloadChannel(checkUrlForChannel(library[i].name))}
+async function downloadChannelByIdx(i){await downloadChannel(rebuildChannelUrl(library[i]))}
 
 /* ── Rescan ─────────────────────────────────────────────────────── */
 async function rescan(){try{await api('/api/rescan',{method:'POST'});await loadLibrary()}catch(e){setStatus('Error: '+e.message)}}

@@ -22,6 +22,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::platform::{self, Platform};
+
 const VIDEO_EXTS: &[&str] = &["mkv", "mp4", "webm", "m4v", "mov", "avi"];
 const AUDIO_EXTS: &[&str] = &["mp3", "m4a", "opus", "flac", "ogg", "wav", "aac"];
 const THUMB_EXTS: &[&str] = &["webp", "jpg", "jpeg", "png"];
@@ -97,6 +99,11 @@ pub struct ChannelMeta {
 pub struct Channel {
     pub name: String,
     pub path: PathBuf,
+    /// Source platform — drives sidebar grouping and the re-check URL.
+    pub platform: Platform,
+    /// Originating URL read from the `.source-url` sidecar. Falls back to a
+    /// folder-name heuristic for legacy YouTube libraries that predate it.
+    pub source_url: Option<String>,
     /// Videos stored directly inside the channel directory (not in a sub-folder).
     pub videos: Vec<Video>,
     /// Sub-directories that contain at least one video.
@@ -133,35 +140,37 @@ pub fn find_video<'a>(channels: &'a [Channel], id: &str) -> Option<(&'a Video, &
     None
 }
 
-/// Scan `root` for channel directories and return them sorted alphabetically.
+/// Scan all platform directories rooted at (or sibling to) `youtube_root`
+/// and return every channel found, tagged with its source platform.
 ///
-/// Skips hidden directories (names starting with `.`) and directories that
-/// contain no recognisable video files.
+/// The configured `youtube_root` is treated as `Platform::YouTube` for
+/// backward compatibility with libraries created before the multi-platform
+/// changes landed. Each other platform's folder lives as a sibling — see
+/// [`crate::platform::platform_root`].
 ///
-/// Each channel's per-video info.json reads are parallelised across the
-/// available CPUs because that's where ~all the time goes for large
-/// libraries (one fs read + one JSON parse per video, multiplied by hundreds
-/// or thousands).
-pub fn scan_channels(root: &Path) -> Vec<Channel> {
-    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
-    let dirs: Vec<(String, PathBuf)> = entries
-        .flatten()
-        .filter_map(|e| {
-            let path = e.path();
-            if !path.is_dir() { return None; }
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') { return None; }
-            Some((name, path))
-        })
-        .collect();
+/// Per-channel info.json reads are parallelised across the available CPUs
+/// because that's where ~all the time goes for large libraries (one fs read
+/// + one JSON parse per video, multiplied by thousands).
+pub fn scan_channels(youtube_root: &Path) -> Vec<Channel> {
+    // Gather (platform, channel-folder-name, full-path) across every platform.
+    let mut dirs: Vec<(Platform, String, PathBuf)> = Vec::new();
+    for &platform in Platform::all() {
+        let root = platform::platform_root(youtube_root, platform);
+        let Ok(entries) = std::fs::read_dir(&root) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() { continue; }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') { continue; }
+            dirs.push((platform, name, path));
+        }
+    }
 
-    // Process channels in parallel. We size the worker pool to min(channels, CPUs)
-    // so a small library doesn't spin up needless threads.
     let n_workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .min(dirs.len().max(1));
-    let mut channels = parallel_map(dirs, n_workers, |(name, path)| {
+    let mut channels = parallel_map(dirs, n_workers, |(platform, name, path)| {
         let (videos, playlists) = scan_channel_dir(&path);
         if videos.is_empty() && playlists.is_empty() { return None; }
         let meta = load_channel_meta(&videos);
@@ -172,9 +181,12 @@ pub fn scan_channels(root: &Path) -> Vec<Channel> {
             .chain(playlists.iter().flat_map(|p| p.videos.iter()))
             .filter_map(|v| v.file_size)
             .sum();
+        let source_url = platform::read_source_url(&path);
         Some(Channel {
             name,
             path,
+            platform,
+            source_url,
             videos,
             playlists,
             meta,
@@ -185,7 +197,12 @@ pub fn scan_channels(root: &Path) -> Vec<Channel> {
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
-    channels.sort_by_key(|c| c.name.to_lowercase());
+    // Stable order: platform first (so the sidebar groups cleanly), then name.
+    channels.sort_by(|a, b| {
+        let pa = a.platform as u8;
+        let pb = b.platform as u8;
+        pa.cmp(&pb).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     channels
 }
 

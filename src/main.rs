@@ -19,6 +19,7 @@ mod database;
 mod downloader;
 mod library;
 mod maintenance;
+mod platform;
 mod plex;
 mod stats;
 mod theme;

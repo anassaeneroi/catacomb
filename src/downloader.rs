@@ -30,6 +30,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
+use crate::platform::{self, UrlInfo, UrlKind};
 use crate::ytdlp_bin;
 
 /// Video quality level passed as a `-f` format selector to yt-dlp.
@@ -70,23 +71,14 @@ impl DownloadQuality {
     }
 }
 
-/// Describes the kind of YouTube URL being downloaded, which determines the
-/// output path template passed to yt-dlp.
-pub enum UrlKind {
-    /// A channel URL (`/@handle`, `/channel/ID`, or `/c/name`).
-    Channel { handle: String },
-    Playlist,
-    Video,
-    Unknown,
-}
-
-/// Build a YouTube URL from a library folder name that yt-dlp will resolve to
-/// the same folder it already downloaded to.
+/// Build a YouTube URL from a legacy library folder name. Used as a fallback
+/// when a channel folder has no `.source-url` sidecar (i.e. it predates the
+/// multi-platform changes).
 ///
 /// Folder names that look like a channel ID (`UC` + 22 chars) use the
 /// `/channel/` form; everything else is treated as a handle and gets `/@`.
 /// This avoids the mismatch where info.json's canonical `channel_url` field
-/// points to `/channel/UCxxx` and yt-dlp then creates a second folder.
+/// points to `/channel/UCxxx` and yt-dlp creates a second folder.
 pub fn check_url_for_folder(folder_name: &str) -> String {
     if folder_name.starts_with("UC") && folder_name.len() == 24 {
         format!("https://www.youtube.com/channel/{folder_name}")
@@ -95,32 +87,17 @@ pub fn check_url_for_folder(folder_name: &str) -> String {
     }
 }
 
-/// Classify a YouTube URL into a [`UrlKind`] by inspecting its path.
-pub fn detect_url_kind(url: &str) -> UrlKind {
-    if url.contains("playlist?list=") {
-        return UrlKind::Playlist;
+/// Re-check URL for a [`crate::library::Channel`]. Prefers the stored
+/// `.source-url` sidecar when present, falls back to the YouTube heuristic
+/// for legacy folders.
+pub fn recheck_url(ch: &crate::library::Channel) -> String {
+    if let Some(url) = ch.source_url.as_deref() {
+        return url.to_string();
     }
-    if let Some(h) = extract_after(url, "/@") {
-        return UrlKind::Channel { handle: h.to_string() };
-    }
-    if let Some(h) = extract_after(url, "/channel/") {
-        return UrlKind::Channel { handle: h.to_string() };
-    }
-    if let Some(h) = extract_after(url, "/c/") {
-        return UrlKind::Channel { handle: h.to_string() };
-    }
-    if url.contains("watch?v=") || url.contains("youtu.be/") {
-        return UrlKind::Video;
-    }
-    UrlKind::Unknown
+    // Legacy YouTube libraries: rebuild from folder name.
+    check_url_for_folder(&ch.name)
 }
 
-fn extract_after<'a>(url: &'a str, marker: &str) -> Option<&'a str> {
-    let start = url.find(marker)? + marker.len();
-    let rest = &url[start..];
-    let end = rest.find(|c| c == '/' || c == '?' || c == '&' || c == '#').unwrap_or(rest.len());
-    if end == 0 { None } else { Some(&rest[..end]) }
-}
 
 /// Lifecycle state of a download job.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -278,33 +255,51 @@ impl Downloader {
 
     /// Spawn a yt-dlp process for `url` and track it as a new [`Job`].
     ///
-    /// The output path template is derived from `kind` so that channels,
-    /// playlists, and individual videos land in the right sub-directories.
+    /// Output path template is derived from `info.platform` + `info.kind` so
+    /// each platform lands in its own sibling directory (`channels/` for
+    /// YouTube, `tiktok/`, `twitch/`, etc. for others).
+    ///
+    /// For channel downloads we also drop a `.source-url` sidecar so future
+    /// re-checks recover the original URL without folder-name guessing.
     ///
     /// When `full_scan` is false (default / incremental mode) `--break-on-existing`
     /// is passed so yt-dlp stops as soon as it hits the first already-archived
     /// video — fast for routine channel checks.  When `full_scan` is true the
     /// flag is omitted so every video is checked individually against the
     /// download archive; slower, but correctly fills gaps in the history.
-    pub fn start(&mut self, url: String, kind: &UrlKind, full_scan: bool, quality: DownloadQuality) {
-        let archive_path = self.channels_root.join("archive.txt");
+    pub fn start(&mut self, url: String, info: &UrlInfo, full_scan: bool, quality: DownloadQuality) {
+        let platform_dir = platform::platform_root(&self.channels_root, info.platform);
+        // Per-platform download archive keeps cross-platform IDs from colliding
+        // (TikTok IDs are numeric, YouTube IDs are 11-char base64, etc.).
+        let _ = std::fs::create_dir_all(&platform_dir);
+        let archive_path = platform_dir.join("archive.txt");
+        let platform_label = info.platform.dir_name();
 
-        let (out_arg, label) = match kind {
+        let (out_arg, label) = match &info.kind {
             UrlKind::Channel { handle } => {
-                let dir = self.channels_root.join(handle);
+                let dir = platform_dir.join(handle);
                 let _ = std::fs::create_dir_all(&dir);
+                // Remember the originating URL so re-checks don't have to
+                // guess from the folder name.
+                platform::write_source_url(&dir, &url);
                 (
                     format!("{}/%(title)s [%(id)s].%(ext)s", dir.display()),
-                    format!("channels/{}/", handle),
+                    format!("{}/{}/", platform_label, handle),
                 )
             }
             UrlKind::Playlist => (
-                format!("{}/%(channel)s/%(playlist_title)s/%(title)s [%(id)s].%(ext)s", self.channels_root.display()),
-                "channels/<channel>/<playlist>/".to_string(),
+                format!(
+                    "{}/%(uploader,channel,creator|Unknown)s/%(playlist_title)s/%(title)s [%(id)s].%(ext)s",
+                    platform_dir.display()
+                ),
+                format!("{}/<creator>/<playlist>/", platform_label),
             ),
             UrlKind::Video | UrlKind::Unknown => (
-                format!("{}/%(channel)s/%(title)s [%(id)s].%(ext)s", self.channels_root.display()),
-                "channels/<channel>/".to_string(),
+                format!(
+                    "{}/%(uploader,channel,creator|Unknown)s/%(title)s [%(id)s].%(ext)s",
+                    platform_dir.display()
+                ),
+                format!("{}/<creator>/", platform_label),
             ),
         };
 
@@ -574,14 +569,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_after_strips_at_separator() {
-        assert_eq!(extract_after("https://youtube.com/@handle/videos", "/@"), Some("handle"));
-        assert_eq!(extract_after("https://youtube.com/@handle", "/@"), Some("handle"));
-        assert_eq!(extract_after("https://youtube.com/@handle?x=1", "/@"), Some("handle"));
-        assert_eq!(extract_after("nothing-here", "/@"), None);
-    }
-
-    #[test]
     fn check_url_for_folder_picks_channel_form_for_ids() {
         let url = check_url_for_folder("UC1234567890123456789012");
         assert_eq!(url, "https://www.youtube.com/channel/UC1234567890123456789012");
@@ -592,12 +579,5 @@ mod tests {
         let url = check_url_for_folder("LinusTechTips");
         assert_eq!(url, "https://www.youtube.com/@LinusTechTips");
     }
-
-    #[test]
-    fn detect_url_kind_classifies_paths() {
-        assert!(matches!(detect_url_kind("https://www.youtube.com/playlist?list=PL1"), UrlKind::Playlist));
-        assert!(matches!(detect_url_kind("https://www.youtube.com/watch?v=abc"), UrlKind::Video));
-        assert!(matches!(detect_url_kind("https://youtu.be/abc"), UrlKind::Video));
-        assert!(matches!(detect_url_kind("https://www.youtube.com/@handle"), UrlKind::Channel { .. }));
-    }
+    // URL classification tests live in `platform` now — see its tests module.
 }
