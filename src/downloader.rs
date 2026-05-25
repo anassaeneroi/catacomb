@@ -184,6 +184,16 @@ impl Downloader {
         }
     }
 
+    /// Append platform-specific extra flags. Currently only used to embed
+    /// album art into the audio file on music-first platforms (Bandcamp,
+    /// SoundCloud), where music players read embedded tags rather than
+    /// scanning for sidecar JPEGs.
+    fn apply_platform_extras(&self, platform: Platform, cmd: &mut Command) {
+        if platform.is_audio_first() {
+            cmd.arg("--embed-thumbnail");
+        }
+    }
+
     /// Append `--impersonate <target>` chosen per source platform. Both the
     /// bundled venv (which pip-installs `curl_cffi`) and a system yt-dlp
     /// with curl_cffi can satisfy this. Platforms that prefer no
@@ -309,10 +319,19 @@ impl Downloader {
                 // Remember the originating URL so re-checks don't have to
                 // guess from the folder name.
                 platform::write_source_url(&dir, &url);
-                (
-                    format!("{}/%(title)s [%(id)s]{live_suffix}.%(ext)s", dir.display()),
-                    format!("{}/{}/{}", platform_label, handle, live_label),
-                )
+                // Bandcamp at the bare artist URL is a whole discography.
+                // Organize each track into its album subfolder so the
+                // resulting tree mirrors how Bandcamp itself presents the
+                // catalog. Other platforms keep their flat per-creator layout.
+                let template = if info.platform == Platform::Bandcamp {
+                    format!(
+                        "{}/%(album|Unknown)s/%(title)s [%(id)s]{live_suffix}.%(ext)s",
+                        dir.display()
+                    )
+                } else {
+                    format!("{}/%(title)s [%(id)s]{live_suffix}.%(ext)s", dir.display())
+                };
+                (template, format!("{}/{}/{}", platform_label, handle, live_label))
             }
             UrlKind::Playlist => (
                 format!(
@@ -371,6 +390,7 @@ impl Downloader {
         cmd.arg("--download-archive")
             .arg(archive_path.display().to_string());
         self.apply_impersonation(info.platform, &mut cmd);
+        self.apply_platform_extras(info.platform, &mut cmd);
         cmd.arg("-o").arg(&out_arg).arg(&url);
         Self::apply_retry_flags(&mut cmd);
 
@@ -486,6 +506,15 @@ impl Downloader {
             cmd.env("PATH", new_path);
         }
 
+        // Absolute path that we want to redact out of any log line — yt-dlp
+        // sometimes echoes the cookie path in errors and that leaks the
+        // user's home directory into the UI / API responses.
+        let cookies_abs = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("cookies.txt")
+            .display()
+            .to_string();
+
         thread::spawn(move || {
             let mut child = match cmd.spawn() {
                 Ok(child) => child,
@@ -498,8 +527,10 @@ impl Downloader {
 
             if let Some(stderr) = child.stderr.take() {
                 let tx = tx.clone();
+                let cookies_abs = cookies_abs.clone();
                 thread::spawn(move || {
                     for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        let line = redact_sensitive(&line, &cookies_abs);
                         let _ = tx.send(Msg::Line(format!("[stderr] {line}")));
                     }
                 });
@@ -513,6 +544,7 @@ impl Downloader {
                     if line.trim() == "Aborting remaining downloads" {
                         continue;
                     }
+                    let line = redact_sensitive(&line, &cookies_abs);
                     if let Some(p) = parse_progress(&line) {
                         let _ = tx.send(Msg::Progress(p));
                     }
@@ -621,6 +653,18 @@ fn format_compact_utc(unix: u64) -> String {
 
 fn is_leap(y: u32) -> bool { (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 }
 
+/// Strip the absolute on-disk path to `cookies.txt` from a log line, leaving
+/// the bare filename. yt-dlp occasionally echoes the full path in error
+/// messages ("Unable to load cookies from /home/user/.../cookies.txt"); the
+/// user's home directory is not something we want to expose in the UI or
+/// `/api/progress` responses.
+fn redact_sensitive(line: &str, cookies_abs: &str) -> String {
+    if cookies_abs.is_empty() || !line.contains(cookies_abs) {
+        return line.to_string();
+    }
+    line.replace(cookies_abs, "cookies.txt")
+}
+
 /// Parse a yt-dlp `[download]  42.7% …` line into a `[0.0, 1.0]` fraction.
 fn parse_progress(line: &str) -> Option<f32> {
     let rest = line.trim_start().strip_prefix("[download]")?.trim_start();
@@ -661,6 +705,21 @@ mod tests {
     fn check_url_for_folder_picks_handle_form_otherwise() {
         let url = check_url_for_folder("LinusTechTips");
         assert_eq!(url, "https://www.youtube.com/@LinusTechTips");
+    }
+
+    #[test]
+    fn redact_sensitive_strips_cookie_path() {
+        let abs = "/home/luna/.config/yt-offline/cookies.txt";
+        let input = format!("Unable to load cookies from {abs}");
+        let out = redact_sensitive(&input, abs);
+        assert_eq!(out, "Unable to load cookies from cookies.txt");
+    }
+
+    #[test]
+    fn redact_sensitive_pass_through_when_not_present() {
+        let abs = "/home/luna/cookies.txt";
+        let input = "[download]  47.2% of 100MiB";
+        assert_eq!(redact_sensitive(input, abs), input);
     }
     // URL classification tests live in `platform` now — see its tests module.
 }

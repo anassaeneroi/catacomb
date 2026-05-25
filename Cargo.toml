@@ -16,7 +16,7 @@ axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tokio-stream = "0.1"
-tower-http = { version = "0.5", features = ["cors", "fs"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "compression-gzip"] }
 argon2 = "0.5"
 rand = "0.8"
 # File-picker dialog for the desktop GUI. xdg-portal backend keeps it pure-Rust

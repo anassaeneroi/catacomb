@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path as StdPath, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -38,6 +38,7 @@ use axum::{
 };
 use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
@@ -92,6 +93,12 @@ pub struct WebState {
     /// Cached "is password required" — refreshed when the password is changed.
     /// Avoids a DB hit on every request through `auth_middleware`.
     pub password_required_cache: AtomicBool,
+    /// Monotonically-incremented version counter; serves as the ETag for
+    /// `/api/library`. Bumped on any state change that would alter the
+    /// JSON response (rescan, watched toggle, resume position, maintenance
+    /// remove). Combined with `If-None-Match` short-circuits the megabytes
+    /// of library JSON when nothing has changed.
+    pub library_version: AtomicU64,
     /// Per-IP failure tracker for [`post_login`]. Each entry is the number of
     /// recent failures and the instant the lockout (if any) expires.
     pub login_attempts: Mutex<HashMap<std::net::IpAddr, LoginAttempt>>,
@@ -520,7 +527,20 @@ pub fn write_cookies(text: &str) -> Result<usize, String> {
     if !content.ends_with('\n') {
         content.push('\n');
     }
-    std::fs::write(cookies_path(), &content).map_err(|e| e.to_string())?;
+    let path = cookies_path();
+    std::fs::write(&path, &content).map_err(|e| e.to_string())?;
+    // cookies.txt carries live session credentials — tighten the mode so it
+    // isn't world-readable on multi-user systems. Best-effort, like the
+    // similar guard on yt-offline.db.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(&path, perms);
+        }
+    }
     Ok(count_cookies(&content))
 }
 
@@ -646,6 +666,15 @@ fn is_authed(state: &WebState, headers: &HeaderMap) -> bool {
 /// cache to avoid a SQLite hit on every request (especially for static files).
 fn password_required(state: &WebState) -> bool {
     state.password_required_cache.load(Ordering::Relaxed)
+}
+
+/// Bump the library-version counter. Callers should invoke this after any
+/// state change that would alter `/api/library`'s response (watched flip,
+/// resume position, rescan, maintenance remove). The counter is consumed
+/// as an `ETag` so well-behaved clients can short-circuit unchanged GETs
+/// with `If-None-Match`.
+fn bump_library_version(state: &WebState) {
+    state.library_version.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Re-read the password setting from the DB and update the cache. Called
@@ -805,7 +834,34 @@ async fn get_index() -> impl IntoResponse {
     )
 }
 
-async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+async fn get_library(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    // Conditional GET: short-circuit with 304 when the client's cached
+    // ETag matches our current library_version. Saves megabytes for
+    // large libraries on every poll.
+    let version = state.library_version.load(Ordering::Relaxed);
+    let etag = format!("\"{}\"", version);
+    if let Some(client_etag) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+        if client_etag == etag {
+            return ([
+                (header::ETAG, etag.clone()),
+                (header::CACHE_CONTROL, "no-cache".to_string()),
+            ], StatusCode::NOT_MODIFIED).into_response();
+        }
+    }
+    let payload = build_library_payload(&state).await;
+    (
+        [
+            (header::ETAG, etag),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+        ],
+        Json(payload),
+    ).into_response()
+}
+
+async fn build_library_payload(state: &Arc<WebState>) -> LibraryResponse {
     let lib = state.library.lock().unwrap();
     let watched = state.watched.lock().unwrap();
     let positions = state.positions.lock().unwrap();
@@ -884,7 +940,7 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         }
     }).collect();
 
-    Json(LibraryResponse { channels })
+    LibraryResponse { channels }
 }
 
 async fn get_music(State(state): State<Arc<WebState>>) -> impl IntoResponse {
@@ -964,6 +1020,8 @@ async fn post_watched(
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
     if now_watched { watched.insert(video_id); } else { watched.remove(&video_id); }
+    drop(watched);
+    bump_library_version(&state);
     (StatusCode::OK, if now_watched { "watched" } else { "unwatched" }).into_response()
 }
 
@@ -1214,13 +1272,26 @@ async fn post_resume(
     Path(video_id): Path<String>,
     Json(body): Json<ResumeBody>,
 ) -> impl IntoResponse {
+    // Track whether this video had a non-trivial resume position before/after
+    // so we only bump the library ETag on transitions (joins / leaves the
+    // "Continue watching" set). Plain position updates fire every few seconds
+    // during playback — invalidating the cache on each would defeat the
+    // ETag optimisation.
+    let mut positions = state.positions.lock().unwrap();
+    let was_resumable = positions.get(&video_id).copied().is_some_and(|p| p > 3.0);
     let db = state.db.lock().unwrap();
     if body.position > 3.0 {
         let _ = db.set_position(&video_id, body.position);
-        state.positions.lock().unwrap().insert(video_id, body.position);
+        positions.insert(video_id.clone(), body.position);
     } else {
         let _ = db.clear_position(&video_id);
-        state.positions.lock().unwrap().remove(&video_id);
+        positions.remove(&video_id);
+    }
+    drop(db);
+    drop(positions);
+    let now_resumable = body.position > 3.0;
+    if was_resumable != now_resumable {
+        bump_library_version(&state);
     }
     (StatusCode::OK, "ok")
 }
@@ -1387,6 +1458,7 @@ async fn post_rescan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         *state.watched.lock().unwrap() = w;
     }
     *state.library.lock().unwrap() = new_lib;
+    bump_library_version(&state);
     (StatusCode::OK, "rescanned")
 }
 
@@ -1430,6 +1502,7 @@ async fn post_maintenance_remove(
     // Refresh the library so the removed copies disappear from the UI.
     let new_lib = library::scan_channels(&state.channels_root);
     *state.library.lock().unwrap() = new_lib;
+    bump_library_version(&state);
     Json(serde_json::json!({ "removed": removed, "errors": errors }))
 }
 
@@ -1607,6 +1680,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         sessions: Mutex::new(HashMap::new()),
         last_scheduled_check: Mutex::new(None),
         password_required_cache: AtomicBool::new(password_required_initial),
+        library_version: AtomicU64::new(1),
         login_attempts: Mutex::new(HashMap::new()),
     });
 
@@ -1684,6 +1758,12 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         // malicious. Path-specific overrides aren't needed since we have no
         // legitimate large-upload endpoints.
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
+        // Compress JSON responses (gzip). `/api/library` in particular can
+        // be megabytes for large collections; gzip slices that ~10×.
+        // ServeDir output (video bytes) is already-compressed media, so the
+        // overhead would be wasted there — tower_http's compression layer
+        // skips already-compressed content types automatically.
+        .layer(CompressionLayer::new().gzip(true))
         .layer(middleware::from_fn(security_headers))
         .with_state(state);
 
@@ -1937,9 +2017,21 @@ function closeSidebar(){document.getElementById('sidebar').classList.remove('ope
 async function api(path,opts){const r=await fetch(path,opts);if(!r.ok)throw new Error(await r.text());return r}
 
 /* ── Library ────────────────────────────────────────────────────── */
+// Cache the ETag of the most-recent library response so subsequent polls
+// can short-circuit with 304 Not Modified when nothing has changed. Saves
+// megabytes of JSON for large libraries on every periodic refresh.
+let libraryEtag=null;
 async function loadLibrary(){
   try{
-    const data=(await(await api('/api/library')).json());
+    const opts=libraryEtag?{headers:{'If-None-Match':libraryEtag}}:{};
+    const r=await api('/api/library',opts);
+    if(r.status===304){
+      // Nothing changed; keep our existing `library` array.
+      loadMusic();
+      return;
+    }
+    libraryEtag=r.headers.get('ETag')||libraryEtag;
+    const data=await r.json();
     library=data.channels;
     channelUrls=library.map(ch=>ch.channel_url||null);
     const total=library.reduce((s,c)=>s+c.size_bytes,0);
