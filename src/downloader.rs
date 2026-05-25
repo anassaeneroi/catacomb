@@ -19,7 +19,7 @@
 //! | `--xattrs` | Store metadata in filesystem extended attributes |
 //! | `--sponsorblock-mark all` | Mark (but don't remove) SponsorBlock segments |
 //! | `--extractor-args youtube:player_client=web` | Use the web player API to avoid throttling |
-//! | `--impersonate Chrome-146:Macos-26` | Impersonate a real browser for bot detection |
+//! | `--impersonate <target>` | Browser TLS fingerprint per source platform (see [`crate::platform::Platform::impersonate_target`]) |
 //! | `--break-on-existing` | Stop when the archive file records the video as already downloaded |
 //! | `--download-archive archive.txt` | Record downloaded IDs to avoid re-downloading |
 
@@ -30,7 +30,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
-use crate::platform::{self, UrlInfo, UrlKind};
+use crate::platform::{self, Platform, UrlInfo, UrlKind};
 use crate::ytdlp_bin;
 
 /// Video quality level passed as a `-f` format selector to yt-dlp.
@@ -184,14 +184,15 @@ impl Downloader {
         }
     }
 
-    /// Append `--impersonate Chrome-146:Macos-26` to bypass YouTube's bot
-    /// detection. Both the bundled venv (which pip-installs `curl_cffi` via
-    /// [`ytdlp_bin::install_command`]) and a system yt-dlp with curl_cffi
-    /// support this. We leave it on unconditionally now; yt-dlp's
-    /// `--list-impersonate-targets` warning surfaces in the install log if
-    /// curl_cffi is unavailable, so the user has a clear path forward.
-    fn apply_impersonation(&self, cmd: &mut Command) {
-        cmd.arg("--impersonate").arg("Chrome-146:Macos-26");
+    /// Append `--impersonate <target>` chosen per source platform. Both the
+    /// bundled venv (which pip-installs `curl_cffi`) and a system yt-dlp
+    /// with curl_cffi can satisfy this. Platforms that prefer no
+    /// impersonation (e.g. Twitch's OAuth) return `None` from
+    /// [`Platform::impersonate_target`] and the flag is omitted.
+    fn apply_impersonation(&self, platform: Platform, cmd: &mut Command) {
+        if let Some(target) = platform.impersonate_target() {
+            cmd.arg("--impersonate").arg(target);
+        }
     }
 
     /// Append the cookie-source flags. Prefers `cookies.txt` in the working
@@ -277,13 +278,29 @@ impl Downloader {
     /// video — fast for routine channel checks.  When `full_scan` is true the
     /// flag is omitted so every video is checked individually against the
     /// download archive; slower, but correctly fills gaps in the history.
-    pub fn start(&mut self, url: String, info: &UrlInfo, full_scan: bool, quality: DownloadQuality) {
+    ///
+    /// When `live` is true, the invocation is configured to record a live
+    /// stream from the start: `--live-from-start --wait-for-video 30` is
+    /// added, `--break-on-existing` is suppressed (each recording is unique),
+    /// and the output filename gains a UTC timestamp suffix so re-recordings
+    /// of the same channel don't collide.
+    pub fn start(&mut self, url: String, info: &UrlInfo, full_scan: bool, quality: DownloadQuality, live: bool) {
         let platform_dir = platform::platform_root(&self.channels_root, info.platform);
         // Per-platform download archive keeps cross-platform IDs from colliding
         // (TikTok IDs are numeric, YouTube IDs are 11-char base64, etc.).
         let _ = std::fs::create_dir_all(&platform_dir);
         let archive_path = platform_dir.join("archive.txt");
         let platform_label = info.platform.dir_name();
+
+        // Live recordings get a UTC timestamp suffix in the filename so a
+        // re-recording of the same stream doesn't overwrite the prior one.
+        // VOD downloads rely on yt-dlp's stable `%(id)s` for uniqueness.
+        let live_suffix = if live {
+            format!(" [{}]", format_compact_utc(now_unix()))
+        } else {
+            String::new()
+        };
+        let live_label = if live { " 🔴 LIVE" } else { "" };
 
         let (out_arg, label) = match &info.kind {
             UrlKind::Channel { handle } => {
@@ -293,23 +310,23 @@ impl Downloader {
                 // guess from the folder name.
                 platform::write_source_url(&dir, &url);
                 (
-                    format!("{}/%(title)s [%(id)s].%(ext)s", dir.display()),
-                    format!("{}/{}/", platform_label, handle),
+                    format!("{}/%(title)s [%(id)s]{live_suffix}.%(ext)s", dir.display()),
+                    format!("{}/{}/{}", platform_label, handle, live_label),
                 )
             }
             UrlKind::Playlist => (
                 format!(
-                    "{}/%(uploader,channel,creator|Unknown)s/%(playlist_title)s/%(title)s [%(id)s].%(ext)s",
+                    "{}/%(uploader,channel,creator|Unknown)s/%(playlist_title)s/%(title)s [%(id)s]{live_suffix}.%(ext)s",
                     platform_dir.display()
                 ),
-                format!("{}/<creator>/<playlist>/", platform_label),
+                format!("{}/<creator>/<playlist>/{}", platform_label, live_label),
             ),
             UrlKind::Video | UrlKind::Unknown => (
                 format!(
-                    "{}/%(uploader,channel,creator|Unknown)s/%(title)s [%(id)s].%(ext)s",
+                    "{}/%(uploader,channel,creator|Unknown)s/%(title)s [%(id)s]{live_suffix}.%(ext)s",
                     platform_dir.display()
                 ),
-                format!("{}/<creator>/", platform_label),
+                format!("{}/<creator>/{}", platform_label, live_label),
             ),
         };
 
@@ -339,12 +356,21 @@ impl Downloader {
         if let Some(fmt) = quality.format_spec() {
             cmd.arg("-f").arg(fmt);
         }
-        if !full_scan {
+        if live {
+            // Record the broadcast from the start instead of joining live.
+            // `--wait-for-video` polls the URL every 30 s until a stream
+            // is actually live, so scheduling a recording before the
+            // stream begins works naturally.
+            cmd.arg("--live-from-start").arg("--wait-for-video").arg("30");
+        } else if !full_scan {
+            // Live recordings should never short-circuit on existing archive
+            // entries — every recording is its own file. Only honor
+            // `--break-on-existing` for VOD/channel-check downloads.
             cmd.arg("--break-on-existing");
         }
         cmd.arg("--download-archive")
             .arg(archive_path.display().to_string());
-        self.apply_impersonation(&mut cmd);
+        self.apply_impersonation(info.platform, &mut cmd);
         cmd.arg("-o").arg(&out_arg).arg(&url);
         Self::apply_retry_flags(&mut cmd);
 
@@ -374,7 +400,10 @@ impl Downloader {
             .arg("--write-auto-subs")
             .arg("--extractor-args")
             .arg("youtube:player_client=web");
-        self.apply_impersonation(&mut cmd);
+        // `repair()` rebuilds a YouTube watch URL from a stored video ID, so
+        // the source platform is always YouTube here regardless of where the
+        // original video lives on disk.
+        self.apply_impersonation(Platform::YouTube, &mut cmd);
         cmd.arg("-o").arg(&out_arg).arg(&url);
         Self::apply_retry_flags(&mut cmd);
 
@@ -411,7 +440,11 @@ impl Downloader {
             .arg("--xattrs")
             .arg("--extractor-args")
             .arg("youtube:player_client=web");
-        self.apply_impersonation(&mut cmd);
+        // Music downloads can come from any audio-first platform — classify
+        // the URL once so SoundCloud/Bandcamp pulls get their appropriate
+        // (typically no-op) impersonation profile.
+        let platform = platform::classify_url(&url).platform;
+        self.apply_impersonation(platform, &mut cmd);
         cmd.arg("--progress")
             .arg("--download-archive")
             .arg(archive_path.display().to_string())
@@ -540,6 +573,53 @@ impl Downloader {
         }
     }
 }
+
+/// Current UNIX timestamp in seconds. Used to disambiguate live-recording
+/// filenames at job-start time.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Format a UNIX timestamp as `YYYYMMDD-HHMMSS` (UTC) for embedding in
+/// filenames. No `chrono` dep — short manual calendar walk; good enough
+/// for human-readable filename suffixes.
+fn format_compact_utc(unix: u64) -> String {
+    let day = unix / 86_400;
+    let day_secs = unix % 86_400;
+    let hour = day_secs / 3600;
+    let minute = (day_secs % 3600) / 60;
+    let second = day_secs % 60;
+
+    let mut year = 1970u32;
+    let mut remaining_days = day;
+    loop {
+        let leap = is_leap(year);
+        let yd = if leap { 366 } else { 365 };
+        if remaining_days < yd as u64 { break; }
+        remaining_days -= yd as u64;
+        year += 1;
+    }
+    let months: [u8; 12] = if is_leap(year) {
+        [31,29,31,30,31,30,31,31,30,31,30,31]
+    } else {
+        [31,28,31,30,31,30,31,31,30,31,30,31]
+    };
+    let mut month = 0usize;
+    while month < 12 && remaining_days >= months[month] as u64 {
+        remaining_days -= months[month] as u64;
+        month += 1;
+    }
+    let day_of_month = remaining_days as u32 + 1;
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        year, month as u32 + 1, day_of_month, hour, minute, second
+    )
+}
+
+fn is_leap(y: u32) -> bool { (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 }
 
 /// Parse a yt-dlp `[download]  42.7% …` line into a `[0.0, 1.0]` fraction.
 fn parse_progress(line: &str) -> Option<f32> {

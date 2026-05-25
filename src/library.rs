@@ -72,6 +72,10 @@ pub struct Video {
     pub has_chapters: bool,
     /// Size of the video file on disk; `None` if the video file is missing.
     pub file_size: Option<u64>,
+    /// Filesystem mtime of the video file as a UNIX timestamp (seconds).
+    /// Used by the activity feed to surface recent additions. `None` if the
+    /// video file is missing or the system clock returned an error.
+    pub mtime_unix: Option<u64>,
     /// Upload date as `YYYYMMDD` (yt-dlp's native format from info.json).
     /// `None` if the info.json sidecar is missing or lacks the field.
     pub upload_date: Option<String>,
@@ -404,9 +408,14 @@ fn enrich(raws: Vec<RawVideo>) -> Vec<Video> {
                 (dur, chap, date)
             })
             .unwrap_or((None, false, None));
-        let file_size = raw.video_path.as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len());
+        let metadata = raw.video_path.as_ref()
+            .and_then(|p| std::fs::metadata(p).ok());
+        let file_size = metadata.as_ref().map(|m| m.len());
+        let mtime_unix = metadata
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
         Video {
             id: raw.id,
             title: raw.title,
@@ -420,6 +429,7 @@ fn enrich(raws: Vec<RawVideo>) -> Vec<Video> {
             duration_secs,
             has_chapters,
             file_size,
+            mtime_unix,
             upload_date,
         }
     }).collect();

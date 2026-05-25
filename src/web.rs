@@ -184,6 +184,8 @@ struct VideoInfo {
     file_size: Option<u64>,
     /// Upload date as `YYYYMMDD` (yt-dlp's native format).
     upload_date: Option<String>,
+    /// Filesystem mtime as a UNIX timestamp. Drives the Recent-additions feed.
+    mtime_unix: Option<u64>,
     has_video: bool,
     has_live_chat: bool,
     watched: bool,
@@ -227,6 +229,11 @@ struct StartDownloadRequest {
     /// When "music", audio-only mode is used regardless of other settings.
     #[serde(default)]
     quality: String,
+    /// Treat the URL as an ongoing live broadcast and record from the start.
+    /// Adds `--live-from-start --wait-for-video 30` and timestamps the
+    /// output filename so re-recordings don't collide.
+    #[serde(default)]
+    live: bool,
 }
 
 /// Response body for `GET /api/progress`.
@@ -841,6 +848,7 @@ async fn get_library(State(state): State<Arc<WebState>>) -> impl IntoResponse {
             duration_secs: v.duration_secs,
             file_size: v.file_size,
             upload_date: v.upload_date.clone(),
+            mtime_unix: v.mtime_unix,
             has_video: v.video_path.is_some(),
             has_live_chat: v.has_live_chat,
             watched: watched.contains(&v.id),
@@ -940,7 +948,7 @@ async fn post_download(
             _       => DownloadQuality::Best,
         };
         let info = classify_url(&url);
-        dl.start(url, &info, body.full_scan, quality);
+        dl.start(url, &info, body.full_scan, quality, body.live);
     }
     (StatusCode::ACCEPTED, "ok").into_response()
 }
@@ -1255,11 +1263,13 @@ async fn get_preview(
     } else if !browser.is_empty() && browser != "none" {
         cmd.arg("--cookies-from-browser").arg(&browser);
     }
-    // The bundled venv install now ships `curl_cffi` (see
-    // `crate::ytdlp_bin::install_command`), so --impersonate works in both
-    // bundled and system modes.
+    // The bundled venv install ships `curl_cffi`, so --impersonate works
+    // in both bundled and system modes. Pick the target per source so
+    // TikTok previews use the mobile profile and Twitch skips it entirely.
     let _ = use_bundled;
-    cmd.arg("--impersonate").arg("Chrome-146:Macos-26");
+    if let Some(target) = crate::platform::Platform::from_url(&url).impersonate_target() {
+        cmd.arg("--impersonate").arg(target);
+    }
     let output = cmd
         .arg(&url)
         .stdin(Stdio::null())
@@ -1455,7 +1465,7 @@ async fn post_scheduler_run(State(state): State<Arc<WebState>>) -> impl IntoResp
     let mut dl = state.downloader.lock().unwrap();
     for url in urls {
         let info = classify_url(&url);
-        dl.start(url, &info, true, DownloadQuality::Best);
+        dl.start(url, &info, true, DownloadQuality::Best, false);
     }
     *state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
     (StatusCode::ACCEPTED, format!("started {count} channel checks")).into_response()
@@ -1629,7 +1639,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
             let mut dl = sched_state.downloader.lock().unwrap();
             for url in urls {
                 let info = classify_url(&url);
-                dl.start(url, &info, true, DownloadQuality::Best);
+                dl.start(url, &info, true, DownloadQuality::Best, false);
             }
             *sched_state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
         }
@@ -1908,12 +1918,13 @@ const HTML_UI: &str = r#"<!DOCTYPE html>
     <option value="music">🎵 Music</option>
   </select>
   <label id="fast-mode-label" style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Stop at the first already-downloaded video. Faster for large channels but may miss new videos if gaps exist in the archive."><input type="checkbox" id="dl-full-scan"> Fast mode</label>
+  <label id="live-mode-label" style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Record an ongoing live broadcast (Twitch/YouTube Live) from the start instead of joining live. Waits if the stream has not begun yet."><input type="checkbox" id="dl-live"> 🔴 Live</label>
   <span id="agpl-notice" style="font-size:10px;color:var(--muted);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
 </footer>
 
 <script>
 'use strict';
-let library=[], channelUrls=[], activeChannelIdx=null, activePlaylistIdx=null, showContinue=false, showChannels=false, showMusic=false;
+let library=[], channelUrls=[], activeChannelIdx=null, activePlaylistIdx=null, showContinue=false, showChannels=false, showMusic=false, showRecent=false;
 let musicTracks=[];
 let bulkMode=false, selected=new Set(), selectedId=null;
 let currentPlayingId=null, saveTimer=null;
@@ -1946,10 +1957,12 @@ function renderSidebar(){
   const allVids=library.flatMap(ch=>[...ch.videos,...ch.playlists.flatMap(p=>p.videos)]);
   const contVids=allVids.filter(v=>v.resume_pos&&v.resume_pos>5&&!v.watched);
   const total=library.reduce((s,c)=>s+c.total_videos,0);
+  const hasDated=allVids.some(v=>v.mtime_unix);
   let h=`<div class="sidebar-label">Library</div>`;
   if(contVids.length)h+=`<div class="ch-item${showContinue?' active':''}" onclick="setContinue()">▶ Continue (${contVids.length})</div>`;
+  if(hasDated)h+=`<div class="ch-item${showRecent?' active':''}" onclick="setRecent()">🕒 Recent additions</div>`;
   h+=`<div class="ch-item${showChannels?' active':''}" onclick="setChannels()">⊟ Channels (${library.length})</div>`;
-  h+=`<div class="ch-item${!showContinue&&!showChannels&&activeChannelIdx===null?' active':''}" onclick="setView(null,null)">⊞ All (${total})</div>`;
+  h+=`<div class="ch-item${!showContinue&&!showChannels&&!showRecent&&activeChannelIdx===null&&!showMusic?' active':''}" onclick="setView(null,null)">⊞ All (${total})</div>`;
   h+=`<div class="ch-item${showMusic?' active':''}" onclick="setMusic()">♫ Music (${musicTracks.length})</div>`;
   // Group sidebar entries by platform so a multi-platform library reads as
   // distinct sections rather than one flat list.
@@ -1973,10 +1986,11 @@ function renderSidebar(){
   }
   el.innerHTML=h;
 }
-function setContinue(){showContinue=true;showChannels=false;showMusic=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setChannels(){showChannels=true;showContinue=false;showMusic=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setView(ci,pi){showContinue=false;showChannels=false;showMusic=false;activeChannelIdx=ci;activePlaylistIdx=pi;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setMusic(){showMusic=true;showContinue=false;showChannels=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setContinue(){showContinue=true;showChannels=false;showMusic=false;showRecent=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setRecent(){showRecent=true;showContinue=false;showChannels=false;showMusic=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setChannels(){showChannels=true;showContinue=false;showMusic=false;showRecent=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setView(ci,pi){showContinue=false;showChannels=false;showMusic=false;showRecent=false;activeChannelIdx=ci;activePlaylistIdx=pi;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setMusic(){showMusic=true;showContinue=false;showChannels=false;showRecent=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
 
 /* ── Grid ───────────────────────────────────────────────────────── */
 function currentVideos(){
@@ -1990,6 +2004,15 @@ function currentVideos(){
           vids.push({...v,channel:ch.name});
     vids.sort((a,b)=>(b.resume_pos||0)-(a.resume_pos||0));
     return vids;
+  }
+  if(showRecent){
+    // Most-recently-modified across the whole library, capped at 100.
+    for(const ch of library)
+      for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
+        if(v.mtime_unix&&(!q||v.title.toLowerCase().includes(q)||v.id.includes(q)))
+          vids.push({...v,channel:ch.name});
+    vids.sort((a,b)=>(b.mtime_unix||0)-(a.mtime_unix||0));
+    return vids.slice(0,100);
   }
   for(let i=0;i<library.length;i++){
     const ch=library[i];
@@ -2149,13 +2172,19 @@ async function previewDownload(){
   }
 }
 function fullScan(){return !(document.getElementById('dl-full-scan')?.checked||false)}
+function dlLive(){return document.getElementById('dl-live')?.checked||false}
 function dlQuality(){return document.getElementById('dl-quality')?.value||'best'}
-function updateDlMode(){const isMusic=dlQuality()==='music';document.getElementById('fast-mode-label').style.display=isMusic?'none':'flex'}
+function updateDlMode(){
+  const isMusic=dlQuality()==='music';
+  document.getElementById('fast-mode-label').style.display=isMusic?'none':'flex';
+  // Live recording makes no sense for music-only mode.
+  document.getElementById('live-mode-label').style.display=isMusic?'none':'flex';
+}
 async function confirmDownload(url,btn){
   if(btn)btn.closest('.modal-bg').remove();
   try{
     const quality=dlQuality();
-    const body={url,full_scan:fullScan(),quality};
+    const body={url,full_scan:fullScan(),quality,live:dlLive()};
     await api('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     document.getElementById('dl-url').value='';setStatus('Download queued…')
   }catch(e){setStatus('Error: '+e.message)}

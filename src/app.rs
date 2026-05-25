@@ -47,6 +47,8 @@ enum SidebarView {
     Channel(usize),
     Playlist(usize, usize),
     ContinueWatching,
+    /// Activity feed — recent additions across all channels, sorted by mtime.
+    Recent,
     Music,
 }
 
@@ -60,6 +62,7 @@ struct Card {
     duration_secs: Option<f64>,
     file_size: Option<u64>,
     upload_date: Option<String>,
+    mtime_unix: Option<u64>,
     watched: bool,
     resume_pos: Option<f64>,
 }
@@ -83,6 +86,8 @@ pub struct App {
     dl_full_scan: bool,
     dl_quality: DownloadQuality,
     dl_music_mode: bool,
+    /// Record an ongoing live stream from the start instead of joining live.
+    dl_live: bool,
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
     thumb_request_tx: Sender<PathBuf>,
     thumb_result_rx: Receiver<(PathBuf, Option<egui::ColorImage>)>,
@@ -219,6 +224,7 @@ impl App {
             dl_full_scan: true,
             dl_quality: DownloadQuality::Best,
             dl_music_mode: false,
+            dl_live: false,
             textures: HashMap::new(),
             thumb_request_tx,
             thumb_result_rx,
@@ -325,6 +331,7 @@ impl App {
                 duration_secs: v.duration_secs,
                 file_size: v.file_size,
                 upload_date: v.upload_date.clone(),
+                mtime_unix: v.mtime_unix,
                 watched: self.watched.contains(&v.id),
                 resume_pos,
             });
@@ -345,6 +352,21 @@ impl App {
                         .partial_cmp(&a.resume_pos.unwrap_or(0.0))
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
+                return cards;
+            }
+            SidebarView::Recent => {
+                // Most-recently-modified videos across the whole library.
+                // Cap at 100 entries so the grid stays responsive for users
+                // with thousands of files.
+                for ch in &self.library {
+                    for v in ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter())) {
+                        if v.mtime_unix.is_some() {
+                            add_video(&mut cards, &ch.name, v);
+                        }
+                    }
+                }
+                cards.sort_by(|a, b| b.mtime_unix.unwrap_or(0).cmp(&a.mtime_unix.unwrap_or(0)));
+                cards.truncate(100);
                 return cards;
             }
             SidebarView::All => {
@@ -567,7 +589,8 @@ impl App {
             .collect();
         for url in urls {
             let info = classify_url(&url);
-            self.downloader.start(url, &info, true, DownloadQuality::Best);
+            // Scheduled re-check: never treat as live.
+            self.downloader.start(url, &info, true, DownloadQuality::Best, false);
             count += 1;
         }
         self.status = format!("Scheduled check: started {} channel downloads", count);
@@ -732,6 +755,23 @@ impl App {
                         }
                     }
 
+                    // Recent additions across the whole library — capped at 100
+                    // in `compute_cards`. Only shown when the library has
+                    // anything dated; on a brand-new install this stays hidden.
+                    let has_dated = self.library.iter()
+                        .flat_map(|c| c.all_videos())
+                        .any(|v| v.mtime_unix.is_some());
+                    if has_dated && ui
+                        .selectable_label(
+                            self.sidebar_view == SidebarView::Recent,
+                            "🕒 Recent additions",
+                        )
+                        .clicked()
+                    {
+                        self.sidebar_view = SidebarView::Recent;
+                        self.selected_video = None;
+                    }
+
                     let music_count = self.music_library.len();
                     if ui
                         .selectable_label(
@@ -836,7 +876,7 @@ impl App {
                     // Process deferred right-click download action
                     if let Some((url, ch_name)) = pending_ch_download {
                         let info = classify_url(&url);
-                        self.downloader.start(url, &info, !self.dl_full_scan, DownloadQuality::Best);
+                        self.downloader.start(url, &info, !self.dl_full_scan, DownloadQuality::Best, false);
                         self.status = format!("Checking {} for new videos…", ch_name);
                     }
                 });
@@ -901,6 +941,12 @@ impl App {
                     });
                     ui.checkbox(&mut self.dl_full_scan, "Fast mode (stop at first already-downloaded video)")
                         .on_hover_text("Faster for large channels but may miss new videos if gaps exist in the archive. Leave off to check every video.");
+                    ui.checkbox(&mut self.dl_live, "🔴 Live stream (record from start)")
+                        .on_hover_text(
+                            "Use for Twitch/YouTube Live broadcasts. Adds --live-from-start \
+                             so yt-dlp records from the beginning instead of joining mid-stream. \
+                             Also waits if the stream hasn't begun yet.",
+                        );
                 }
 
                 let ready = !self.dl_url.trim().is_empty();
@@ -911,7 +957,7 @@ impl App {
                         self.downloader.start_music(url);
                         self.status = "Downloading music…".to_string();
                     } else {
-                        self.downloader.start(url, &info, !self.dl_full_scan, self.dl_quality);
+                        self.downloader.start(url, &info, !self.dl_full_scan, self.dl_quality, self.dl_live);
                         self.status = format!("Downloading: {dest}");
                     }
                 }

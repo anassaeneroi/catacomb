@@ -142,6 +142,26 @@ impl Platform {
     pub fn is_audio_first(self) -> bool {
         matches!(self, Self::Bandcamp | Self::SoundCloud)
     }
+
+    /// yt-dlp `--impersonate` target tuned for each source. Returns `None`
+    /// when impersonation should be skipped entirely (e.g. Twitch's OAuth
+    /// flow can object to mismatched TLS fingerprints).
+    ///
+    /// Targets follow yt-dlp's format. TikTok matches the patterns it
+    /// expects from its first-party mobile app so a desktop fingerprint
+    /// doesn't trip its bot scoring; everything else gets a recent desktop
+    /// Chrome.
+    pub fn impersonate_target(self) -> Option<&'static str> {
+        match self {
+            // Twitch's auth surface dislikes TLS-fingerprint impersonation;
+            // omit the flag so curl_cffi doesn't break OAuth/Helix calls.
+            Self::Twitch => None,
+            // TikTok's API is mobile-first — pretend to be Chrome on Android.
+            Self::TikTok => Some("Chrome-Android-131"),
+            // Default: recent desktop Chrome on macOS.
+            _ => Some("Chrome-146:Macos-26"),
+        }
+    }
 }
 
 /// What kind of URL we're looking at — drives the yt-dlp `-o` template.
@@ -459,5 +479,23 @@ mod tests {
         let cr = Path::new("/foo/channels");
         assert_eq!(platform_root(cr, Platform::TikTok), Path::new("/foo/tiktok"));
         assert_eq!(platform_root(cr, Platform::Twitch), Path::new("/foo/twitch"));
+    }
+
+    #[test]
+    fn twitch_skips_impersonation() {
+        // TLS fingerprint impersonation can interfere with Twitch's OAuth/Helix.
+        assert!(Platform::Twitch.impersonate_target().is_none());
+    }
+
+    #[test]
+    fn tiktok_uses_mobile_profile() {
+        let t = Platform::TikTok.impersonate_target().unwrap();
+        assert!(t.to_lowercase().contains("android"));
+    }
+
+    #[test]
+    fn youtube_uses_desktop_chrome() {
+        let t = Platform::YouTube.impersonate_target().unwrap();
+        assert!(t.starts_with("Chrome-"));
     }
 }
