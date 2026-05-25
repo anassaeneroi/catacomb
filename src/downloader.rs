@@ -184,6 +184,17 @@ impl Downloader {
         }
     }
 
+    /// Append `--impersonate Chrome-146:Macos-26` only when the active yt-dlp
+    /// supports it. The standalone PyInstaller binary we ship as the bundled
+    /// option doesn't include `curl_cffi`, so passing `--impersonate` to it
+    /// errors out with `Impersonate target "chrome-146:macos-26" is not
+    /// available`. System yt-dlp (typically pip-installed with curl_cffi)
+    /// works fine.
+    fn apply_impersonation(&self, cmd: &mut Command) {
+        if self.use_bundled_ytdlp { return; }
+        cmd.arg("--impersonate").arg("Chrome-146:Macos-26");
+    }
+
     /// Append the cookie-source flags. Prefers `cookies.txt` in the working
     /// directory (set up via the cookies UI), falling back to
     /// `--cookies-from-browser <browser>` when no cookies.txt exists and the
@@ -333,12 +344,9 @@ impl Downloader {
             cmd.arg("--break-on-existing");
         }
         cmd.arg("--download-archive")
-            .arg(archive_path.display().to_string())
-            .arg("--impersonate")
-            .arg("Chrome-146:Macos-26")
-            .arg("-o")
-            .arg(&out_arg)
-            .arg(&url);
+            .arg(archive_path.display().to_string());
+        self.apply_impersonation(&mut cmd);
+        cmd.arg("-o").arg(&out_arg).arg(&url);
         Self::apply_retry_flags(&mut cmd);
 
         self.enqueue(cmd, url, label);
@@ -366,12 +374,9 @@ impl Downloader {
             .arg("--write-subs")
             .arg("--write-auto-subs")
             .arg("--extractor-args")
-            .arg("youtube:player_client=web")
-            .arg("--impersonate")
-            .arg("Chrome-146:Macos-26")
-            .arg("-o")
-            .arg(&out_arg)
-            .arg(&url);
+            .arg("youtube:player_client=web");
+        self.apply_impersonation(&mut cmd);
+        cmd.arg("-o").arg(&out_arg).arg(&url);
         Self::apply_retry_flags(&mut cmd);
 
         self.enqueue(cmd, url, label);
@@ -406,10 +411,9 @@ impl Downloader {
             .arg("--embed-metadata")
             .arg("--xattrs")
             .arg("--extractor-args")
-            .arg("youtube:player_client=web")
-            .arg("--impersonate")
-            .arg("Chrome-146:Macos-26")
-            .arg("--progress")
+            .arg("youtube:player_client=web");
+        self.apply_impersonation(&mut cmd);
+        cmd.arg("--progress")
             .arg("--download-archive")
             .arg(archive_path.display().to_string())
             .arg("-o")

@@ -1255,8 +1255,14 @@ async fn get_preview(
     } else if !browser.is_empty() && browser != "none" {
         cmd.arg("--cookies-from-browser").arg(&browser);
     }
+    // Only attach --impersonate if the active yt-dlp supports it. Our
+    // bundled (PyInstaller) binary doesn't ship curl_cffi, so the flag
+    // would error out. System yt-dlp installed via pip with curl_cffi
+    // does support it.
+    if !use_bundled {
+        cmd.arg("--impersonate").arg("Chrome-146:Macos-26");
+    }
     let output = cmd
-        .arg("--impersonate").arg("Chrome-146:Macos-26")
         .arg(&url)
         .stdin(Stdio::null())
         .stdout(std::process::Stdio::piped())
