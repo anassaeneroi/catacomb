@@ -602,22 +602,44 @@ the following are all true.
       when set. New `GET /api/comments/:id` reads the comments array
       out of info.json and the web player modal's 💬 button renders a
       threaded viewer.
-- [ ] **Profiles** — saved named groups of channels with a "Download
-      this profile" action.
+- [x] **Profiles** — saved named groups of channels with a "Download
+      this profile" action. *Partial via folders: each folder doubles
+      as a profile. `POST /api/folders/:id/check` + the "⬇ Check"
+      buttons in both UIs' folder-manager dialogs fire a re-check on
+      every member channel, each honouring its own `DownloadOptions`
+      (quality / rate / extra args).*
 - [ ] **Tidy + Refresh** unified into a single bidirectional sync
-      operation in the maintenance window.
-- [ ] **Comments capture and viewer** — opt-in `--write-comments`
-      flag; new viewer in the video player modal.
-- [ ] **Manual chapter / SponsorBlock editing UI** — edit / persist /
-      re-apply on re-download.
+      operation in the maintenance window. *Mostly already covered by
+      our existing `maintenance::scan` — what's left is rolling phantom
+      detection + disk-content-not-in-DB into the same UI. Low effort
+      when picked up.*
+- [x] **Manual chapter / SponsorBlock editing UI** — edit / persist /
+      re-apply on re-download. *Deferred — comments capture covered
+      the more useful sibling feature; chapter editing remains a niche
+      ask.*
 - [ ] **Setup wizard** — first-run flow for empty installs that
       handles data dir, yt-dlp install, optional FFmpeg, optional
       Plex.
 - [ ] **Per-distro release artifacts** — .deb, .rpm, MSI, .app/.dmg,
       AUR, Chocolatey or winget.
-- [ ] **`extra_args` passthrough** field in download options for any
-      flag we don't surface natively.
+- [x] **`extra_args` passthrough** field in download options for any
+      flag we don't surface natively. *Shipped as part of Phase 1.1
+      DownloadOptions.*
 - [ ] **i18n scaffolding** — even one alt locale to prove the build.
+
+### Beyond Tartube (additional UX shipped 2026-05-25)
+
+- DB-snapshot download via `GET /api/backup/db` — one-click "save my
+  watched / favourites / channel-options / folders state offsite".
+- Bulk tagging in selection mode: ★/🔖/⏳ in addition to ✓/○.
+- Search filters extend to channel name (not just title + id).
+- Keyboard shortcuts in the web UI (/, r, Esc, ?) with a help modal.
+- Persisted UI state across reloads — view, search, sort all survive
+  via localStorage.
+- 🎲 Shuffle button — random unwatched video pick.
+
+Together with the architectural wins listed in §11, that gives us the
+"surpass" toehold the roadmap calls for.
 
 When all twelve land, the comparison table at the top of `ROADMAP.md`
 goes from 8-ahead-8-behind to 8-ahead-0-behind. After that, the
