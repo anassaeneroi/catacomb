@@ -174,6 +174,9 @@
 <script>
 'use strict';
 let library=[], channelUrls=[], activeChannelIdx=null, activePlaylistIdx=null, showContinue=false, showChannels=false, showMusic=false, showRecent=false;
+// Folder list from the most-recent /api/library response; populated by
+// loadLibrary() and read by renderSidebar() to draw the Folders group.
+let librarySnapshotFolders=[];
 // Smart-folder view selectors — at most one is true at a time.
 let showFavourites=false, showBookmarks=false, showWaiting=false;
 let musicTracks=[];
@@ -204,6 +207,7 @@ async function loadLibrary(){
     libraryEtag=r.headers.get('ETag')||libraryEtag;
     const data=await r.json();
     library=data.channels;
+    librarySnapshotFolders=data.folders||[];
     channelUrls=library.map(ch=>ch.channel_url||null);
     const total=library.reduce((s,c)=>s+c.size_bytes,0);
     document.getElementById('hdr-stats').textContent=total>0?fmtSize(total)+' total':'';
@@ -234,26 +238,64 @@ function renderSidebar(){
   h+=`<div class="ch-item${showChannels?' active':''}" onclick="setChannels()">⊟ Channels (${library.length})</div>`;
   h+=`<div class="ch-item${!showContinue&&!showChannels&&!showRecent&&!anySmart&&activeChannelIdx===null&&!showMusic?' active':''}" onclick="setView(null,null)">⊞ All (${total})</div>`;
   h+=`<div class="ch-item${showMusic?' active':''}" onclick="setMusic()">♫ Music (${musicTracks.length})</div>`;
-  // Group sidebar entries by platform so a multi-platform library reads as
-  // distinct sections rather than one flat list.
+
+  // Render a single channel entry (collapsed or expanded with sub-actions).
+  // Returned HTML is appended at the right point — used both in the
+  // folder loop and in the per-platform Unfiled loop below.
+  const renderChannel=(i)=>{
+    const ch=library[i];
+    const active=activeChannelIdx===i&&activePlaylistIdx===null&&!showContinue;
+    const size=ch.size_bytes>0?' · '+fmtSize(ch.size_bytes):'';
+    let s=`<div class="ch-item${active?' active':''}" onclick="setView(${i},null)" title="${esc(ch.platform_label||'')}">${esc(ch.platform_icon||'')} ${esc(ch.name)} (${ch.total_videos}${size})</div>`;
+    if(activeChannelIdx===i&&!showContinue){
+      for(let pi=0;pi<ch.playlists.length;pi++){
+        const pl=ch.playlists[pi];
+        s+=`<div class="ch-sub${activePlaylistIdx===pi?' active':''}" onclick="setView(${i},${pi})">└ ${esc(pl.name)} (${pl.videos.length})</div>`;
+      }
+      s+=`<div class="ch-sub" style="color:var(--accent)" onclick="downloadChannelByIdx(${i})">⬇ Check for new videos</div>`;
+      s+=`<div class="ch-sub" onclick="openChannelOptions(${i})">⚙ Channel options…</div>`;
+      s+=`<div class="ch-sub" onclick="openMoveToFolder(${i})">📁 Move to folder…</div>`;
+    }
+    return s;
+  };
+
+  // User-defined folders (from the `folders` SQLite table). Channels with
+  // a `folder_id` matching the row land here. Folders override platform
+  // grouping for their members; Unfiled channels keep the platform
+  // sections below.
+  const folders=Array.isArray(librarySnapshotFolders)?librarySnapshotFolders:[];
+  if(folders.length){
+    h+=`<div class="sidebar-label" style="margin-top:10px;display:flex;align-items:center;gap:6px">
+      📁 Folders
+      <button onclick="openFolderManager()" style="font-size:11px;padding:1px 6px;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:3px;cursor:pointer">manage</button>
+    </div>`;
+    for(const f of folders){
+      const members=[];
+      for(let i=0;i<library.length;i++){
+        if(library[i].folder_id===f.id)members.push(i);
+      }
+      const count=members.length;
+      h+=`<div class="sidebar-label" style="padding-left:8px;font-size:11px;color:var(--muted)">${esc(f.name)} (${count})</div>`;
+      for(const i of members)h+=renderChannel(i);
+    }
+  } else {
+    h+=`<div class="sidebar-label" style="margin-top:10px;display:flex;align-items:center;gap:6px">
+      📁 Folders
+      <button onclick="openFolderManager()" style="font-size:11px;padding:1px 6px;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:3px;cursor:pointer">new</button>
+    </div>`;
+  }
+
+  // Channels not assigned to a folder still get platform grouping.
+  const unfiled=[];
+  for(let i=0;i<library.length;i++)if(!library[i].folder_id)unfiled.push(i);
   let lastPlatform=null;
-  for(let i=0;i<library.length;i++){
+  for(const i of unfiled){
     const ch=library[i];
     if(ch.platform!==lastPlatform){
       h+=`<div class="sidebar-label" style="margin-top:8px">${esc(ch.platform_icon||'')} ${esc(ch.platform_label||'Channels')}</div>`;
       lastPlatform=ch.platform;
     }
-    const active=activeChannelIdx===i&&activePlaylistIdx===null&&!showContinue;
-    const size=ch.size_bytes>0?' · '+fmtSize(ch.size_bytes):'';
-    h+=`<div class="ch-item${active?' active':''}" onclick="setView(${i},null)" title="${esc(ch.platform_label||'')}">${esc(ch.name)} (${ch.total_videos}${size})</div>`;
-    if(activeChannelIdx===i&&!showContinue){
-      for(let pi=0;pi<ch.playlists.length;pi++){
-        const pl=ch.playlists[pi];
-        h+=`<div class="ch-sub${activePlaylistIdx===pi?' active':''}" onclick="setView(${i},${pi})">└ ${esc(pl.name)} (${pl.videos.length})</div>`;
-      }
-      h+=`<div class="ch-sub" style="color:var(--accent)" onclick="downloadChannelByIdx(${i})">⬇ Check for new videos</div>`;
-      h+=`<div class="ch-sub" onclick="openChannelOptions(${i})">⚙ Channel options…</div>`;
-    }
+    h+=renderChannel(i);
   }
   el.innerHTML=h;
 }
@@ -636,6 +678,101 @@ async function clearChannelOptions(platform,handle,btn){
     await api(`/api/channels/${encodeURIComponent(platform)}/${encodeURIComponent(handle)}/options`,{method:'DELETE'});
     btn.closest('.modal-bg').remove();
     setStatus('Channel options cleared');
+    await loadLibrary();
+  }catch(e){setStatus('Error: '+e.message);btn.disabled=false}
+}
+
+/* ── Folder management ─────────────────────────────────────────── */
+async function openFolderManager(){
+  const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  const folders=librarySnapshotFolders||[];
+  const rows=folders.map(f=>{
+    const memberCount=library.filter(c=>c.folder_id===f.id).length;
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="flex:1">📁 ${esc(f.name)} <span style="color:var(--muted);font-size:11px">(${memberCount} channel${memberCount===1?'':'s'})</span></span>
+      <button onclick="renameFolderPrompt(${f.id},'${esc(f.name)}')">Rename</button>
+      <button onclick="deleteFolderConfirm(${f.id},'${esc(f.name)}',${memberCount})" style="color:#f87171">Delete</button>
+    </div>`;
+  }).join('');
+  bg.innerHTML=`<div class="modal" style="max-width:480px;width:100%">
+    <div class="modal-hdr"><h2>📁 Manage folders</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div style="margin-bottom:12px">
+      ${rows||'<div style="color:var(--muted);font-size:12px;padding:4px 0">No folders yet — create one below to organize your channels.</div>'}
+    </div>
+    <div style="display:flex;gap:6px">
+      <input type="text" id="new-folder-name" placeholder="New folder name" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px">
+      <button class="primary" onclick="createFolder(this)">Create</button>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+}
+async function createFolder(btn){
+  const name=(document.getElementById('new-folder-name')?.value||'').trim();
+  if(!name){setStatus('Folder name required');return}
+  btn.disabled=true;
+  try{
+    const r=await api('/api/folders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    if(!r.ok)throw new Error(await r.text());
+    setStatus('Folder created');
+    btn.closest('.modal-bg').remove();
+    await loadLibrary();
+    openFolderManager();
+  }catch(e){setStatus('Error: '+e.message);btn.disabled=false}
+}
+async function renameFolderPrompt(id,oldName){
+  const name=window.prompt('Rename folder',oldName);
+  if(!name||name===oldName)return;
+  try{
+    const r=await api(`/api/folders/${id}/rename`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    if(!r.ok)throw new Error(await r.text());
+    setStatus('Folder renamed');
+    document.querySelector('.modal-bg')?.remove();
+    await loadLibrary();
+    openFolderManager();
+  }catch(e){setStatus('Error: '+e.message)}
+}
+async function deleteFolderConfirm(id,name,memberCount){
+  const msg=memberCount>0
+    ? `Delete folder "${name}"? Its ${memberCount} channel${memberCount===1?'':'s'} will revert to "Unfiled".`
+    : `Delete folder "${name}"?`;
+  if(!confirm(msg))return;
+  try{
+    const r=await api(`/api/folders/${id}`,{method:'DELETE'});
+    if(!r.ok)throw new Error(await r.text());
+    setStatus('Folder deleted');
+    document.querySelector('.modal-bg')?.remove();
+    await loadLibrary();
+    openFolderManager();
+  }catch(e){setStatus('Error: '+e.message)}
+}
+
+/* ── Move channel to folder ────────────────────────────────────── */
+async function openMoveToFolder(channelIdx){
+  const ch=library[channelIdx]; if(!ch)return;
+  const folders=librarySnapshotFolders||[];
+  const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  const options=[
+    `<button onclick="moveChannelToFolder(${channelIdx},null,this)" style="text-align:left;padding:8px 12px;width:100%;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer${ch.folder_id===null?';background:var(--card)':''}">— Unfiled —</button>`,
+    ...folders.map(f=>`<button onclick="moveChannelToFolder(${channelIdx},${f.id},this)" style="text-align:left;padding:8px 12px;width:100%;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer${ch.folder_id===f.id?';background:var(--card)':''}">📁 ${esc(f.name)}</button>`),
+  ].join('');
+  bg.innerHTML=`<div class="modal" style="max-width:360px;width:100%">
+    <div class="modal-hdr"><h2>Move "${esc(ch.name)}"</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div style="display:flex;flex-direction:column;gap:6px">${options}</div>
+    <div class="settings-hint" style="margin-top:10px">Channels in a folder appear under that folder instead of their platform section.</div>
+  </div>`;
+  document.body.appendChild(bg);
+}
+async function moveChannelToFolder(channelIdx,folderId,btn){
+  const ch=library[channelIdx]; if(!ch)return;
+  btn.disabled=true;
+  try{
+    const r=await api(`/api/channels/${encodeURIComponent(ch.platform)}/${encodeURIComponent(ch.name)}/folder`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({folder_id:folderId}),
+    });
+    if(!r.ok)throw new Error(await r.text());
+    btn.closest('.modal-bg').remove();
+    setStatus('Channel moved');
     await loadLibrary();
   }catch(e){setStatus('Error: '+e.message);btn.disabled=false}
 }

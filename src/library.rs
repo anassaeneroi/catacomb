@@ -124,6 +124,11 @@ pub struct Channel {
     /// scan by reading the DB once via
     /// [`crate::database::Database::get_all_channel_options`].
     pub download_options: DownloadOptions,
+    /// Optional folder grouping. `None` means the channel is "Unfiled" and
+    /// appears under its platform's heading. Populated post-scan by
+    /// [`apply_channel_folders`] from the
+    /// [`crate::database::Database::get_all_channel_assignments`] map.
+    pub folder_id: Option<i64>,
 }
 
 impl Channel {
@@ -137,6 +142,18 @@ impl Channel {
         self.videos
             .iter()
             .chain(self.playlists.iter().flat_map(|p| p.videos.iter()))
+    }
+}
+
+/// Mutate `channels` in place, filling each one's [`Channel::folder_id`]
+/// from the supplied `(platform_dir_name, handle) → folder_id` map.
+pub fn apply_channel_folders(
+    channels: &mut [Channel],
+    folder_map: &std::collections::HashMap<(String, String), i64>,
+) {
+    for ch in channels {
+        let key = (ch.platform.dir_name().to_string(), ch.name.clone());
+        ch.folder_id = folder_map.get(&key).copied();
     }
 }
 
@@ -222,6 +239,7 @@ pub fn scan_channels(youtube_root: &Path) -> Vec<Channel> {
             total_videos_cached,
             total_size_cached,
             download_options: DownloadOptions::default(),
+            folder_id: None,
         })
     })
     .into_iter()

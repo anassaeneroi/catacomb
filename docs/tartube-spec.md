@@ -578,8 +578,14 @@ the following are all true.
       `channel_options` SQLite table, attached at scan time, applied at
       every dispatch site (scheduled re-checks, right-click checks).
       Editor surfaces in both UIs.*
-- [ ] **Folder hierarchy** with N-level nesting, drag-to-reparent, and
-      per-folder default options.
+- [x] **Folder hierarchy** with N-level nesting, drag-to-reparent, and
+      per-folder default options. *v1 shipped 2026-05-25: flat folders
+      (single level, no nesting) via new `folders` + `channel_assignments`
+      SQLite tables. Sidebar groups assigned channels under their folder;
+      unfiled channels keep platform grouping. Manage-folders dialog in
+      both UIs handles create / rename / delete. Per-channel "Move to
+      folder…" context action. N-level nesting + drag-to-reparent +
+      per-folder cascading options are deferred to v2.*
 - [x] **Smart folders** for Bookmarks / Favourites / Waiting on top of
       Recent + Continue Watching. *v1 shipped 2026-05-25: each smart
       folder appears in the sidebar only when at least one video carries

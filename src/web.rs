@@ -151,6 +151,7 @@ impl WebState {
 #[derive(Serialize)]
 struct LibraryResponse {
     channels: Vec<ChannelInfo>,
+    folders: Vec<crate::database::FolderRecord>,
 }
 
 /// JSON representation of a single channel sent to the browser.
@@ -168,6 +169,9 @@ struct ChannelInfo {
     /// exists. Used by the UI's "Check for new videos" action to avoid relying
     /// on a folder-name heuristic.
     source_url: Option<String>,
+    /// Folder id from the user's channel-organisation tree. `None` when the
+    /// channel is "Unfiled" (no row in `channel_assignments`).
+    folder_id: Option<i64>,
     total_videos: usize,
     size_bytes: u64,
     subscriber_count: Option<u64>,
@@ -944,6 +948,7 @@ async fn build_library_payload(state: &Arc<WebState>) -> LibraryResponse {
             platform_label: ch.platform.display_name(),
             platform_icon: ch.platform.icon(),
             source_url: ch.source_url.clone(),
+            folder_id: ch.folder_id,
             total_videos: ch.total_videos(),
             size_bytes: ch.total_size_cached,
             subscriber_count: ch.meta.as_ref().and_then(|m| m.subscriber_count),
@@ -958,7 +963,8 @@ async fn build_library_payload(state: &Arc<WebState>) -> LibraryResponse {
         }
     }).collect();
 
-    LibraryResponse { channels }
+    let folders = state.db.list_folders().unwrap_or_default();
+    LibraryResponse { channels, folders }
 }
 
 async fn get_music(State(state): State<Arc<WebState>>) -> impl IntoResponse {
@@ -1526,6 +1532,9 @@ async fn post_rescan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     if let Ok(map) = state.db.get_all_channel_options() {
         library::apply_channel_options(&mut new_lib, &map);
     }
+    if let Ok(folder_map) = state.db.get_all_channel_assignments() {
+        library::apply_channel_folders(&mut new_lib, &folder_map);
+    }
     // Refresh watched from DB after rescan
     if let Ok(w) = state.db.get_watched() {
         *state.watched.lock().unwrap() = w;
@@ -1577,6 +1586,9 @@ async fn post_maintenance_remove(
     if let Ok(map) = state.db.get_all_channel_options() {
         library::apply_channel_options(&mut new_lib, &map);
     }
+    if let Ok(folder_map) = state.db.get_all_channel_assignments() {
+        library::apply_channel_folders(&mut new_lib, &folder_map);
+    }
     *state.library.lock().unwrap() = new_lib;
     bump_library_version(&state);
     Json(serde_json::json!({ "removed": removed, "errors": errors }))
@@ -1599,6 +1611,99 @@ async fn post_maintenance_repair(
 }
 
 /// `POST /api/scheduler/run` — trigger an immediate scheduled channel check.
+#[derive(Deserialize)]
+struct FolderCreateBody { name: String }
+
+#[derive(Deserialize)]
+struct FolderRenameBody { name: String }
+
+#[derive(Deserialize)]
+struct AssignFolderBody { folder_id: Option<i64> }
+
+/// `POST /api/folders` — create a new folder. Body: `{ "name": "<name>" }`.
+/// Returns `{ "id": <new_id> }`.
+async fn post_create_folder(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<FolderCreateBody>,
+) -> impl IntoResponse {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "folder name empty").into_response();
+    }
+    match state.db.create_folder(name) {
+        Ok(id) => {
+            bump_library_version(&state);
+            Json(serde_json::json!({"id": id})).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
+    }
+}
+
+/// `POST /api/folders/:id/rename` — rename an existing folder.
+async fn post_rename_folder(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<FolderRenameBody>,
+) -> impl IntoResponse {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "folder name empty").into_response();
+    }
+    match state.db.rename_folder(id, name) {
+        Ok(()) => {
+            bump_library_version(&state);
+            (StatusCode::OK, "ok").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
+    }
+}
+
+/// `DELETE /api/folders/:id` — drop the folder. Member channels revert
+/// to "Unfiled" via the foreign-key cascade.
+async fn delete_folder(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match state.db.delete_folder(id) {
+        Ok(()) => {
+            // Mirror onto the live library snapshot.
+            let mut lib = state.library.lock().unwrap();
+            for ch in lib.iter_mut() {
+                if ch.folder_id == Some(id) {
+                    ch.folder_id = None;
+                }
+            }
+            drop(lib);
+            bump_library_version(&state);
+            (StatusCode::OK, "ok").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
+    }
+}
+
+/// `POST /api/channels/:platform/:handle/folder` — move a channel into a
+/// folder, or pass `null` to clear (back to "Unfiled").
+async fn post_assign_folder(
+    State(state): State<Arc<WebState>>,
+    Path((platform, handle)): Path<(String, String)>,
+    Json(body): Json<AssignFolderBody>,
+) -> impl IntoResponse {
+    if let Err(e) = state.db.set_channel_folder(&platform, &handle, body.folder_id) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response();
+    }
+    {
+        let mut lib = state.library.lock().unwrap();
+        for ch in lib.iter_mut() {
+            if ch.platform.dir_name() == platform && ch.name == handle {
+                ch.folder_id = body.folder_id;
+                break;
+            }
+        }
+    }
+    bump_library_version(&state);
+    (StatusCode::OK, "ok").into_response()
+}
+
 #[derive(Deserialize)]
 struct FlagToggleBody { value: bool }
 
@@ -1838,6 +1943,9 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     if let Ok(map) = db.get_all_channel_options() {
         library::apply_channel_options(&mut library, &map);
     }
+    if let Ok(folder_map) = db.get_all_channel_assignments() {
+        library::apply_channel_folders(&mut library, &folder_map);
+    }
     let watched = db.get_watched().unwrap_or_default();
     let positions = db.get_positions().unwrap_or_default();
 
@@ -1918,6 +2026,10 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/download", post(post_download))
         .route("/api/watched/:id", post(post_watched))
         .route("/api/videos/:id/flags/:flag", post(post_video_flag))
+        .route("/api/folders", post(post_create_folder))
+        .route("/api/folders/:id/rename", post(post_rename_folder))
+        .route("/api/folders/:id", axum::routing::delete(delete_folder))
+        .route("/api/channels/:platform/:handle/folder", post(post_assign_folder))
         .route("/api/resume/:id", post(post_resume))
         .route("/api/preview", get(get_preview))
         .route("/api/rescan", post(post_rescan))

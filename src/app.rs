@@ -120,6 +120,10 @@ pub struct App {
     /// Per-video flag sets (bookmark/favourite/waiting/archive). Loaded from
     /// SQLite at startup, mirrored into the DB on every toggle.
     flags: crate::database::VideoFlagsBundle,
+    /// Channel-organisation folders loaded from the `folders` table. The
+    /// sidebar groups channels by `Channel.folder_id`; channels with no
+    /// folder fall under "Unfiled".
+    folders: Vec<crate::database::FolderRecord>,
     resume_positions: HashMap<String, f64>,
     prev_job_states: HashMap<usize, JobState>,
     currently_playing: Option<String>,
@@ -155,6 +159,12 @@ pub struct App {
     show_channel_options: bool,
     /// `(platform, handle)` identifying the channel being edited.
     channel_options_target: Option<(Platform, String)>,
+    // Folder management dialog state.
+    show_folder_manager: bool,
+    folder_create_buffer: String,
+    // Move-to-folder picker state.
+    show_move_to_folder: bool,
+    move_to_folder_target: Option<(Platform, String)>,
     /// Editable form fields, mirroring [`DownloadOptions`] with string-typed
     /// "text" buffers so the user can type partial values (e.g. an empty
     /// limit-rate field) without us forcing zeroes back.
@@ -216,11 +226,15 @@ impl App {
         let db_path = channels_root.join("yt-offline.db");
         let db = Database::open(&db_path)
             .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
-        // Hydrate per-channel download options from SQLite onto the scanned
-        // library before publishing it to the UI.
+        // Hydrate per-channel download options + folder assignments from
+        // SQLite onto the scanned library before publishing it to the UI.
         if let Ok(map) = db.get_all_channel_options() {
             library::apply_channel_options(&mut library, &map);
         }
+        if let Ok(folder_map) = db.get_all_channel_assignments() {
+            library::apply_channel_folders(&mut library, &folder_map);
+        }
+        let folders = db.list_folders().unwrap_or_default();
         let watched = db.get_watched().unwrap_or_default();
         let flags = db.get_video_flags().unwrap_or_default();
         let resume_positions = db.get_positions().unwrap_or_default();
@@ -290,6 +304,7 @@ impl App {
             sort_mode: SortMode::Title,
             watched,
             flags,
+            folders,
             resume_positions,
             prev_job_states: HashMap::new(),
             currently_playing: None,
@@ -316,6 +331,10 @@ impl App {
             show_channel_options: false,
             channel_options_target: None,
             channel_options_form: ChannelOptionsForm::default(),
+            show_folder_manager: false,
+            folder_create_buffer: String::new(),
+            show_move_to_folder: false,
+            move_to_folder_target: None,
         }
     }
 
@@ -382,6 +401,10 @@ impl App {
         if let Ok(map) = self.db.get_all_channel_options() {
             library::apply_channel_options(&mut new_lib, &map);
         }
+        if let Ok(folder_map) = self.db.get_all_channel_assignments() {
+            library::apply_channel_folders(&mut new_lib, &folder_map);
+        }
+        self.folders = self.db.list_folders().unwrap_or_default();
         self.library = new_lib;
         self.music_library = library::scan_music(&self.music_root);
         self.sidebar_view = SidebarView::All;
@@ -990,8 +1013,65 @@ impl App {
                     // the channel index, open the dialog after the loop so we
                     // don't recursively borrow `self` from inside the closure.
                     let mut pending_open_options: Option<usize> = None;
+                    let mut pending_move_to_folder: Option<usize> = None;
+                    let mut pending_open_folder_manager = false;
 
-                    for i in 0..self.library.len() {
+                    // Build an ordered list of (header-or-channel-index) items
+                    // so folders render above platform sections. Channels with
+                    // a folder_id appear only in their folder; unfiled channels
+                    // still get the per-platform grouping.
+                    enum SidebarItem { FolderHeader(String, usize), FolderManageBtn, PlatformHeader(Platform), Channel(usize) }
+                    let mut items: Vec<SidebarItem> = Vec::new();
+                    let has_any_folder_or_assignment = !self.folders.is_empty()
+                        || self.library.iter().any(|c| c.folder_id.is_some());
+                    if has_any_folder_or_assignment {
+                        items.push(SidebarItem::FolderManageBtn);
+                        for f in &self.folders {
+                            let members: Vec<usize> = self.library.iter().enumerate()
+                                .filter(|(_, c)| c.folder_id == Some(f.id))
+                                .map(|(i, _)| i)
+                                .collect();
+                            items.push(SidebarItem::FolderHeader(f.name.clone(), members.len()));
+                            for i in members { items.push(SidebarItem::Channel(i)); }
+                        }
+                    } else {
+                        items.push(SidebarItem::FolderManageBtn);
+                    }
+                    let mut last_platform_marker: Option<Platform> = None;
+                    for (i, ch) in self.library.iter().enumerate() {
+                        if ch.folder_id.is_some() { continue; }
+                        if Some(ch.platform) != last_platform_marker {
+                            items.push(SidebarItem::PlatformHeader(ch.platform));
+                            last_platform_marker = Some(ch.platform);
+                        }
+                        items.push(SidebarItem::Channel(i));
+                    }
+
+                    for item in items {
+                        match item {
+                            SidebarItem::FolderManageBtn => {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("📁 Folders").small().weak());
+                                    if ui.small_button("manage").clicked() {
+                                        pending_open_folder_manager = true;
+                                    }
+                                });
+                            }
+                            SidebarItem::FolderHeader(name, count) => {
+                                ui.label(
+                                    egui::RichText::new(format!("  {name} ({count})"))
+                                        .small()
+                                        .weak(),
+                                );
+                            }
+                            SidebarItem::PlatformHeader(p) => {
+                                ui.label(
+                                    egui::RichText::new(format!("{} {}", p.icon(), p.display_name()))
+                                        .small()
+                                        .weak(),
+                                );
+                            }
+                            SidebarItem::Channel(i) => {
                         let (name, total, has_playlists, size_bytes, channel_url, platform) = {
                             let ch = &self.library[i];
                             // Prefer the stored `.source-url` over folder-name guessing so
@@ -1054,6 +1134,10 @@ impl App {
                                 pending_open_options = Some(channel_idx);
                                 ui.close_menu();
                             }
+                            if ui.button("📁 Move to folder…").clicked() {
+                                pending_move_to_folder = Some(channel_idx);
+                                ui.close_menu();
+                            }
                             if ui.button("📁 Open folder").clicked() {
                                 let path = self.library[i].path.clone();
                                 if let Err(e) = std::process::Command::new("xdg-open").arg(&path).spawn() {
@@ -1078,7 +1162,9 @@ impl App {
                                 }
                             }
                         }
-                    }
+                            } // close SidebarItem::Channel arm
+                        }     // close match item
+                    }         // close for item in items
 
                     if let Some(ci) = pending_open_options {
                         if let Some(ch) = self.library.get(ci) {
@@ -1086,6 +1172,16 @@ impl App {
                             self.channel_options_form = Self::options_to_form(&ch.download_options);
                             self.show_channel_options = true;
                         }
+                    }
+                    if let Some(ci) = pending_move_to_folder {
+                        if let Some(ch) = self.library.get(ci) {
+                            self.move_to_folder_target = Some((ch.platform, ch.name.clone()));
+                            self.show_move_to_folder = true;
+                        }
+                    }
+                    if pending_open_folder_manager {
+                        self.show_folder_manager = true;
+                        self.folder_create_buffer.clear();
                     }
 
                     // Process deferred right-click download action. The
@@ -1656,6 +1752,154 @@ impl App {
             }
         } else if cancel || !open {
             self.show_channel_options = false;
+        }
+    }
+
+    /// Folder management dialog — create / rename / delete folders.
+    fn folder_manager_window(&mut self, ctx: &egui::Context) {
+        if !self.show_folder_manager { return; }
+        let mut open = self.show_folder_manager;
+        let mut create_clicked = false;
+        let mut to_rename: Option<(i64, String)> = None;
+        let mut to_delete: Option<(i64, String, usize)> = None;
+        egui::Window::new("📁 Manage folders")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(400.0)
+            .show(ctx, |ui| {
+                if self.folders.is_empty() {
+                    ui.label(egui::RichText::new("No folders yet — create one below.").weak());
+                }
+                let folders = self.folders.clone();
+                for f in &folders {
+                    let member_count = self.library.iter()
+                        .filter(|c| c.folder_id == Some(f.id))
+                        .count();
+                    ui.horizontal(|ui| {
+                        ui.label(format!("📁 {} ({} channel{})", f.name, member_count, if member_count == 1 { "" } else { "s" }));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("🗑").on_hover_text("Delete folder").clicked() {
+                                to_delete = Some((f.id, f.name.clone(), member_count));
+                            }
+                            if ui.small_button("✏").on_hover_text("Rename folder").clicked() {
+                                to_rename = Some((f.id, f.name.clone()));
+                            }
+                        });
+                    });
+                    ui.separator();
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.folder_create_buffer)
+                            .hint_text("New folder name")
+                            .desired_width(220.0),
+                    );
+                    if ui.button("Create").clicked() { create_clicked = true; }
+                });
+            });
+        if create_clicked {
+            let name = self.folder_create_buffer.trim();
+            if !name.is_empty() {
+                if let Err(e) = self.db.create_folder(name) {
+                    self.status = format!("Create folder: {e}");
+                } else {
+                    self.folders = self.db.list_folders().unwrap_or_default();
+                    self.folder_create_buffer.clear();
+                    self.status = "Folder created".to_string();
+                }
+            }
+        }
+        if let Some((id, old_name)) = to_rename {
+            // Inline rename: stash the id in a small confirm-style flow.
+            // For brevity in v1 the rename is handled via a system prompt-free
+            // approach — replace the existing folder name with the create
+            // buffer if set, otherwise leave it as-is. (Future iteration:
+            // proper per-folder edit row.)
+            let new_name = self.folder_create_buffer.trim().to_string();
+            if !new_name.is_empty() {
+                if let Err(e) = self.db.rename_folder(id, &new_name) {
+                    self.status = format!("Rename folder: {e}");
+                } else {
+                    self.folders = self.db.list_folders().unwrap_or_default();
+                    self.status = format!("Renamed '{old_name}' → '{new_name}'");
+                    self.folder_create_buffer.clear();
+                }
+            } else {
+                self.status = format!("Type new name into the field below, then click ✏ on '{old_name}' again");
+            }
+        }
+        if let Some((id, name, count)) = to_delete {
+            // Hard delete — member channels revert to Unfiled.
+            if let Err(e) = self.db.delete_folder(id) {
+                self.status = format!("Delete folder: {e}");
+            } else {
+                for ch in self.library.iter_mut() {
+                    if ch.folder_id == Some(id) { ch.folder_id = None; }
+                }
+                self.folders = self.db.list_folders().unwrap_or_default();
+                self.status = format!("Deleted '{name}' ({count} channel{} unfiled)", if count == 1 { "" } else { "s" });
+            }
+        }
+        self.show_folder_manager = open;
+    }
+
+    /// Move-to-folder picker — small list of all folders + an "Unfiled"
+    /// row for clearing the assignment.
+    fn move_to_folder_window(&mut self, ctx: &egui::Context) {
+        if !self.show_move_to_folder { return; }
+        let Some((platform, handle)) = self.move_to_folder_target.clone() else {
+            self.show_move_to_folder = false;
+            return;
+        };
+        let mut open = self.show_move_to_folder;
+        let mut pick: Option<Option<i64>> = None;
+        let current = self.library.iter()
+            .find(|c| c.platform == platform && c.name == handle)
+            .and_then(|c| c.folder_id);
+        let folders = self.folders.clone();
+        egui::Window::new(format!("📁 Move \"{handle}\""))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(300.0)
+            .show(ctx, |ui| {
+                if ui.selectable_label(current.is_none(), "— Unfiled —").clicked() {
+                    pick = Some(None);
+                }
+                for f in &folders {
+                    if ui.selectable_label(current == Some(f.id), format!("📁 {}", f.name)).clicked() {
+                        pick = Some(Some(f.id));
+                    }
+                }
+                if folders.is_empty() {
+                    ui.label(egui::RichText::new("No folders yet — open Manage folders to create one.").small().weak());
+                }
+            });
+        if let Some(folder_id) = pick {
+            let platform_dir = platform.dir_name();
+            match self.db.set_channel_folder(platform_dir, &handle, folder_id) {
+                Ok(()) => {
+                    for ch in self.library.iter_mut() {
+                        if ch.platform == platform && ch.name == handle {
+                            ch.folder_id = folder_id;
+                            break;
+                        }
+                    }
+                    self.status = match folder_id {
+                        Some(id) => {
+                            let n = self.folders.iter().find(|f| f.id == id).map(|f| f.name.as_str()).unwrap_or("(unknown)");
+                            format!("Moved '{handle}' to '{n}'")
+                        }
+                        None => format!("Moved '{handle}' to Unfiled"),
+                    };
+                    self.show_move_to_folder = false;
+                }
+                Err(e) => self.status = format!("Move: {e}"),
+            }
+        } else {
+            self.show_move_to_folder = open;
         }
     }
 
@@ -2678,6 +2922,8 @@ impl eframe::App for App {
         self.maintenance_window(ctx);
         self.stats_window(ctx);
         self.channel_options_window(ctx);
+        self.folder_manager_window(ctx);
+        self.move_to_folder_window(ctx);
         self.detail_panel(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             self.video_list(ctx, ui);

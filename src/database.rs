@@ -22,6 +22,16 @@ use std::path::Path;
 type Pool = r2d2::Pool<SqliteConnectionManager>;
 type PooledConn = r2d2::PooledConnection<SqliteConnectionManager>;
 
+/// Persisted folder row from the `folders` table. Used by the sidebar +
+/// folder-management UI; channels reference folders via the separate
+/// `channel_assignments` table.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct FolderRecord {
+    pub id: i64,
+    pub name: String,
+    pub position: i64,
+}
+
 /// In-memory representation of the `video_flags` table. Each set holds the
 /// video IDs that have the named flag enabled — kept small (a few hundred
 /// to a few thousand entries in practice).
@@ -129,6 +139,19 @@ impl Database {
                 waiting   INTEGER NOT NULL DEFAULT 0,
                 archive   INTEGER NOT NULL DEFAULT 0,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS channel_assignments (
+                platform TEXT NOT NULL,
+                handle   TEXT NOT NULL,
+                folder_id INTEGER NOT NULL,
+                PRIMARY KEY (platform, handle),
+                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE
             );",
         )?;
         Ok(())
@@ -190,6 +213,95 @@ impl Database {
         );
         conn.execute(&sql, rusqlite::params![video_id, value as i32])?;
         Ok(())
+    }
+
+    /// Create a new folder with the given name. Returns the new folder's id.
+    /// Trying to insert a duplicate name surfaces the SQLite UNIQUE error.
+    pub fn create_folder(&self, name: &str) -> Result<i64> {
+        let conn = self.conn();
+        conn.execute("INSERT INTO folders (name) VALUES (?1)", [name])?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Rename an existing folder. No-op when the new name already matches.
+    pub fn rename_folder(&self, id: i64, new_name: &str) -> Result<()> {
+        let conn = self.conn();
+        conn.execute("UPDATE folders SET name = ?1 WHERE id = ?2", rusqlite::params![new_name, id])?;
+        Ok(())
+    }
+
+    /// Delete a folder. Associated channel_assignments rows cascade-delete
+    /// via the foreign-key constraint, so each member channel reverts to
+    /// "Unfiled".
+    pub fn delete_folder(&self, id: i64) -> Result<()> {
+        let conn = self.conn();
+        // Enable FK cascade for this connection — SQLite has it off by default.
+        conn.execute("PRAGMA foreign_keys = ON", [])?;
+        conn.execute("DELETE FROM folders WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// List every folder, ordered by `position` then `id` so the sidebar
+    /// has a deterministic order even before drag-to-reorder ships.
+    pub fn list_folders(&self) -> Result<Vec<FolderRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT id, name, position FROM folders ORDER BY position, id")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(FolderRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                position: row.get(2)?,
+            })
+        })?;
+        Ok(rows.filter_map(std::result::Result::ok).collect())
+    }
+
+    /// Set or clear a channel's folder assignment. `folder_id = None`
+    /// deletes the row so the channel reverts to "Unfiled".
+    pub fn set_channel_folder(
+        &self,
+        platform: &str,
+        handle: &str,
+        folder_id: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.conn();
+        match folder_id {
+            Some(fid) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO channel_assignments (platform, handle, folder_id)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![platform, handle, fid],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM channel_assignments WHERE platform = ?1 AND handle = ?2",
+                    [platform, handle],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Bulk fetch of every channel's folder assignment as a
+    /// `((platform, handle) → folder_id)` map. Used by the library scanner
+    /// to populate `Channel.folder_id` after a rescan.
+    pub fn get_all_channel_assignments(&self) -> Result<HashMap<(String, String), i64>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT platform, handle, folder_id FROM channel_assignments",
+        )?;
+        let map = stmt
+            .query_map([], |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .filter_map(std::result::Result::ok)
+            .map(|(k, v)| (k, v))
+            .collect();
+        Ok(map)
     }
 
     /// Bulk fetch every video's flag set, grouped by flag. Used at startup +
