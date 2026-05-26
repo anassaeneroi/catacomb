@@ -149,6 +149,11 @@ pub struct App {
     // File picker → chosen cookies.txt path arrives here from a dialog thread.
     cookies_pick_tx: Sender<PathBuf>,
     cookies_pick_rx: Receiver<PathBuf>,
+    // "Save library backup" target path picked by an rfd dialog on a
+    // background thread, polled in update() the same way cookies_pick_rx
+    // is.
+    backup_save_tx: Sender<PathBuf>,
+    backup_save_rx: Receiver<PathBuf>,
     // Maintenance (library health) window
     show_maintenance: bool,
     health_report: Option<crate::maintenance::HealthReport>,
@@ -254,6 +259,7 @@ impl App {
         let source_url_str = config.web.source_url.clone().unwrap_or_default();
 
         let (cookies_pick_tx, cookies_pick_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (backup_save_tx, backup_save_rx) = std::sync::mpsc::channel::<PathBuf>();
 
         let (thumb_request_tx, thumb_request_rx) = std::sync::mpsc::channel::<PathBuf>();
         let (thumb_result_tx, thumb_result_rx) =
@@ -324,6 +330,8 @@ impl App {
             settings_cookies_status: String::new(),
             cookies_pick_tx,
             cookies_pick_rx,
+            backup_save_tx,
+            backup_save_rx,
             show_maintenance: false,
             health_report: None,
             show_stats: false,
@@ -623,6 +631,46 @@ impl App {
         text
     }
 
+    /// Pick a random unwatched, downloaded video and open it in the
+    /// configured player. Mirrors the web 🎲 shuffle. Falls back to
+    /// "any downloaded video" when everything's already been watched.
+    fn shuffle_play(&mut self) {
+        use rand::seq::SliceRandom;
+        // Collect (video_path, id) of every downloaded video, partitioned by
+        // watched status. We borrow library briefly, then drop before calling
+        // play_with_tracking (which takes &mut self).
+        let (unwatched, all): (Vec<(PathBuf, String)>, Vec<(PathBuf, String)>) = {
+            let mut unwatched = Vec::new();
+            let mut all = Vec::new();
+            for ch in &self.library {
+                for v in ch.all_videos() {
+                    if let Some(p) = &v.video_path {
+                        all.push((p.clone(), v.id.clone()));
+                        if !self.watched.contains(&v.id) {
+                            unwatched.push((p.clone(), v.id.clone()));
+                        }
+                    }
+                }
+            }
+            (unwatched, all)
+        };
+        let mut rng = rand::thread_rng();
+        let pick = if !unwatched.is_empty() {
+            unwatched.choose(&mut rng).cloned()
+        } else if !all.is_empty() {
+            self.status = "Everything is watched — playing a random one anyway".to_string();
+            all.choose(&mut rng).cloned()
+        } else {
+            None
+        };
+        if let Some((path, id)) = pick {
+            self.selected_video = Some(id.clone());
+            self.play_with_tracking(&path, id);
+        } else {
+            self.status = "No downloaded videos to shuffle from".to_string();
+        }
+    }
+
     fn play_with_tracking(&mut self, path: &Path, video_id: String) {
         let cmd = self.config.player.command.clone();
         // Only enable IPC for genuine mpv invocations — substring matching
@@ -870,6 +918,12 @@ impl App {
                 ui.separator();
                 if ui.button("⟳ Rescan").clicked() {
                     self.rescan();
+                }
+                if ui.button("🎲 Shuffle")
+                    .on_hover_text("Play a random unwatched downloaded video")
+                    .clicked()
+                {
+                    self.shuffle_play();
                 }
                 let dl_label = if self.show_downloads { "⬇ Downloads ▸" } else { "⬇ Downloads" };
                 if ui.selectable_label(self.show_downloads, dl_label).clicked() {
@@ -2202,6 +2256,49 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.separator();
+                ui.heading("Backup");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Saves a copy of yt-offline.db (watched / favourites / bookmarks / \
+                         waiting / channel-options / folders). Restore by copying it back \
+                         into your channels directory before launch.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                if ui.button("💾 Save library backup…").clicked() {
+                    // Open the save dialog off the UI thread, mirroring the
+                    // cookies file-picker pattern.
+                    let tx = self.backup_save_tx.clone();
+                    let default_name = format!(
+                        "yt-offline-{}.db",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs()).unwrap_or(0),
+                    );
+                    std::thread::spawn(move || {
+                        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            let picked = rt.block_on(async {
+                                rfd::AsyncFileDialog::new()
+                                    .set_title("Save library backup")
+                                    .set_file_name(&default_name)
+                                    .add_filter("SQLite database", &["db"])
+                                    .save_file()
+                                    .await
+                            });
+                            if let Some(f) = picked {
+                                let _ = tx.send(f.path().to_path_buf());
+                            }
+                        }
+                    });
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
                 ui.heading("Source code (AGPL §13)");
                 ui.add_space(4.0);
                 ui.label("Repository URL (shown in web UI footer):");
@@ -2976,6 +3073,18 @@ impl eframe::App for App {
                     Err(e) => self.status = format!("Cookies error: {e}"),
                 },
                 Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
+            }
+        }
+        // User picked a backup destination — copy yt-offline.db there.
+        while let Ok(dest) = self.backup_save_rx.try_recv() {
+            let src = self.channels_root.join("yt-offline.db");
+            match std::fs::copy(&src, &dest) {
+                Ok(bytes) => self.status = format!(
+                    "Backup saved ({} → {})",
+                    format_size(bytes),
+                    dest.display(),
+                ),
+                Err(e) => self.status = format!("Backup failed: {e}"),
             }
         }
 

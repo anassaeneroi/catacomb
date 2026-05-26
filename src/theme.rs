@@ -37,7 +37,10 @@ fn dracula() -> egui::Visuals {
     v.selection.bg_fill = hex(0x44475a);
     v.selection.stroke = Stroke::new(1.0, hex(0xbd93f9));
     v.hyperlink_color = hex(0x8be9fd);
-    v.override_text_color = Some(hex(0xf8f8f2));
+    // Don't override text globally — let each widget's fg_stroke pick the
+    // contrast-appropriate colour for its state. With an override the
+    // "active" purple button (light bg) would render light-on-light text.
+    v.override_text_color = None;
     v.widgets.noninteractive.bg_fill = hex(0x343746);
     v.widgets.noninteractive.weak_bg_fill = hex(0x2f3242);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, hex(0xf8f8f2));
@@ -67,14 +70,18 @@ fn trans() -> egui::Visuals {
     v.selection.bg_fill = hex(0x55cdfc);
     v.selection.stroke = Stroke::new(1.0, hex(0x2288cc));
     v.hyperlink_color = hex(0x0055aa);
-    v.override_text_color = Some(hex(0xcc0066)); // hot pink text throughout
+    // Previously this forced hot-pink text everywhere; that wrecked
+    // contrast on the pink inactive button bg. Per-widget fg_stroke now
+    // handles colour per state.
+    v.override_text_color = None;
     v.widgets.noninteractive.bg_fill = hex(0xfce8f2);
     v.widgets.noninteractive.weak_bg_fill = hex(0xfdf4f8);
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, hex(0x444444));
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, hex(0x2a1430));
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, hex(0xf7a8b8));
     v.widgets.inactive.bg_fill = hex(0xf7a8b8);
     v.widgets.inactive.weak_bg_fill = hex(0xfcccd8);
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, hex(0x333333));
+    // Pure black against pink so button labels stay legible.
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, hex(0x000000));
     v.widgets.hovered.bg_fill = hex(0x55cdfc);
     v.widgets.hovered.weak_bg_fill = hex(0x88ddfd);
     v.widgets.hovered.fg_stroke = Stroke::new(1.5, hex(0x111111));
@@ -97,7 +104,9 @@ fn emo_nocturnal() -> egui::Visuals {
     v.selection.bg_fill = hex(0xff0090);
     v.selection.stroke = Stroke::new(1.0, hex(0xff66c0));
     v.hyperlink_color = hex(0x00f5ff);
-    v.override_text_color = Some(hex(0xe8e8e8));
+    // Without an override the "active" hot-pink button gets its intended
+    // pure-white text instead of a washed-out light grey on hot pink.
+    v.override_text_color = None;
     v.widgets.noninteractive.bg_fill = hex(0x1a1a1a);
     v.widgets.noninteractive.weak_bg_fill = hex(0x141414);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, hex(0xe0e0e0));
@@ -129,7 +138,9 @@ fn emo_coffin() -> egui::Visuals {
     v.selection.bg_fill = hex(0x8b0000);
     v.selection.stroke = Stroke::new(1.0, hex(0xcc2222));
     v.hyperlink_color = hex(0xcc2222);
-    v.override_text_color = Some(hex(0xc0c0c0));
+    // Per-widget fg_stroke handles colour — the explicit values below already
+    // contrast properly against each state's bg_fill.
+    v.override_text_color = None;
     v.widgets.noninteractive.bg_fill = hex(0x1a0018);
     v.widgets.noninteractive.weak_bg_fill = hex(0x140012);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, hex(0xb0b0b0));
