@@ -131,6 +131,7 @@
     <option value="size-desc">Largest</option>
   </select>
   <span id="hdr-stats"></span>
+  <button onclick="shufflePlay()" title="Play a random unwatched video">🎲</button>
   <button onclick="rescan()" title="Rescan library">⟳</button>
   <button onclick="openStats()" title="Library statistics">📊</button>
   <button onclick="openMaintenance()" title="Library health">🩺</button>
@@ -870,6 +871,22 @@ async function rescan(){try{await api('/api/rescan',{method:'POST'});await loadL
 function findVideo(id){for(const ch of library)for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])if(v.id===id)return v;return null}
 
 /* ── Player ─────────────────────────────────────────────────────── */
+// Pick a random unwatched, downloaded video from the whole library and
+// open it in the player. Falls back to "any unwatched" if nothing's
+// downloaded yet, and finally to "any video" if everything's watched.
+function shufflePlay(){
+  const all=library.flatMap(ch=>[...ch.videos,...ch.playlists.flatMap(p=>p.videos)]);
+  const pickFrom=arr=>arr[Math.floor(Math.random()*arr.length)];
+  const pool=all.filter(v=>!v.watched&&v.has_video&&v.video_url);
+  let pick;
+  if(pool.length){pick=pickFrom(pool)}
+  else{
+    const downloaded=all.filter(v=>v.has_video&&v.video_url);
+    if(downloaded.length){pick=pickFrom(downloaded);setStatus('Everything is watched — playing a random one anyway')}
+    else{setStatus('No downloaded videos to shuffle from');return}
+  }
+  playVideo(pick.id);
+}
 function playVideo(id){
   const v=findVideo(id);if(!v||!v.video_url)return;
   currentPlayingId=id;
