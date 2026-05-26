@@ -71,6 +71,11 @@ pub struct WebState {
     pub downloader: Mutex<Downloader>,
     /// Set of video IDs the user has marked as watched (persisted in SQLite).
     pub watched: Mutex<HashSet<String>>,
+    /// Bookmark / favourite / waiting / archive flag sets, hydrated from the
+    /// `video_flags` SQLite table at startup. Each set holds the video IDs
+    /// with the named flag enabled. Drives the smart-folder sidebar entries
+    /// and the per-card action icons.
+    pub flags: Mutex<crate::database::VideoFlagsBundle>,
     /// Last known playback position per video ID in seconds (persisted in SQLite).
     pub positions: Mutex<HashMap<String, f64>>,
     /// SQLite handle. Internally backed by an `r2d2` pool, so concurrent
@@ -198,6 +203,12 @@ struct VideoInfo {
     has_video: bool,
     has_live_chat: bool,
     watched: bool,
+    /// Smart-folder flags. Populated from the in-memory
+    /// [`WebState::flags`] sets at response-build time.
+    bookmark: bool,
+    favourite: bool,
+    waiting: bool,
+    archive: bool,
     video_url: Option<String>,
     thumb_url: Option<String>,
     subtitles: Vec<SubtitleInfo>,
@@ -867,6 +878,7 @@ async fn build_library_payload(state: &Arc<WebState>) -> LibraryResponse {
     let lib = state.library.lock().unwrap();
     let watched = state.watched.lock().unwrap();
     let positions = state.positions.lock().unwrap();
+    let flags = state.flags.lock().unwrap();
     // file_url() now resolves relative to library_root (= parent of
     // channels_root) so non-YouTube platforms are reachable at
     // `/files/<platform>/<creator>/<video>`.
@@ -910,6 +922,10 @@ async fn build_library_payload(state: &Arc<WebState>) -> LibraryResponse {
             has_video: v.video_path.is_some(),
             has_live_chat: v.has_live_chat,
             watched: watched.contains(&v.id),
+            bookmark: flags.bookmark.contains(&v.id),
+            favourite: flags.favourite.contains(&v.id),
+            waiting: flags.waiting.contains(&v.id),
+            archive: flags.archive.contains(&v.id),
             video_url,
             thumb_url,
             subtitles,
@@ -1419,6 +1435,57 @@ async fn get_chapters(
     (StatusCode::OK, Json(serde_json::json!({"chapters": chapters}))).into_response()
 }
 
+/// `GET /api/comments/:id` — extract the `comments` array from a video's
+/// info.json sidecar and return it as JSON.
+///
+/// yt-dlp populates the field when `--write-comments` is in effect (see
+/// [`crate::download_options::DownloadOptions::fetch_comments`]); the
+/// response is `{"comments": []}` for videos that haven't had comments
+/// captured yet. The endpoint filters down to the fields the UI actually
+/// renders so a 10k-comment dump on a popular video stays manageable.
+async fn get_comments(
+    State(state): State<Arc<WebState>>,
+    Path(video_id): Path<String>,
+) -> impl IntoResponse {
+    let info_path = {
+        let lib = state.library.lock().unwrap();
+        find_video_info_path(&lib, &video_id)
+    };
+    let Some(info_path) = info_path else {
+        return (StatusCode::NOT_FOUND, "no info.json").into_response();
+    };
+    let Ok(text) = std::fs::read_to_string(&info_path) else {
+        return (StatusCode::OK, Json(serde_json::json!({"comments": []}))).into_response();
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return (StatusCode::OK, Json(serde_json::json!({"comments": []}))).into_response();
+    };
+    let comments = val.get("comments")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter().filter_map(|c| {
+                let id = c.get("id").and_then(|v| v.as_str())?.to_string();
+                let text = c.get("text").and_then(|v| v.as_str())?.to_string();
+                let author = c.get("author").and_then(|v| v.as_str()).map(String::from);
+                let likes = c.get("like_count").and_then(|v| v.as_i64());
+                let parent = c.get("parent").and_then(|v| v.as_str()).map(String::from);
+                let time = c.get("_time_text").and_then(|v| v.as_str())
+                    .or_else(|| c.get("time_text").and_then(|v| v.as_str()))
+                    .map(String::from);
+                Some(serde_json::json!({
+                    "id": id,
+                    "author": author,
+                    "text": text,
+                    "likes": likes,
+                    "parent": parent,
+                    "time": time,
+                }))
+            }).collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (StatusCode::OK, Json(serde_json::json!({"comments": comments}))).into_response()
+}
+
 async fn get_metadata(
     State(state): State<Arc<WebState>>,
     Path(video_id): Path<String>,
@@ -1532,6 +1599,42 @@ async fn post_maintenance_repair(
 }
 
 /// `POST /api/scheduler/run` — trigger an immediate scheduled channel check.
+#[derive(Deserialize)]
+struct FlagToggleBody { value: bool }
+
+/// `POST /api/videos/:id/flags/:flag` — set or clear a single per-video
+/// flag (`bookmark` / `favourite` / `waiting` / `archive`). The watched
+/// flag is handled by the separate `POST /api/watched/:id` endpoint for
+/// backward compatibility.
+async fn post_video_flag(
+    State(state): State<Arc<WebState>>,
+    Path((video_id, flag)): Path<(String, String)>,
+    Json(body): Json<FlagToggleBody>,
+) -> impl IntoResponse {
+    let set_ref: &str = match flag.as_str() {
+        "bookmark" | "favourite" | "waiting" | "archive" => flag.as_str(),
+        _ => return (StatusCode::BAD_REQUEST, "unknown flag").into_response(),
+    };
+    if let Err(e) = state.db.set_video_flag(&video_id, set_ref, body.value) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    // Mirror into the in-memory bundle so the next GET /api/library reflects
+    // the change without waiting for a rescan.
+    {
+        let mut bundle = state.flags.lock().unwrap();
+        let target = match set_ref {
+            "bookmark" => &mut bundle.bookmark,
+            "favourite" => &mut bundle.favourite,
+            "waiting" => &mut bundle.waiting,
+            "archive" => &mut bundle.archive,
+            _ => unreachable!("validated above"),
+        };
+        if body.value { target.insert(video_id); } else { target.remove(&video_id); }
+    }
+    bump_library_version(&state);
+    (StatusCode::OK, "ok").into_response()
+}
+
 /// `GET /api/channels/:platform/:handle/options` — fetch the stored
 /// download-option overrides for a single channel. Returns the default
 /// (empty) options when nothing is stored.
@@ -1751,11 +1854,13 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     let bind_addr = config.web.bind.clone();
 
     let password_required_initial = db.get_setting("password_hash").ok().flatten().is_some();
+    let flags = db.get_video_flags().unwrap_or_default();
     let state = Arc::new(WebState {
         library: Mutex::new(library),
         downloader: Mutex::new(downloader),
         watched: Mutex::new(watched),
         positions: Mutex::new(positions),
+        flags: Mutex::new(flags),
         db,
         channels_root: channels_root.clone(),
         library_root: library_root.clone(),
@@ -1812,6 +1917,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/progress", get(get_progress))
         .route("/api/download", post(post_download))
         .route("/api/watched/:id", post(post_watched))
+        .route("/api/videos/:id/flags/:flag", post(post_video_flag))
         .route("/api/resume/:id", post(post_resume))
         .route("/api/preview", get(get_preview))
         .route("/api/rescan", post(post_rescan))
@@ -1819,6 +1925,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/jobs/:idx", axum::routing::delete(post_remove_job))
         .route("/api/description/:id", get(get_description))
         .route("/api/chapters/:id", get(get_chapters))
+        .route("/api/comments/:id", get(get_comments))
         .route("/api/metadata/:id", get(get_metadata))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/transcode/:id", get(get_transcode))

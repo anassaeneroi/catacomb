@@ -72,6 +72,13 @@ pub struct DownloadOptions {
     /// to Tartube's `extra_cmd_string`.
     #[serde(default)]
     pub extra_args: Vec<String>,
+
+    /// Embed video comments into the info.json sidecar (yt-dlp
+    /// `--write-comments`). Off by default because comment download is slow
+    /// — yt-dlp paginates through thousands of replies for popular videos.
+    /// When on, the web UI's player modal exposes a Comments tab.
+    #[serde(default)]
+    pub fetch_comments: bool,
 }
 
 impl DownloadOptions {
@@ -118,6 +125,9 @@ impl DownloadOptions {
             if !arg.is_empty() {
                 cmd.arg(arg);
             }
+        }
+        if self.fetch_comments {
+            cmd.arg("--write-comments");
         }
     }
 

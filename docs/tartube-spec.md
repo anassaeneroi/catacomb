@@ -580,13 +580,22 @@ the following are all true.
       Editor surfaces in both UIs.*
 - [ ] **Folder hierarchy** with N-level nesting, drag-to-reparent, and
       per-folder default options.
-- [ ] **Smart folders** for Bookmarks / Favourites / Waiting / New /
-      Live / Missing, on top of our existing Recent + Continue
-      Watching.
-- [ ] **Per-video state flags** persisted (extending the SQLite
-      schema): `bookmark`, `favourite`, `archive`, `waiting`,
-      `block`, plus a `missing` derived flag from the maintenance
-      scan.
+- [x] **Smart folders** for Bookmarks / Favourites / Waiting on top of
+      Recent + Continue Watching. *v1 shipped 2026-05-25: each smart
+      folder appears in the sidebar only when at least one video carries
+      the matching flag, so a fresh install isn't polluted with empty
+      rows. Driven by the in-memory flag bundle so no SQL per render.*
+- [x] **Per-video state flags** persisted in a new `video_flags`
+      SQLite table with columns `bookmark`, `favourite`, `waiting`,
+      `archive`. Loaded as four `HashSet<String>` at startup, mutated
+      via `POST /api/videos/:id/flags/:flag` (web) or the per-card
+      action buttons (desktop). `archive` is wired through but UI is
+      deferred until we actually have auto-deletion to gate.
+- [x] **Comments capture** via the new `fetch_comments` field in
+      DownloadOptions. Adds `--write-comments` to the yt-dlp command
+      when set. New `GET /api/comments/:id` reads the comments array
+      out of info.json and the web player modal's 💬 button renders a
+      threaded viewer.
 - [ ] **Profiles** — saved named groups of channels with a "Download
       this profile" action.
 - [ ] **Tidy + Refresh** unified into a single bidirectional sync

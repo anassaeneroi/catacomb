@@ -22,6 +22,17 @@ use std::path::Path;
 type Pool = r2d2::Pool<SqliteConnectionManager>;
 type PooledConn = r2d2::PooledConnection<SqliteConnectionManager>;
 
+/// In-memory representation of the `video_flags` table. Each set holds the
+/// video IDs that have the named flag enabled — kept small (a few hundred
+/// to a few thousand entries in practice).
+#[derive(Default, Clone, Debug)]
+pub struct VideoFlagsBundle {
+    pub bookmark: HashSet<String>,
+    pub favourite: HashSet<String>,
+    pub waiting: HashSet<String>,
+    pub archive: HashSet<String>,
+}
+
 /// Default pool size for a file-backed database. Small intentionally — the
 /// app is single-user and our queries are short. A handful is plenty.
 const FILE_POOL_SIZE: u32 = 4;
@@ -110,6 +121,14 @@ impl Database {
                 options_json TEXT NOT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (platform, handle)
+            );
+            CREATE TABLE IF NOT EXISTS video_flags (
+                video_id  TEXT PRIMARY KEY,
+                bookmark  INTEGER NOT NULL DEFAULT 0,
+                favourite INTEGER NOT NULL DEFAULT 0,
+                waiting   INTEGER NOT NULL DEFAULT 0,
+                archive   INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
         )?;
         Ok(())
@@ -147,6 +166,58 @@ impl Database {
             [platform, handle],
         )?;
         Ok(())
+    }
+
+    /// Set or clear a single per-video flag. `flag` must be one of
+    /// `"bookmark"`, `"favourite"`, `"waiting"`, `"archive"` — the only
+    /// columns in `video_flags`. Returns an error if `flag` is unknown so a
+    /// typo doesn't silently no-op.
+    ///
+    /// A row is upserted on first call; once any flag on a video is set,
+    /// the row sticks around even after all flags are cleared. This keeps
+    /// the schema simple at the cost of a few orphan rows.
+    pub fn set_video_flag(&self, video_id: &str, flag: &str, value: bool) -> Result<()> {
+        let col = match flag {
+            "bookmark" | "favourite" | "waiting" | "archive" => flag,
+            _ => return Err(rusqlite::Error::InvalidParameterName(flag.to_string())),
+        };
+        let conn = self.conn();
+        // SQLite doesn't allow parameterised column names; we validated `col`
+        // against an allow-list above so direct interpolation is safe.
+        let sql = format!(
+            "INSERT INTO video_flags (video_id, {col}) VALUES (?1, ?2)
+             ON CONFLICT(video_id) DO UPDATE SET {col} = ?2, updated_at = CURRENT_TIMESTAMP"
+        );
+        conn.execute(&sql, rusqlite::params![video_id, value as i32])?;
+        Ok(())
+    }
+
+    /// Bulk fetch every video's flag set, grouped by flag. Used at startup +
+    /// after rescan to hydrate the in-memory caches. The four returned sets
+    /// hold the IDs of videos with each flag set to true.
+    pub fn get_video_flags(&self) -> Result<VideoFlagsBundle> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT video_id, bookmark, favourite, waiting, archive FROM video_flags",
+        )?;
+        let mut bundle = VideoFlagsBundle::default();
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i32>(1)? != 0,
+                row.get::<_, i32>(2)? != 0,
+                row.get::<_, i32>(3)? != 0,
+                row.get::<_, i32>(4)? != 0,
+            ))
+        })?;
+        for row in rows.flatten() {
+            let (id, b, f, w, a) = row;
+            if b { bundle.bookmark.insert(id.clone()); }
+            if f { bundle.favourite.insert(id.clone()); }
+            if w { bundle.waiting.insert(id.clone()); }
+            if a { bundle.archive.insert(id.clone()); }
+        }
+        Ok(bundle)
     }
 
     /// Bulk fetch of every channel's options, returned as

@@ -49,6 +49,12 @@ enum SidebarView {
     ContinueWatching,
     /// Activity feed — recent additions across all channels, sorted by mtime.
     Recent,
+    /// Smart folder: videos with `favourite` flag set.
+    Favourites,
+    /// Smart folder: videos with `bookmark` flag set.
+    Bookmarks,
+    /// Smart folder: videos with `waiting` flag set.
+    Waiting,
     Music,
 }
 
@@ -64,6 +70,9 @@ struct Card {
     upload_date: Option<String>,
     mtime_unix: Option<u64>,
     watched: bool,
+    bookmark: bool,
+    favourite: bool,
+    waiting: bool,
     resume_pos: Option<f64>,
 }
 
@@ -108,6 +117,9 @@ pub struct App {
     card_density: f32,
     sort_mode: SortMode,
     watched: HashSet<String>,
+    /// Per-video flag sets (bookmark/favourite/waiting/archive). Loaded from
+    /// SQLite at startup, mirrored into the DB on every toggle.
+    flags: crate::database::VideoFlagsBundle,
     resume_positions: HashMap<String, f64>,
     prev_job_states: HashMap<usize, JobState>,
     currently_playing: Option<String>,
@@ -156,6 +168,7 @@ pub struct App {
 struct ChannelOptionsForm {
     quality_idx: usize,           // 0=default, 1=Best, 2=1080p, 3=720p, 4=480p, 5=360p
     audio_only: bool,
+    fetch_comments: bool,
     limit_rate_kb: String,
     min_filesize_mb: String,
     max_filesize_mb: String,
@@ -209,6 +222,7 @@ impl App {
             library::apply_channel_options(&mut library, &map);
         }
         let watched = db.get_watched().unwrap_or_default();
+        let flags = db.get_video_flags().unwrap_or_default();
         let resume_positions = db.get_positions().unwrap_or_default();
 
         let music_root = channels_root.with_file_name("music");
@@ -275,6 +289,7 @@ impl App {
             card_density: 1.0,
             sort_mode: SortMode::Title,
             watched,
+            flags,
             resume_positions,
             prev_job_states: HashMap::new(),
             currently_playing: None,
@@ -319,6 +334,7 @@ impl App {
         ChannelOptionsForm {
             quality_idx,
             audio_only: opts.audio_only,
+            fetch_comments: opts.fetch_comments,
             limit_rate_kb: num(opts.limit_rate_kb),
             min_filesize_mb: num(opts.min_filesize_mb),
             max_filesize_mb: num(opts.max_filesize_mb),
@@ -348,6 +364,7 @@ impl App {
         crate::download_options::DownloadOptions {
             quality,
             audio_only: f.audio_only,
+            fetch_comments: f.fetch_comments,
             limit_rate_kb: parse_num(&f.limit_rate_kb),
             min_filesize_mb: parse_num(&f.min_filesize_mb),
             max_filesize_mb: parse_num(&f.max_filesize_mb),
@@ -430,6 +447,9 @@ impl App {
                 upload_date: v.upload_date.clone(),
                 mtime_unix: v.mtime_unix,
                 watched: self.watched.contains(&v.id),
+                bookmark: self.flags.bookmark.contains(&v.id),
+                favourite: self.flags.favourite.contains(&v.id),
+                waiting: self.flags.waiting.contains(&v.id),
                 resume_pos,
             });
         };
@@ -464,6 +484,24 @@ impl App {
                 }
                 cards.sort_by(|a, b| b.mtime_unix.unwrap_or(0).cmp(&a.mtime_unix.unwrap_or(0)));
                 cards.truncate(100);
+                return cards;
+            }
+            SidebarView::Favourites | SidebarView::Bookmarks | SidebarView::Waiting => {
+                // Smart folders. Filter the whole library by the matching
+                // flag bundle set.
+                let set = match self.sidebar_view {
+                    SidebarView::Favourites => &self.flags.favourite,
+                    SidebarView::Bookmarks => &self.flags.bookmark,
+                    SidebarView::Waiting => &self.flags.waiting,
+                    _ => unreachable!("outer match guarantees the variant"),
+                };
+                for ch in &self.library {
+                    for v in ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter())) {
+                        if set.contains(&v.id) {
+                            add_video(&mut cards, &ch.name, v);
+                        }
+                    }
+                }
                 return cards;
             }
             SidebarView::All => {
@@ -635,6 +673,28 @@ impl App {
                 self.watched.remove(video_id);
             }
         }
+    }
+
+    /// Flip a per-video flag (`"bookmark"`, `"favourite"`, `"waiting"`, or
+    /// `"archive"`) and persist the change. Unknown flag names are ignored
+    /// rather than panic so a typo surfaces in the UI as a no-op.
+    fn toggle_video_flag(&mut self, video_id: &str, flag: &'static str) {
+        let set = match flag {
+            "bookmark" => &mut self.flags.bookmark,
+            "favourite" => &mut self.flags.favourite,
+            "waiting" => &mut self.flags.waiting,
+            "archive" => &mut self.flags.archive,
+            _ => return,
+        };
+        let now_set = !set.contains(video_id);
+        if let Err(e) = self.db.set_video_flag(video_id, flag, now_set) {
+            self.status = format!("Flag {flag}: {e}");
+            return;
+        }
+        if now_set { set.insert(video_id.to_string()); } else { set.remove(video_id); }
+        // Bust the cards cache so the action icons + smart-folder counts
+        // refresh on the next paint.
+        self.cards_cache_key = None;
     }
 
     fn start_web_server(&mut self) {
@@ -870,6 +930,43 @@ impl App {
                         .clicked()
                     {
                         self.sidebar_view = SidebarView::Recent;
+                        self.selected_video = None;
+                    }
+
+                    // Smart-folder sidebar entries — each shown only when at
+                    // least one video carries the matching flag. Keeps a
+                    // brand-new install free of empty rows.
+                    let fav_count = self.flags.favourite.len();
+                    if fav_count > 0 && ui
+                        .selectable_label(
+                            self.sidebar_view == SidebarView::Favourites,
+                            format!("★ Favourites  ({fav_count})"),
+                        )
+                        .clicked()
+                    {
+                        self.sidebar_view = SidebarView::Favourites;
+                        self.selected_video = None;
+                    }
+                    let bmk_count = self.flags.bookmark.len();
+                    if bmk_count > 0 && ui
+                        .selectable_label(
+                            self.sidebar_view == SidebarView::Bookmarks,
+                            format!("🔖 Bookmarks  ({bmk_count})"),
+                        )
+                        .clicked()
+                    {
+                        self.sidebar_view = SidebarView::Bookmarks;
+                        self.selected_video = None;
+                    }
+                    let wait_count = self.flags.waiting.len();
+                    if wait_count > 0 && ui
+                        .selectable_label(
+                            self.sidebar_view == SidebarView::Waiting,
+                            format!("⏳ Waiting  ({wait_count})"),
+                        )
+                        .clicked()
+                    {
+                        self.sidebar_view = SidebarView::Waiting;
                         self.selected_video = None;
                     }
 
@@ -1451,6 +1548,11 @@ impl App {
 
                     ui.label("Audio-only");
                     ui.checkbox(&mut form.audio_only, "Extract audio (best format)");
+                    ui.end_row();
+
+                    ui.label("Fetch comments");
+                    ui.checkbox(&mut form.fetch_comments, "Embed --write-comments into info.json")
+                        .on_hover_text("Slow on popular videos. Once captured, comments are browsable from the player modal in the web UI.");
                     ui.end_row();
 
                     ui.label("Bandwidth cap (KB/s)");
@@ -2308,6 +2410,9 @@ impl App {
                 let mut clicked_card = false;
                 let mut play_card = false;
                 let mut toggle_watched_card = false;
+                // Flag toggles deferred outside the row closure so we can
+                // mutate `self.flags` + DB without fighting the borrow checker.
+                let mut toggle_flag_card: Option<&'static str> = None;
 
                 ui.horizontal(|ui| {
                     let (rect, resp) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
@@ -2446,6 +2551,18 @@ impl App {
                                 if ui.small_button(w_label).on_hover_text("Toggle watched").clicked() {
                                     toggle_watched_card = true;
                                 }
+                                let fav_label = if card.favourite { "★" } else { "☆" };
+                                if ui.small_button(fav_label).on_hover_text("Toggle favourite").clicked() {
+                                    toggle_flag_card = Some("favourite");
+                                }
+                                let bm_label = if card.bookmark { "🔖" } else { "🔖̲" };
+                                if ui.small_button(bm_label).on_hover_text("Toggle bookmark").clicked() {
+                                    toggle_flag_card = Some("bookmark");
+                                }
+                                let wait_label = if card.waiting { "⏳" } else { "⏰" };
+                                if ui.small_button(wait_label).on_hover_text("Toggle waiting").clicked() {
+                                    toggle_flag_card = Some("waiting");
+                                }
                             }
                         });
                     });
@@ -2472,6 +2589,10 @@ impl App {
                 if toggle_watched_card {
                     let id = card.id.clone();
                     self.toggle_watched(&id);
+                }
+                if let Some(flag) = toggle_flag_card {
+                    let id = card.id.clone();
+                    self.toggle_video_flag(&id, flag);
                 }
 
                 ui.separator();

@@ -174,6 +174,8 @@
 <script>
 'use strict';
 let library=[], channelUrls=[], activeChannelIdx=null, activePlaylistIdx=null, showContinue=false, showChannels=false, showMusic=false, showRecent=false;
+// Smart-folder view selectors — at most one is true at a time.
+let showFavourites=false, showBookmarks=false, showWaiting=false;
 let musicTracks=[];
 let bulkMode=false, selected=new Set(), selectedId=null;
 let currentPlayingId=null, saveTimer=null;
@@ -219,11 +221,18 @@ function renderSidebar(){
   const contVids=allVids.filter(v=>v.resume_pos&&v.resume_pos>5&&!v.watched);
   const total=library.reduce((s,c)=>s+c.total_videos,0);
   const hasDated=allVids.some(v=>v.mtime_unix);
+  const favCount=allVids.filter(v=>v.favourite).length;
+  const bmkCount=allVids.filter(v=>v.bookmark).length;
+  const waitCount=allVids.filter(v=>v.waiting).length;
+  const anySmart=showFavourites||showBookmarks||showWaiting;
   let h=`<div class="sidebar-label">Library</div>`;
   if(contVids.length)h+=`<div class="ch-item${showContinue?' active':''}" onclick="setContinue()">▶ Continue (${contVids.length})</div>`;
   if(hasDated)h+=`<div class="ch-item${showRecent?' active':''}" onclick="setRecent()">🕒 Recent additions</div>`;
+  if(favCount)h+=`<div class="ch-item${showFavourites?' active':''}" onclick="setFavourites()">★ Favourites (${favCount})</div>`;
+  if(bmkCount)h+=`<div class="ch-item${showBookmarks?' active':''}" onclick="setBookmarks()">🔖 Bookmarks (${bmkCount})</div>`;
+  if(waitCount)h+=`<div class="ch-item${showWaiting?' active':''}" onclick="setWaiting()">⏳ Waiting (${waitCount})</div>`;
   h+=`<div class="ch-item${showChannels?' active':''}" onclick="setChannels()">⊟ Channels (${library.length})</div>`;
-  h+=`<div class="ch-item${!showContinue&&!showChannels&&!showRecent&&activeChannelIdx===null&&!showMusic?' active':''}" onclick="setView(null,null)">⊞ All (${total})</div>`;
+  h+=`<div class="ch-item${!showContinue&&!showChannels&&!showRecent&&!anySmart&&activeChannelIdx===null&&!showMusic?' active':''}" onclick="setView(null,null)">⊞ All (${total})</div>`;
   h+=`<div class="ch-item${showMusic?' active':''}" onclick="setMusic()">♫ Music (${musicTracks.length})</div>`;
   // Group sidebar entries by platform so a multi-platform library reads as
   // distinct sections rather than one flat list.
@@ -248,11 +257,21 @@ function renderSidebar(){
   }
   el.innerHTML=h;
 }
-function setContinue(){showContinue=true;showChannels=false;showMusic=false;showRecent=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setRecent(){showRecent=true;showContinue=false;showChannels=false;showMusic=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setChannels(){showChannels=true;showContinue=false;showMusic=false;showRecent=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setView(ci,pi){showContinue=false;showChannels=false;showMusic=false;showRecent=false;activeChannelIdx=ci;activePlaylistIdx=pi;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setMusic(){showMusic=true;showContinue=false;showChannels=false;showRecent=false;activeChannelIdx=null;activePlaylistIdx=null;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+// Reset every view selector to off — call before flipping the new one on.
+// Centralising avoids the combinatorial drift of seven view-mode booleans.
+function resetViewSelectors(){
+  showContinue=false;showRecent=false;showChannels=false;showMusic=false;
+  showFavourites=false;showBookmarks=false;showWaiting=false;
+  activeChannelIdx=null;activePlaylistIdx=null;
+}
+function setContinue(){resetViewSelectors();showContinue=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setRecent(){resetViewSelectors();showRecent=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setFavourites(){resetViewSelectors();showFavourites=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setBookmarks(){resetViewSelectors();showBookmarks=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setWaiting(){resetViewSelectors();showWaiting=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setChannels(){resetViewSelectors();showChannels=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setView(ci,pi){resetViewSelectors();activeChannelIdx=ci;activePlaylistIdx=pi;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+function setMusic(){resetViewSelectors();showMusic=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
 
 /* ── Grid ───────────────────────────────────────────────────────── */
 function currentVideos(){
@@ -275,6 +294,15 @@ function currentVideos(){
           vids.push({...v,channel:ch.name});
     vids.sort((a,b)=>(b.mtime_unix||0)-(a.mtime_unix||0));
     return vids.slice(0,100);
+  }
+  // Smart folders driven by the per-video flag bits served in /api/library.
+  if(showFavourites||showBookmarks||showWaiting){
+    const want = showFavourites ? 'favourite' : showBookmarks ? 'bookmark' : 'waiting';
+    for(const ch of library)
+      for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
+        if(v[want]&&(!q||v.title.toLowerCase().includes(q)||v.id.includes(q)))
+          vids.push({...v,channel:ch.name});
+    return vids;
   }
   for(let i=0;i<library.length;i++){
     const ch=library[i];
@@ -321,7 +349,10 @@ function renderGrid(){
       <div class="card-meta">${meta||'&nbsp;'}</div>
       <div class="card-foot" onclick="event.stopPropagation()">
         ${playBtn}
-        <button onclick="toggleWatched('${v.id}')">${v.watched?'✓':'○'}</button>
+        <button onclick="toggleWatched('${v.id}')" title="Watched">${v.watched?'✓':'○'}</button>
+        <button onclick="toggleFlag('${v.id}','favourite',this)" title="Favourite" style="${v.favourite?'color:#facc15':''}">${v.favourite?'★':'☆'}</button>
+        <button onclick="toggleFlag('${v.id}','bookmark',this)" title="Bookmark" style="${v.bookmark?'color:var(--accent)':''}">🔖</button>
+        <button onclick="toggleFlag('${v.id}','waiting',this)" title="Waiting list" style="${v.waiting?'color:var(--accent)':''}">⏳</button>
       </div>
     </div>`;
   }).join('');
@@ -329,6 +360,29 @@ function renderGrid(){
 
 /* ── Watched / bulk ─────────────────────────────────────────────── */
 async function toggleWatched(id){try{await api('/api/watched/'+id,{method:'POST'});await loadLibrary()}catch(e){setStatus('Error: '+e.message)}}
+
+/* ── Per-video flags ────────────────────────────────────────────── */
+async function toggleFlag(videoId,flag,btn){
+  // Optimistically flip the visual state; reload from server afterwards.
+  const v=findVideo(videoId); if(!v){setStatus('Video not found');return}
+  const newValue=!v[flag];
+  v[flag]=newValue;
+  try{
+    const r=await api(`/api/videos/${encodeURIComponent(videoId)}/flags/${encodeURIComponent(flag)}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({value:newValue})
+    });
+    if(!r.ok)throw new Error(await r.text());
+    // Reload to update sidebar counts; the in-memory `library` already
+    // reflects the toggle thanks to the optimistic update above.
+    await loadLibrary();
+  }catch(e){
+    // Undo on failure.
+    v[flag]=!newValue;
+    setStatus('Error: '+e.message);
+  }
+}
 function renderChannelGrid(){
   const q=(document.getElementById('search')?.value||'').toLowerCase();
   const grid=document.getElementById('grid');
@@ -515,6 +569,9 @@ async function openChannelOptions(idx){
     <div class="settings-row"><label>Audio-only</label>
       <input type="checkbox" id="opt-audio" ${opts.audio_only?'checked':''}></div>
     <div class="settings-hint" style="margin-bottom:4px">Useful for music channels — saves disk + skips video re-encode.</div>
+    <div class="settings-row"><label>Fetch comments</label>
+      <input type="checkbox" id="opt-comments" ${opts.fetch_comments?'checked':''}></div>
+    <div class="settings-hint" style="margin-bottom:4px">Adds <code>--write-comments</code>. Embeds the comment tree into info.json — slow for popular videos but enables the Comments tab in the player.</div>
     <div class="settings-row"><label>Bandwidth cap (KB/s)</label>
       <input type="number" id="opt-rate" value="${opts.limit_rate_kb||''}" placeholder="off" min="0" style="width:90px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
     <div class="settings-row"><label>Min size (MB)</label>
@@ -550,6 +607,7 @@ function readChannelOptionsForm(){
   return {
     quality:q?q:null,
     audio_only:document.getElementById('opt-audio')?.checked||false,
+    fetch_comments:document.getElementById('opt-comments')?.checked||false,
     limit_rate_kb:intOrNull('opt-rate'),
     min_filesize_mb:intOrNull('opt-minsz'),
     max_filesize_mb:intOrNull('opt-maxsz'),
@@ -604,7 +662,11 @@ function playVideo(id){
   ].filter(Boolean).join(' · ');
   const metaLine=headerMeta?`<span style="font-size:11px;color:var(--muted);margin-left:8px">${esc(headerMeta)}</span>`:'';
   bg.innerHTML=`<div class="modal">
-    <div class="modal-hdr"><h2>${esc(v.title)}${metaLine}</h2><button onclick="closeModal(this.closest('.modal-bg'))">✕ Close</button></div>
+    <div class="modal-hdr">
+      <h2>${esc(v.title)}${metaLine}</h2>
+      <button onclick="openComments('${esc(id)}')" title="Comments">💬</button>
+      <button onclick="closeModal(this.closest('.modal-bg'))">✕ Close</button>
+    </div>
     <div class="modal-body"><video id="player-video" src="${esc(safeUrl(v.video_url))}" controls autoplay crossorigin="anonymous">${tracks}</video>${chapPane}</div>
   </div>`;
   document.body.appendChild(bg);
@@ -652,6 +714,48 @@ async function loadChapters(id){
   }catch{}
 }
 function jumpToChapter(s){const v=document.getElementById('player-video');if(v){v.currentTime=s;v.play()}}
+
+/* ── Comments viewer ───────────────────────────────────────────── */
+async function openComments(videoId){
+  const bg=document.createElement('div');bg.className='modal-bg';
+  bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  bg.innerHTML=`<div class="modal" style="max-width:640px;width:100%">
+    <div class="modal-hdr"><h2>💬 Comments</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div id="comments-body" style="overflow-y:auto;max-height:75vh"><em style="color:var(--muted)">Loading…</em></div>
+  </div>`;
+  document.body.appendChild(bg);
+  try{
+    const r=await(await api('/api/comments/'+encodeURIComponent(videoId))).json();
+    renderComments(r.comments||[]);
+  }catch(e){
+    document.getElementById('comments-body').innerHTML=`<div style="color:#f87171">Failed to load comments: ${esc(e.message)}</div>`;
+  }
+}
+function renderComments(list){
+  const body=document.getElementById('comments-body');if(!body)return;
+  if(!list.length){
+    body.innerHTML='<div style="color:var(--muted);padding:12px">No comments captured for this video. Enable "Fetch comments" in this channel\'s options + re-download.</div>';
+    return;
+  }
+  // Build a tree from parent ids. Top-level = parent missing / not in set.
+  const byId=new Map(list.map(c=>[c.id,{...c,children:[]}]));
+  const roots=[];
+  for(const c of byId.values()){
+    if(c.parent && byId.has(c.parent)) byId.get(c.parent).children.push(c);
+    else roots.push(c);
+  }
+  const render=(c,depth)=>{
+    const indent=depth*16;
+    const author=c.author?`<strong>${esc(c.author)}</strong>`:'<em>unknown</em>';
+    const meta=[c.time,c.likes!=null?`${c.likes} likes`:null].filter(Boolean).join(' · ');
+    const replies=c.children.length?c.children.map(r=>render(r,depth+1)).join(''):'';
+    return `<div style="padding:6px 10px 6px ${10+indent}px;border-bottom:1px solid var(--border);font-size:13px;line-height:1.4">
+      <div style="margin-bottom:2px">${author}${meta?` <span style="color:var(--muted);font-size:11px">· ${esc(meta)}</span>`:''}</div>
+      <div style="white-space:pre-wrap;word-wrap:break-word">${esc(c.text)}</div>
+    </div>${replies}`;
+  };
+  body.innerHTML=`<div style="font-size:11px;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--border)">${list.length} comment${list.length===1?'':'s'}</div>`+roots.map(c=>render(c,0)).join('');
+}
 
 /* ── Select / Details ───────────────────────────────────────────── */
 function selectVideo(id){selectedId=selectedId===id?null:id;renderGrid();renderDetails()}
