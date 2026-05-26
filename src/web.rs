@@ -1681,6 +1681,64 @@ async fn delete_folder(
     }
 }
 
+/// `GET /api/backup/db` — stream the SQLite database file back as an
+/// attachment so the user can keep an offsite copy of their watched /
+/// flag / channel-options / folder state.
+///
+/// We intentionally don't snapshot config.toml or cookies.txt here:
+/// config is short and easy to recreate, cookies.txt contains live
+/// session credentials that shouldn't fly over the wire unprompted, and
+/// keeping the endpoint to one file means no extra deps for tar/zip.
+async fn get_backup_db(State(state): State<Arc<WebState>>) -> Response {
+    let db_path = state.channels_root.join("yt-offline.db");
+    let Ok(bytes) = std::fs::read(&db_path) else {
+        return (StatusCode::NOT_FOUND, "no db file on disk (running in-memory?)").into_response();
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let filename = format!("yt-offline-{now_secs}.db");
+    (
+        [
+            (header::CONTENT_TYPE, "application/x-sqlite3".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        bytes,
+    ).into_response()
+}
+
+/// `POST /api/folders/:id/check` — fire a re-check on every channel in
+/// the folder. Mirrors `POST /api/scheduler/run` but scoped to a single
+/// folder's members. Each channel's stored download_options + quality
+/// override apply as if the user had hit "Check for new videos" by hand.
+async fn post_check_folder(
+    State(state): State<Arc<WebState>>,
+    Path(folder_id): Path<i64>,
+) -> impl IntoResponse {
+    if state.downloader.lock().unwrap().any_running() {
+        return (StatusCode::CONFLICT, "downloads already running").into_response();
+    }
+    let scheduled: Vec<(String, crate::download_options::DownloadOptions)> =
+        state.library.lock().unwrap()
+            .iter()
+            .filter(|ch| ch.folder_id == Some(folder_id))
+            .map(|ch| (crate::downloader::recheck_url(ch), ch.download_options.clone()))
+            .collect();
+    if scheduled.is_empty() {
+        return (StatusCode::OK, "no channels in folder").into_response();
+    }
+    let count = scheduled.len();
+    let mut dl = state.downloader.lock().unwrap();
+    for (url, opts) in scheduled {
+        let info = classify_url(&url);
+        let quality = opts.quality.unwrap_or(DownloadQuality::Best);
+        dl.start(url, &info, true, quality, false, Some(&opts));
+    }
+    (StatusCode::ACCEPTED, format!("started {count} channel checks")).into_response()
+}
+
 /// `POST /api/channels/:platform/:handle/folder` — move a channel into a
 /// folder, or pass `null` to clear (back to "Unfiled").
 async fn post_assign_folder(
@@ -2028,6 +2086,8 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/videos/:id/flags/:flag", post(post_video_flag))
         .route("/api/folders", post(post_create_folder))
         .route("/api/folders/:id/rename", post(post_rename_folder))
+        .route("/api/folders/:id/check", post(post_check_folder))
+        .route("/api/backup/db", get(get_backup_db))
         .route("/api/folders/:id", axum::routing::delete(delete_folder))
         .route("/api/channels/:platform/:handle/folder", post(post_assign_folder))
         .route("/api/resume/:id", post(post_resume))

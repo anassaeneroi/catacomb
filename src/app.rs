@@ -1762,6 +1762,7 @@ impl App {
         let mut create_clicked = false;
         let mut to_rename: Option<(i64, String)> = None;
         let mut to_delete: Option<(i64, String, usize)> = None;
+        let mut to_check: Option<i64> = None;
         egui::Window::new("📁 Manage folders")
             .open(&mut open)
             .collapsible(false)
@@ -1782,8 +1783,13 @@ impl App {
                             if ui.small_button("🗑").on_hover_text("Delete folder").clicked() {
                                 to_delete = Some((f.id, f.name.clone(), member_count));
                             }
-                            if ui.small_button("✏").on_hover_text("Rename folder").clicked() {
+                            if ui.small_button("✏").on_hover_text("Rename (type new name in field below first)").clicked() {
                                 to_rename = Some((f.id, f.name.clone()));
+                            }
+                            if member_count > 0
+                                && ui.small_button("⬇").on_hover_text("Check every channel in this folder for new videos").clicked()
+                            {
+                                to_check = Some(f.id);
                             }
                         });
                     });
@@ -1829,6 +1835,23 @@ impl App {
             } else {
                 self.status = format!("Type new name into the field below, then click ✏ on '{old_name}' again");
             }
+        }
+        if let Some(folder_id) = to_check {
+            // Check every member channel for new videos, applying that
+            // channel's own DownloadOptions / quality override just like
+            // a scheduled re-check would.
+            let scheduled: Vec<(String, crate::download_options::DownloadOptions)> =
+                self.library.iter()
+                    .filter(|ch| ch.folder_id == Some(folder_id))
+                    .map(|ch| (crate::downloader::recheck_url(ch), ch.download_options.clone()))
+                    .collect();
+            let count = scheduled.len();
+            for (url, opts) in scheduled {
+                let info = classify_url(&url);
+                let quality = opts.quality.unwrap_or(DownloadQuality::Best);
+                self.downloader.start(url, &info, true, quality, false, Some(&opts));
+            }
+            self.status = format!("Folder check: started {count} channel download{}", if count == 1 { "" } else { "s" });
         }
         if let Some((id, name, count)) = to_delete {
             // Hard delete — member channels revert to Unfiled.
