@@ -144,8 +144,11 @@
     <div class="toolbar">
       <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="bulk" onchange="toggleBulk()"> Select</label>
       <span id="bulk-actions" style="display:none;gap:6px">
-        <button onclick="bulkWatched(true)">✓ Mark watched</button>
+        <button onclick="bulkWatched(true)">✓ Watched</button>
         <button onclick="bulkWatched(false)">○ Unwatch</button>
+        <button onclick="bulkFlag('favourite')" title="Mark every selected video as favourite">★ Favourite</button>
+        <button onclick="bulkFlag('bookmark')" title="Mark every selected video as bookmarked">🔖 Bookmark</button>
+        <button onclick="bulkFlag('waiting')" title="Add every selected video to the waiting list">⏳ Waiting</button>
         <span id="sel-count" style="font-size:12px;color:var(--muted)"></span>
       </span>
     </div>
@@ -323,7 +326,7 @@ function currentVideos(){
   if(showContinue){
     for(const ch of library)
       for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
-        if(v.resume_pos&&v.resume_pos>5&&!v.watched&&(!q||v.title.toLowerCase().includes(q)||v.id.includes(q)))
+        if(v.resume_pos&&v.resume_pos>5&&!v.watched&&(!q||matchesSearch(v,ch?.name||v.channel,q)))
           vids.push({...v,channel:ch.name});
     vids.sort((a,b)=>(b.resume_pos||0)-(a.resume_pos||0));
     return vids;
@@ -332,7 +335,7 @@ function currentVideos(){
     // Most-recently-modified across the whole library, capped at 100.
     for(const ch of library)
       for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
-        if(v.mtime_unix&&(!q||v.title.toLowerCase().includes(q)||v.id.includes(q)))
+        if(v.mtime_unix&&(!q||matchesSearch(v,ch?.name||v.channel,q)))
           vids.push({...v,channel:ch.name});
     vids.sort((a,b)=>(b.mtime_unix||0)-(a.mtime_unix||0));
     return vids.slice(0,100);
@@ -342,7 +345,7 @@ function currentVideos(){
     const want = showFavourites ? 'favourite' : showBookmarks ? 'bookmark' : 'waiting';
     for(const ch of library)
       for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
-        if(v[want]&&(!q||v.title.toLowerCase().includes(q)||v.id.includes(q)))
+        if(v[want]&&(!q||matchesSearch(v,ch?.name||v.channel,q)))
           vids.push({...v,channel:ch.name});
     return vids;
   }
@@ -351,7 +354,7 @@ function currentVideos(){
     if(activeChannelIdx!==null&&i!==activeChannelIdx)continue;
     const pool=activePlaylistIdx!==null?(ch.playlists[activePlaylistIdx]?.videos||[]):[...ch.videos,...ch.playlists.flatMap(p=>p.videos)];
     for(const v of pool)
-      if(!q||v.title.toLowerCase().includes(q)||v.id.includes(q))vids.push({...v,channel:ch.name});
+      if(!q||matchesSearch(v,ch?.name||v.channel,q))vids.push({...v,channel:ch.name});
   }
   if(sort==='date-desc')vids.sort((a,b)=>(b.upload_date||'').localeCompare(a.upload_date||''));
   if(sort==='date-asc')vids.sort((a,b)=>{const ax=a.upload_date||'￿',bx=b.upload_date||'￿';return ax.localeCompare(bx)});
@@ -483,6 +486,22 @@ function playAudio(id,title,url){
 function toggleBulk(){bulkMode=document.getElementById('bulk').checked;selected.clear();document.getElementById('bulk-actions').style.display=bulkMode?'flex':'none';renderGrid()}
 function toggleSel(id,on){if(on)selected.add(id);else selected.delete(id);document.getElementById('sel-count').textContent=selected.size+' selected'}
 async function bulkWatched(on){await Promise.all([...selected].map(id=>api('/api/watched/'+id,{method:'POST'})));selected.clear();await loadLibrary()}
+async function bulkFlag(flag){
+  // Set the chosen flag on every selected video in parallel, then refresh.
+  // Flag stays on (toggle-off in bulk is rarely what users want — opt for
+  // explicit setting only, matching the desktop behaviour).
+  const ids=[...selected];
+  if(!ids.length){setStatus('Nothing selected');return}
+  try{
+    await Promise.all(ids.map(id=>api(
+      `/api/videos/${encodeURIComponent(id)}/flags/${encodeURIComponent(flag)}`,
+      {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:true})}
+    )));
+    setStatus(`${ids.length} marked ${flag}`);
+    selected.clear();
+    await loadLibrary();
+  }catch(e){setStatus('Error: '+e.message)}
+}
 
 /* ── Download preview ───────────────────────────────────────────── */
 async function previewDownload(){
@@ -1430,6 +1449,15 @@ schedulePoll(600);
 function fmtDur(s){s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return h?`${h}:${p(m)}:${p(sec)}`:`${m}:${p(sec)}`}
 function fmtSize(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';if(b>=1048576)return Math.round(b/1048576)+' MB';return Math.round(b/1024)+' KB'}
 function fmtDate(d){if(!d||d.length<8)return d||'';return d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8)}
+// Title + id + channel-name match for the filter input. Lowercase once
+// per call so callers don't have to thread the lowercased value around.
+function matchesSearch(v,chName,q){
+  if(!q)return true;
+  const t=(v.title||'').toLowerCase();
+  const id=(v.id||'').toLowerCase();
+  const ch=(chName||'').toLowerCase();
+  return t.includes(q)||id.includes(q)||ch.includes(q);
+}
 function p(n){return String(n).padStart(2,'0')}
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 /* Sanitize a URL before inserting into an href/src attribute. Allows

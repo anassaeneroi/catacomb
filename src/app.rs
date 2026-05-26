@@ -451,9 +451,14 @@ impl App {
         let mut cards = Vec::new();
 
         let add_video = |cards: &mut Vec<Card>, ch_name: &str, v: &library::Video| {
+            // Search matches title / id / channel name. Description matching
+            // would require reading the .description sidecar per-video on every
+            // keystroke — punted to a future "load descriptions into the
+            // search index on rescan" pass if users ask for it.
             if !query.is_empty()
                 && !v.title.to_lowercase().contains(&query)
                 && !v.id.to_lowercase().contains(&query)
+                && !ch_name.to_lowercase().contains(&query)
             {
                 return;
             }
@@ -759,6 +764,32 @@ impl App {
             ids.len(),
             if ids.len() == 1 { "video" } else { "videos" },
             if watched { "" } else { "un" }
+        );
+    }
+
+    /// Bulk-apply a single per-video flag (`"bookmark"` / `"favourite"` /
+    /// `"waiting"` / `"archive"`) across the current selection. Same shape
+    /// as [`bulk_mark_watched`], extended for the smart-folder flag set.
+    fn bulk_set_flag(&mut self, flag: &'static str, value: bool) {
+        let ids: Vec<String> = self.bulk_selected.iter().cloned().collect();
+        let count = ids.len();
+        for id in &ids {
+            if self.db.set_video_flag(id, flag, value).is_err() { continue; }
+            let set = match flag {
+                "bookmark" => &mut self.flags.bookmark,
+                "favourite" => &mut self.flags.favourite,
+                "waiting" => &mut self.flags.waiting,
+                "archive" => &mut self.flags.archive,
+                _ => return,
+            };
+            if value { set.insert(id.clone()); } else { set.remove(id); }
+        }
+        self.bulk_selected.clear();
+        self.cards_cache_key = None;
+        self.status = format!(
+            "{count} {} {}{flag}",
+            if count == 1 { "video" } else { "videos" },
+            if value { "→ " } else { "un" },
         );
     }
 
@@ -2623,12 +2654,24 @@ impl App {
                 ui.separator();
                 let n = self.bulk_selected.len();
                 ui.label(format!("{n} selected"));
-                if ui.button("✓ Mark watched").clicked() {
+                if ui.button("✓ Watched").clicked() {
                     self.bulk_mark_watched(true);
                     self.bulk_mode = false;
                 }
-                if ui.button("○ Mark unwatched").clicked() {
+                if ui.button("○ Unwatched").clicked() {
                     self.bulk_mark_watched(false);
+                    self.bulk_mode = false;
+                }
+                if ui.button("★ Favourite").on_hover_text("Mark every selected video as favourite").clicked() {
+                    self.bulk_set_flag("favourite", true);
+                    self.bulk_mode = false;
+                }
+                if ui.button("🔖 Bookmark").on_hover_text("Mark every selected video as bookmarked").clicked() {
+                    self.bulk_set_flag("bookmark", true);
+                    self.bulk_mode = false;
+                }
+                if ui.button("⏳ Waiting").on_hover_text("Add every selected video to the waiting list").clicked() {
+                    self.bulk_set_flag("waiting", true);
                     self.bulk_mode = false;
                 }
             }
