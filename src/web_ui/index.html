@@ -120,8 +120,8 @@
 <header>
   <button id="menu-btn" onclick="toggleSidebar()">☰</button>
   <h1>yt-offline</h1>
-  <input type="search" id="search" placeholder="Filter…" oninput="renderGrid()">
-  <select id="sort" onchange="renderGrid()">
+  <input type="search" id="search" placeholder="Filter…" oninput="saveUiState();renderGrid()">
+  <select id="sort" onchange="saveUiState();renderGrid()">
     <option value="date-desc">Newest</option>
     <option value="date-asc">Oldest</option>
     <option value="title">Title</option>
@@ -310,14 +310,69 @@ function resetViewSelectors(){
   showFavourites=false;showBookmarks=false;showWaiting=false;
   activeChannelIdx=null;activePlaylistIdx=null;
 }
-function setContinue(){resetViewSelectors();showContinue=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setRecent(){resetViewSelectors();showRecent=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setFavourites(){resetViewSelectors();showFavourites=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setBookmarks(){resetViewSelectors();showBookmarks=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setWaiting(){resetViewSelectors();showWaiting=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setChannels(){resetViewSelectors();showChannels=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setView(ci,pi){resetViewSelectors();activeChannelIdx=ci;activePlaylistIdx=pi;selected.clear();closeSidebar();renderSidebar();renderGrid()}
-function setMusic(){resetViewSelectors();showMusic=true;selected.clear();closeSidebar();renderSidebar();renderGrid()}
+
+// Persist the user's current view + search + sort to localStorage so
+// reloading the tab doesn't blow away their context. Cheap to write on
+// every interaction — localStorage is synchronous but the payload is tiny.
+function currentViewToken(){
+  if(showContinue)return 'continue';
+  if(showRecent)return 'recent';
+  if(showFavourites)return 'favourites';
+  if(showBookmarks)return 'bookmarks';
+  if(showWaiting)return 'waiting';
+  if(showChannels)return 'channels';
+  if(showMusic)return 'music';
+  if(activeChannelIdx!=null)return `channel:${library[activeChannelIdx]?.name||''}|${activePlaylistIdx??''}`;
+  return 'all';
+}
+function saveUiState(){
+  try{
+    localStorage.setItem('ui-state',JSON.stringify({
+      view:currentViewToken(),
+      search:document.getElementById('search')?.value||'',
+      sort:document.getElementById('sort')?.value||'date-desc',
+    }));
+  }catch{}
+}
+function restoreUiState(){
+  let raw;try{raw=JSON.parse(localStorage.getItem('ui-state')||'null')}catch{}
+  if(!raw)return;
+  const s=document.getElementById('search'); if(s&&raw.search)s.value=raw.search;
+  const sortEl=document.getElementById('sort'); if(sortEl&&raw.sort)sortEl.value=raw.sort;
+  // Map the persisted view back to the matching show* boolean. Channels
+  // are stored by name (not by index) so a library re-order doesn't land
+  // the user on the wrong channel.
+  resetViewSelectors();
+  switch(raw.view){
+    case 'continue':showContinue=true;break;
+    case 'recent':showRecent=true;break;
+    case 'favourites':showFavourites=true;break;
+    case 'bookmarks':showBookmarks=true;break;
+    case 'waiting':showWaiting=true;break;
+    case 'channels':showChannels=true;break;
+    case 'music':showMusic=true;break;
+    case 'all':break; // default
+    default:
+      if(raw.view&&raw.view.startsWith('channel:')){
+        const rest=raw.view.slice('channel:'.length);
+        const [name,plStr]=rest.split('|');
+        const idx=library.findIndex(c=>c.name===name);
+        if(idx>=0){
+          activeChannelIdx=idx;
+          const pl=parseInt(plStr,10);
+          activePlaylistIdx=Number.isFinite(pl)?pl:null;
+        }
+      }
+  }
+}
+function setContinue(){resetViewSelectors();showContinue=true;selected.clear();saveUiState();closeSidebar();renderSidebar();renderGrid()}
+function setRecent(){resetViewSelectors();showRecent=true;selected.clear();saveUiState();closeSidebar();renderSidebar();renderGrid()}
+function setFavourites(){resetViewSelectors();showFavourites=true;selected.clear();saveUiState();closeSidebar();renderSidebar();renderGrid()}
+function setBookmarks(){resetViewSelectors();showBookmarks=true;selected.clear();saveUiState();closeSidebar();renderSidebar();renderGrid()}
+function setWaiting(){resetViewSelectors();showWaiting=true;selected.clear();saveUiState();closeSidebar();renderSidebar();renderGrid()}
+function setChannels(){resetViewSelectors();showChannels=true;selected.clear();saveUiState();closeSidebar();renderSidebar();renderGrid()}
+function setView(ci,pi){resetViewSelectors();activeChannelIdx=ci;activePlaylistIdx=pi;selected.clear();saveUiState();closeSidebar();renderSidebar();renderGrid()}
+function setMusic(){resetViewSelectors();showMusic=true;selected.clear();saveUiState();closeSidebar();renderSidebar();renderGrid()}
 
 /* ── Grid ───────────────────────────────────────────────────────── */
 function currentVideos(){
@@ -1536,7 +1591,16 @@ async function loadSourceNotice(){
 
 /* ── Init ───────────────────────────────────────────────────────── */
 applyTheme(localStorage.getItem('theme')||'dark');
-loadLibrary();
+// Library load is async, but the sort + search inputs can be restored
+// immediately. View selectors need the library array to be populated
+// before we can resolve `channel:<name>` back to an index — do that
+// after loadLibrary() resolves.
+(async()=>{
+  await loadLibrary();
+  restoreUiState();
+  renderSidebar();
+  renderGrid();
+})();
 loadSourceNotice();
 </script>
 </body>
