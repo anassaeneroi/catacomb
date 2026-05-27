@@ -423,6 +423,359 @@ impl Database {
             .collect();
         Ok(map)
     }
+
+    /// Idempotently merge another yt-offline database into this one.
+    ///
+    /// Designed for "Import library backup…" — the user uploads a snapshot
+    /// produced by `GET /api/backup/db`, and we merge its rows in without
+    /// disturbing the channel files on disk. Safe to re-run with the same
+    /// backup (or a chain of overlapping backups): conflicting rows resolve
+    /// deterministically by recency, flag-OR, or first-write-wins depending
+    /// on the table's semantics.
+    ///
+    /// # Schema validation
+    ///
+    /// Before merging, we verify each expected table exists in the backup.
+    /// A backup from an older schema is rejected outright — partial merges
+    /// could leave the DB in a state where some features see stale data.
+    /// The caller can offer a "do it anyway" path later if needed.
+    ///
+    /// # Per-table merge rules
+    ///
+    /// - `watched`: keep the later `watched_at`. INSERT-OR-IGNORE then
+    ///   UPDATE-when-newer covers both directions.
+    /// - `positions`: keep the later `updated_at` (same pattern).
+    /// - `settings`: skip — `password_hash` and other settings are
+    ///   *machine-local* per AGPL-deployment context. Importing them
+    ///   would re-authorize an old password / overwrite the current
+    ///   source_url with a stale value. The user can re-set them.
+    /// - `channel_options`: keep the later `updated_at`.
+    /// - `video_flags`: bitwise OR each flag column. If you favourited a
+    ///   video on either side, it stays favourited.
+    /// - `folders`: insert when the same name doesn't already exist.
+    ///   Folder *contents* may differ between backups; we keep the
+    ///   current side as authoritative and ignore the backup's
+    ///   `channel_assignments` for any folder we already have.
+    /// - `channel_assignments`: insert when the (platform, handle) pair
+    ///   isn't already assigned. Doesn't change existing assignments.
+    pub fn restore_from_backup(&self, backup_path: &Path) -> Result<RestoreSummary> {
+        // Open the backup file via ATTACH so we can write `INSERT … SELECT
+        // … FROM bk.<table>` in a single transaction against the live DB.
+        // ATTACH paths are escaped by binding rather than interpolating to
+        // avoid an injection if a caller ever passes a user-influenced
+        // string (current callers pass a tmpfile path, but defense in
+        // depth is cheap).
+        let path_str = backup_path.to_string_lossy().to_string();
+        let conn = self.conn();
+        conn.execute("ATTACH DATABASE ?1 AS bk", [&path_str])?;
+        // No matter what happens below, DETACH so the next caller's pool
+        // checkout doesn't see a lingering attachment.
+        let result = (|| -> Result<RestoreSummary> {
+            // ── Schema validation ────────────────────────────────────
+            let required = [
+                "watched",
+                "positions",
+                "channel_options",
+                "video_flags",
+                "folders",
+                "channel_assignments",
+            ];
+            for table in &required {
+                let count: i64 = conn.query_row(
+                    "SELECT count(*) FROM bk.sqlite_master \
+                     WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )?;
+                if count == 0 {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
+                        Some(format!(
+                            "backup is missing required table `{table}` — \
+                             not a yt-offline snapshot, or from an incompatible version"
+                        )),
+                    ));
+                }
+            }
+
+            // Wrap the whole merge in a transaction. If any step fails the
+            // attached DB stays read-only on our side and the live DB
+            // rolls back to pre-import state.
+            conn.execute("BEGIN", [])?;
+            let summary = (|| -> Result<RestoreSummary> {
+                // watched: keep the later timestamp. Two-step approach
+                // (insert missing, then update older) works in plain SQL
+                // without an UPSERT WHERE clause.
+                let watched_before: i64 = conn.query_row(
+                    "SELECT count(*) FROM watched", [], |r| r.get(0))?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO watched (video_id, watched_at) \
+                     SELECT video_id, watched_at FROM bk.watched", [])?;
+                conn.execute(
+                    "UPDATE watched SET watched_at = (\
+                         SELECT bk.watched.watched_at FROM bk.watched \
+                         WHERE bk.watched.video_id = main.watched.video_id) \
+                     WHERE EXISTS (\
+                         SELECT 1 FROM bk.watched \
+                         WHERE bk.watched.video_id = main.watched.video_id \
+                         AND bk.watched.watched_at > main.watched.watched_at)", [])?;
+                let watched_after: i64 = conn.query_row(
+                    "SELECT count(*) FROM watched", [], |r| r.get(0))?;
+                let watched_added = (watched_after - watched_before).max(0);
+
+                // positions: same pattern as watched.
+                let positions_before: i64 = conn.query_row(
+                    "SELECT count(*) FROM positions", [], |r| r.get(0))?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO positions (video_id, position_secs, updated_at) \
+                     SELECT video_id, position_secs, updated_at FROM bk.positions", [])?;
+                // Use main.positions to disambiguate the target — inside
+                // the WHERE/SET subqueries SQLite would otherwise resolve
+                // the bare `positions` to the innermost FROM (bk.positions
+                // for the SELECT subquery), giving us a degenerate
+                // `bk.positions.x = bk.positions.x` join.
+                conn.execute(
+                    "UPDATE positions SET \
+                        position_secs = (SELECT bk.positions.position_secs FROM bk.positions \
+                            WHERE bk.positions.video_id = main.positions.video_id), \
+                        updated_at = (SELECT bk.positions.updated_at FROM bk.positions \
+                            WHERE bk.positions.video_id = main.positions.video_id) \
+                     WHERE EXISTS (\
+                         SELECT 1 FROM bk.positions \
+                         WHERE bk.positions.video_id = main.positions.video_id \
+                         AND bk.positions.updated_at > main.positions.updated_at)", [])?;
+                let positions_after: i64 = conn.query_row(
+                    "SELECT count(*) FROM positions", [], |r| r.get(0))?;
+                let positions_added = (positions_after - positions_before).max(0);
+
+                // channel_options: keep the later updated_at.
+                let options_before: i64 = conn.query_row(
+                    "SELECT count(*) FROM channel_options", [], |r| r.get(0))?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO channel_options \
+                        (platform, handle, options_json, updated_at) \
+                     SELECT platform, handle, options_json, updated_at \
+                     FROM bk.channel_options", [])?;
+                conn.execute(
+                    "UPDATE channel_options SET \
+                        options_json = (SELECT bk.channel_options.options_json \
+                            FROM bk.channel_options \
+                            WHERE bk.channel_options.platform = main.channel_options.platform \
+                            AND bk.channel_options.handle   = main.channel_options.handle), \
+                        updated_at = (SELECT bk.channel_options.updated_at \
+                            FROM bk.channel_options \
+                            WHERE bk.channel_options.platform = main.channel_options.platform \
+                            AND bk.channel_options.handle   = main.channel_options.handle) \
+                     WHERE EXISTS (\
+                         SELECT 1 FROM bk.channel_options \
+                         WHERE bk.channel_options.platform = main.channel_options.platform \
+                         AND bk.channel_options.handle   = main.channel_options.handle \
+                         AND bk.channel_options.updated_at > main.channel_options.updated_at)", [])?;
+                let options_after: i64 = conn.query_row(
+                    "SELECT count(*) FROM channel_options", [], |r| r.get(0))?;
+                let options_added = (options_after - options_before).max(0);
+
+                // video_flags: bitwise OR each flag column. Insert missing
+                // first, then OR for collisions. (`MAX` works since each
+                // flag is 0/1.)
+                let flags_before: i64 = conn.query_row(
+                    "SELECT count(*) FROM video_flags", [], |r| r.get(0))?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO video_flags \
+                        (video_id, bookmark, favourite, waiting, archive, updated_at) \
+                     SELECT video_id, bookmark, favourite, waiting, archive, updated_at \
+                     FROM bk.video_flags", [])?;
+                conn.execute(
+                    "UPDATE video_flags SET \
+                        bookmark  = MAX(bookmark,  COALESCE((SELECT bookmark  FROM bk.video_flags \
+                            WHERE bk.video_flags.video_id = main.video_flags.video_id), 0)), \
+                        favourite = MAX(favourite, COALESCE((SELECT favourite FROM bk.video_flags \
+                            WHERE bk.video_flags.video_id = main.video_flags.video_id), 0)), \
+                        waiting   = MAX(waiting,   COALESCE((SELECT waiting   FROM bk.video_flags \
+                            WHERE bk.video_flags.video_id = main.video_flags.video_id), 0)), \
+                        archive   = MAX(archive,   COALESCE((SELECT archive   FROM bk.video_flags \
+                            WHERE bk.video_flags.video_id = main.video_flags.video_id), 0))", [])?;
+                let flags_after: i64 = conn.query_row(
+                    "SELECT count(*) FROM video_flags", [], |r| r.get(0))?;
+                let flags_added = (flags_after - flags_before).max(0);
+
+                // folders: only insert names we don't already have.
+                let folders_before: i64 = conn.query_row(
+                    "SELECT count(*) FROM folders", [], |r| r.get(0))?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO folders (name, position, created_at) \
+                     SELECT name, position, created_at FROM bk.folders", [])?;
+                let folders_after: i64 = conn.query_row(
+                    "SELECT count(*) FROM folders", [], |r| r.get(0))?;
+                let folders_added = (folders_after - folders_before).max(0);
+
+                // channel_assignments: insert when (platform, handle) is
+                // unassigned. We re-resolve folder_id by name to handle the
+                // case where the backup and live DB have the same folder
+                // name but different IDs.
+                let assignments_before: i64 = conn.query_row(
+                    "SELECT count(*) FROM channel_assignments", [], |r| r.get(0))?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO channel_assignments (platform, handle, folder_id) \
+                     SELECT b.platform, b.handle, f.id \
+                     FROM bk.channel_assignments b \
+                     JOIN bk.folders bf ON bf.id = b.folder_id \
+                     JOIN folders f ON f.name = bf.name", [])?;
+                let assignments_after: i64 = conn.query_row(
+                    "SELECT count(*) FROM channel_assignments", [], |r| r.get(0))?;
+                let assignments_added = (assignments_after - assignments_before).max(0);
+
+                Ok(RestoreSummary {
+                    watched_added: watched_added as u64,
+                    positions_added: positions_added as u64,
+                    options_added: options_added as u64,
+                    flags_added: flags_added as u64,
+                    folders_added: folders_added as u64,
+                    assignments_added: assignments_added as u64,
+                })
+            })();
+            match summary {
+                Ok(s) => {
+                    conn.execute("COMMIT", [])?;
+                    Ok(s)
+                }
+                Err(e) => {
+                    let _ = conn.execute("ROLLBACK", []);
+                    Err(e)
+                }
+            }
+        })();
+        // ATTACH state lives on the connection. Detach even on error so
+        // the pooled connection is clean when it goes back.
+        let _ = conn.execute("DETACH DATABASE bk", []);
+        result
+    }
+}
+
+/// Per-table row counts that landed in the live DB during a restore.
+/// Useful for the UI to show "imported N watched + M positions" so the
+/// user sees evidence the merge actually did something.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RestoreSummary {
+    pub watched_added: u64,
+    pub positions_added: u64,
+    pub options_added: u64,
+    pub flags_added: u64,
+    pub folders_added: u64,
+    pub assignments_added: u64,
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    /// Per-test scratch dir that auto-removes itself. Avoids pulling in
+    /// the `tempfile` crate just for this test module.
+    struct ScratchDir(std::path::PathBuf);
+    impl ScratchDir {
+        fn new(name: &str) -> Self {
+            let mut p = std::env::temp_dir();
+            // Disambiguate parallel-test runs of the same name with the
+            // pid + a counter; collisions would otherwise leave one test
+            // operating on another's DB.
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            let id = N.fetch_add(1, Ordering::Relaxed);
+            p.push(format!("yt-offline-test-{}-{}-{}", std::process::id(), id, name));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            ScratchDir(p)
+        }
+        fn join(&self, name: &str) -> std::path::PathBuf { self.0.join(name) }
+    }
+    impl Drop for ScratchDir {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn restores_watched_and_positions() {
+        let dir = ScratchDir::new("watched-positions");
+        let live = Database::open(&dir.join("live.db")).unwrap();
+        let backup = Database::open(&dir.join("backup.db")).unwrap();
+
+        backup.set_watched("v-only-in-backup", true).unwrap();
+        // CURRENT_TIMESTAMP has 1-second resolution. Write the live row
+        // first, sleep just over a second, then write the backup row so
+        // the merge's `updated_at >` comparison actually picks the
+        // backup's value. Real-world backups are taken minutes/days
+        // apart, so this resolution is fine in production.
+        live.set_position("v-shared", 10.0).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        backup.set_position("v-shared", 42.5).unwrap();
+
+        let summary = live.restore_from_backup(&dir.join("backup.db")).unwrap();
+        assert_eq!(summary.watched_added, 1);
+        // v-shared existed on the live side already, so positions_added
+        // counts only the *new* row (which there isn't one of).
+        assert_eq!(summary.positions_added, 0);
+
+        // The watched row from backup made it through.
+        let w = live.get_watched().unwrap();
+        assert!(w.contains("v-only-in-backup"));
+
+        // v-shared got the *later* position (backup's, since the live one
+        // was inserted earlier in this test).
+        let p = live.get_positions().unwrap();
+        assert!((p.get("v-shared").copied().unwrap_or(0.0) - 42.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn ors_video_flags() {
+        let dir = ScratchDir::new("flags-or");
+        let live = Database::open(&dir.join("live.db")).unwrap();
+        let backup = Database::open(&dir.join("backup.db")).unwrap();
+
+        // Live side: v1 favourite. Backup side: v1 bookmark. After merge
+        // v1 should be both.
+        live.set_video_flag("v1", "favourite", true).unwrap();
+        backup.set_video_flag("v1", "bookmark", true).unwrap();
+        backup.set_video_flag("v2", "waiting", true).unwrap();
+
+        live.restore_from_backup(&dir.join("backup.db")).unwrap();
+        let flags = live.get_video_flags().unwrap();
+        assert!(flags.favourite.contains("v1"));
+        assert!(flags.bookmark.contains("v1"));
+        assert!(flags.waiting.contains("v2"));
+    }
+
+    #[test]
+    fn idempotent_when_run_twice() {
+        let dir = ScratchDir::new("idempotent");
+        let live = Database::open(&dir.join("live.db")).unwrap();
+        let backup = Database::open(&dir.join("backup.db")).unwrap();
+        backup.set_watched("v1", true).unwrap();
+        backup.set_position("v1", 7.5).unwrap();
+
+        let s1 = live.restore_from_backup(&dir.join("backup.db")).unwrap();
+        let s2 = live.restore_from_backup(&dir.join("backup.db")).unwrap();
+
+        // First pass adds 1 of each, second adds none (same backup).
+        assert_eq!(s1.watched_added, 1);
+        assert_eq!(s1.positions_added, 1);
+        assert_eq!(s2.watched_added, 0);
+        assert_eq!(s2.positions_added, 0);
+    }
+
+    #[test]
+    fn rejects_unrelated_sqlite_file() {
+        let dir = ScratchDir::new("schema-mismatch");
+        let live = Database::open(&dir.join("live.db")).unwrap();
+
+        // Create a SQLite file with a completely different schema.
+        let bad = dir.join("not-yt-offline.db");
+        let conn = Connection::open(&bad).unwrap();
+        conn.execute("CREATE TABLE foo (x INT)", []).unwrap();
+        drop(conn);
+
+        let err = live.restore_from_backup(&bad).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("missing required table"), "{msg}");
+    }
 }
 
 /// Translate an `r2d2::Error` from `Pool::build()` into a `rusqlite::Error` so

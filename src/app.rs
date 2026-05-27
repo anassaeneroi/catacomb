@@ -171,6 +171,12 @@ pub struct App {
     // is.
     backup_save_tx: Sender<PathBuf>,
     backup_save_rx: Receiver<PathBuf>,
+    // "Import library backup" source path — same pattern as backup_save_rx
+    // but for the open-file direction. Restore happens synchronously on
+    // the main thread once we receive the path, since the merge is a
+    // bounded SQL operation, not a long-running download.
+    backup_open_tx: Sender<PathBuf>,
+    backup_open_rx: Receiver<PathBuf>,
     // Maintenance (library health) screen state. The flag is gone now —
     // Screen::Maintenance + this report's presence drive the render.
     health_report: Option<crate::maintenance::HealthReport>,
@@ -283,6 +289,7 @@ impl App {
 
         let (cookies_pick_tx, cookies_pick_rx) = std::sync::mpsc::channel::<PathBuf>();
         let (backup_save_tx, backup_save_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (backup_open_tx, backup_open_rx) = std::sync::mpsc::channel::<PathBuf>();
 
         let (thumb_request_tx, thumb_request_rx) = std::sync::mpsc::channel::<PathBuf>();
         let (thumb_result_tx, thumb_result_rx) =
@@ -355,6 +362,8 @@ impl App {
             cookies_pick_rx,
             backup_save_tx,
             backup_save_rx,
+            backup_open_tx,
+            backup_open_rx,
             health_report: None,
             stats_report: None,
             show_channel_options: false,
@@ -2329,35 +2338,64 @@ impl App {
                     .small()
                     .weak(),
                 );
-                if ui.button("💾 Save library backup…").clicked() {
-                    // Open the save dialog off the UI thread, mirroring the
-                    // cookies file-picker pattern.
-                    let tx = self.backup_save_tx.clone();
-                    let default_name = format!(
-                        "yt-offline-{}.db",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs()).unwrap_or(0),
-                    );
-                    std::thread::spawn(move || {
-                        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                        {
-                            let picked = rt.block_on(async {
-                                rfd::AsyncFileDialog::new()
-                                    .set_title("Save library backup")
-                                    .set_file_name(&default_name)
-                                    .add_filter("SQLite database", &["db"])
-                                    .save_file()
-                                    .await
-                            });
-                            if let Some(f) = picked {
-                                let _ = tx.send(f.path().to_path_buf());
+                ui.horizontal(|ui| {
+                    if ui.button("💾 Save library backup…").clicked() {
+                        // Open the save dialog off the UI thread, mirroring the
+                        // cookies file-picker pattern.
+                        let tx = self.backup_save_tx.clone();
+                        let default_name = format!(
+                            "yt-offline-{}.db",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs()).unwrap_or(0),
+                        );
+                        std::thread::spawn(move || {
+                            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                            {
+                                let picked = rt.block_on(async {
+                                    rfd::AsyncFileDialog::new()
+                                        .set_title("Save library backup")
+                                        .set_file_name(&default_name)
+                                        .add_filter("SQLite database", &["db"])
+                                        .save_file()
+                                        .await
+                                });
+                                if let Some(f) = picked {
+                                    let _ = tx.send(f.path().to_path_buf());
+                                }
                             }
-                        }
-                    });
-                }
+                        });
+                    }
+                    if ui.button("📂 Import library backup…")
+                        .on_hover_text(
+                            "Merge a previously-saved snapshot into the live DB. \
+                             Watched / positions / flags / folders / channel options \
+                             from the backup are merged in idempotently — running \
+                             twice with the same file is safe.")
+                        .clicked()
+                    {
+                        let tx = self.backup_open_tx.clone();
+                        std::thread::spawn(move || {
+                            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                            {
+                                let picked = rt.block_on(async {
+                                    rfd::AsyncFileDialog::new()
+                                        .set_title("Choose library backup to import")
+                                        .add_filter("SQLite database", &["db"])
+                                        .pick_file()
+                                        .await
+                                });
+                                if let Some(f) = picked {
+                                    let _ = tx.send(f.path().to_path_buf());
+                                }
+                            }
+                        });
+                    }
+                });
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -3193,6 +3231,27 @@ impl eframe::App for App {
                     dest.display(),
                 ),
                 Err(e) => self.status = format!("Backup failed: {e}"),
+            }
+        }
+        // User picked a backup file to import. Merge it in, then refresh
+        // the in-memory caches so the next render sees the new rows
+        // without waiting for a rescan.
+        while let Ok(src) = self.backup_open_rx.try_recv() {
+            match self.db.restore_from_backup(&src) {
+                Ok(s) => {
+                    self.watched = self.db.get_watched().unwrap_or_default();
+                    self.resume_positions = self.db.get_positions().unwrap_or_default();
+                    self.flags = self.db.get_video_flags().unwrap_or_default();
+                    self.folders = self.db.list_folders().unwrap_or_default();
+                    // Rescan so channel rows pick up new folder assignments.
+                    self.rescan();
+                    self.status = format!(
+                        "Imported: {}W · {}P · {}F · {}flags · {}folders · {}assigns",
+                        s.watched_added, s.positions_added, s.options_added,
+                        s.flags_added, s.folders_added, s.assignments_added,
+                    );
+                }
+                Err(e) => self.status = format!("Restore failed: {e}"),
             }
         }
 

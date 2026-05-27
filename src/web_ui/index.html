@@ -1316,8 +1316,13 @@ async function openSettings(){
     <hr style="border-color:var(--border);margin:12px 0">
     <div style="font-weight:700;margin-bottom:8px">Backup</div>
     <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
-      <div class="settings-hint">Saves the SQLite file holding your watched / favourites / bookmarks / waiting / channel-options / folders. Restore by replacing <code>yt-offline.db</code> in the channels directory.</div>
-      <button onclick="downloadBackupDb()">⬇ Download library snapshot</button>
+      <div class="settings-hint">Snapshots your watched / favourites / bookmarks / waiting / channel-options / folders. Import merges another snapshot in without touching the channel files on disk — re-running the same import is safe.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button onclick="downloadBackupDb()">⬇ Download library snapshot</button>
+        <button onclick="document.getElementById('restore-input').click()">📂 Import library snapshot…</button>
+        <input type="file" id="restore-input" accept=".db,application/x-sqlite3" style="display:none" onchange="uploadRestoreDb(this)">
+      </div>
+      <div id="restore-status" class="settings-hint" style="display:none"></div>
     </div>
     ${srcRow}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
@@ -1365,6 +1370,33 @@ function downloadBackupDb(){
   // Content-Disposition so the browser triggers a download instead of
   // rendering the SQLite bytes inline.
   window.open('/api/backup/db','_blank');
+}
+async function uploadRestoreDb(input){
+  // Stream the file's raw bytes to /api/restore/db. The server enforces a
+  // 100 MB cap; we mirror it client-side to give an instant error rather
+  // than blowing through the upload before getting a 413.
+  const f=input.files&&input.files[0];
+  if(!f){return}
+  const MAX=100*1024*1024;
+  const status=document.getElementById('restore-status');
+  status.style.display='';
+  if(f.size>MAX){status.textContent='File too large (max 100 MB)';input.value='';return}
+  if(!confirm(`Merge ${f.name} (${fmtSize(f.size)}) into the live database? Existing rows stay; conflicts resolve by the later timestamp.`)){input.value='';status.style.display='none';return}
+  status.textContent='Uploading…';
+  try{
+    const r=await fetch('/api/restore/db',{method:'POST',headers:{'Content-Type':'application/x-sqlite3'},body:f});
+    if(!r.ok){throw new Error(await r.text())}
+    const s=await r.json();
+    status.textContent=`Imported: ${s.watched_added}W · ${s.positions_added}P · ${s.options_added}opts · ${s.flags_added}flags · ${s.folders_added}folders · ${s.assignments_added}assigns`;
+    setStatus('Library snapshot imported');
+    // Refresh the sidebar / grid so the new flags / folders show up.
+    loadLibrary();
+  }catch(e){
+    status.textContent='Import failed: '+e.message;
+    setStatus('Import failed: '+e.message);
+  }finally{
+    input.value='';
+  }
 }
 async function generatePlex(btn){
   const path=document.getElementById('cf-plex-path')?.value.trim();

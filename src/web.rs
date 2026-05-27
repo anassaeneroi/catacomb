@@ -1794,6 +1794,77 @@ async fn get_backup_db(State(state): State<Arc<WebState>>) -> Response {
     ).into_response()
 }
 
+/// `POST /api/restore/db` — accept a SQLite database body and merge its
+/// rows into the live DB. Mirrors `GET /api/backup/db` in the opposite
+/// direction.
+///
+/// The body is the raw `yt-offline.db` bytes — same shape as what
+/// `get_backup_db` produces. We write it to a sibling temp file, hand it
+/// to [`Database::restore_from_backup`] for the actual merge, then
+/// refresh the in-memory watched / positions / flags caches so the next
+/// `/api/library` response reflects the import.
+///
+/// Hard-cap the body at 100 MB to keep a malicious or fat-finger upload
+/// from filling tmpfs. Realistic backups are a few KB to a few MB for
+/// even very large libraries.
+async fn post_restore_db(
+    State(state): State<Arc<WebState>>,
+    body: Bytes,
+) -> Response {
+    const MAX_BACKUP_BYTES: usize = 100 * 1024 * 1024;
+    if body.len() > MAX_BACKUP_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE,
+                "backup file too large (max 100 MB)").into_response();
+    }
+    if body.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty body — POST the .db bytes").into_response();
+    }
+    // SQLite magic header check before we even bother writing the file.
+    // All valid SQLite 3 databases start with "SQLite format 3\0".
+    if !body.starts_with(b"SQLite format 3\0") {
+        return (StatusCode::BAD_REQUEST,
+                "not a SQLite database (bad magic header)").into_response();
+    }
+
+    // Write to a sibling tmp file so it lives on the same filesystem as
+    // the live DB — keeps ATTACH happy and avoids cross-device rename
+    // issues if we ever extend this to atomic-replace semantics.
+    let tmp_path = state.channels_root.join(".yt-offline.restore.tmp");
+    if let Err(e) = std::fs::write(&tmp_path, &body) {
+        return (StatusCode::INTERNAL_SERVER_ERROR,
+                format!("write tmp file: {e}")).into_response();
+    }
+
+    let summary = match state.db.restore_from_backup(&tmp_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return (StatusCode::BAD_REQUEST,
+                    format!("restore failed: {e}")).into_response();
+        }
+    };
+    let _ = std::fs::remove_file(&tmp_path);
+
+    // Refresh in-memory caches so the next /api/library reflects the new
+    // watched / position / flag rows without waiting for an app restart.
+    if let Ok(w) = state.db.get_watched() {
+        *state.watched.lock().unwrap() = w;
+    }
+    if let Ok(p) = state.db.get_positions() {
+        *state.positions.lock().unwrap() = p;
+    }
+    if let Ok(f) = state.db.get_video_flags() {
+        *state.flags.lock().unwrap() = f;
+    }
+    // Bump the library version so cached /api/library responses revalidate.
+    bump_library_version(&state);
+
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string()),
+    ).into_response()
+}
+
 /// `POST /api/folders/:id/check` — fire a re-check on every channel in
 /// the folder. Mirrors `POST /api/scheduler/run` but scoped to a single
 /// folder's members. Each channel's stored download_options + quality
@@ -2216,6 +2287,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/folders/:id/rename", post(post_rename_folder))
         .route("/api/folders/:id/check", post(post_check_folder))
         .route("/api/backup/db", get(get_backup_db))
+        .route("/api/restore/db", post(post_restore_db))
         .route("/api/folders/:id", axum::routing::delete(delete_folder))
         .route("/api/channels/:platform/:handle/folder", post(post_assign_folder))
         .route("/api/resume/:id", post(post_resume))
