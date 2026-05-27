@@ -15,7 +15,7 @@ catch up on quickly (Rust + axum + a real web UI + bundled toolchain + a
 modern security model) but trails on feature breadth and years-of-edge-cases
 maturity. The plan below closes those gaps first, then pushes past.
 
-## Current state vs Tartube (2026-05-25)
+## Current state vs Tartube (2026-05-27)
 
 | Area | Us | Tartube | Verdict |
 | --- | --- | --- | --- |
@@ -28,76 +28,38 @@ maturity. The plan below closes those gaps first, then pushes past.
 | Bundled curl_cffi for impersonation | ✅ | ❌ user-installed | We lead |
 | Themes | ✅ 10 themes | ❌ GTK default | We lead |
 | Live-stream recording | ✅ | ✅ recent | Tied |
-| Per-channel custom download options | ❌ global only | ✅ deep | **Tartube leads** |
-| Folder/group hierarchy | ❌ flat per-platform | ✅ N-level | **Tartube leads** |
-| Filter UI (date range, size, watched) | partial sort only | ✅ rich | **Tartube leads** |
-| Comments capture | ❌ | ✅ `--write-comments` | **Tartube leads** |
+| WebSocket real-time progress | ✅ | ❌ polling | We lead |
+| Mobile-responsive web UI | ✅ | ❌ desktop only | We lead |
+| Per-channel custom download options | ✅ JSON-blob overrides | ✅ deep | Tied |
+| Folder/group hierarchy | ✅ one-level | ✅ N-level | Tartube leads (depth only) |
+| Filter UI (date / size / watched) | ✅ chip-style | ✅ rich + presets | Tartube leads (presets only) |
+| Comments capture | ✅ `--write-comments` + viewer | ✅ raw JSON | We lead |
+| System tray | ✅ ksni (Linux SNI) | ✅ GTK | Tied |
+| Library backup | ✅ DB snapshot | ✅ | Tied |
 | Per-channel notes / annotations | ❌ | ✅ | **Tartube leads** |
-| System tray | ❌ removed early | ✅ | **Tartube leads** |
 | Format conversion / re-encode | ❌ remux only | ✅ ffmpeg pipeline | **Tartube leads** |
-| Maturity / edge cases | ~weeks | ~years | **Tartube leads** |
+| Maturity / edge cases | ~months | ~years | **Tartube leads** |
 | Per-distro packaging | PKGBUILD only | .deb .rpm .pkg.tar.zst | **Tartube leads** |
 
-Score: 8 ahead, 8 behind, 1 tied — i.e. we're already half the way there on
-features Tartube has, plus we have a real lead on architecture.
+Score: 11 ahead, 4 behind, 6 tied. The remaining four gaps are concrete,
+bounded items — see Phase 1 below.
 
-## Phase 1 — Tartube feature parity
+## Phase 1 — Remaining Tartube parity items
 
-The eight items Tartube has that we don't, ordered by how visibly they
-change the user experience.
-
-### 1.1 Per-channel custom download options
-Tartube's headline feature. Each channel gets its own quality / format /
-extractor args / cookies override that take priority over the global config.
-
-- New `channel_settings` SQLite table (channel_path → JSON blob).
-- `Downloader::start` consults overrides before applying global defaults.
-- Right-click → "Channel options…" opens a per-channel settings dialog.
-- Settings cascade: channel override > group override (Phase 1.2) > global.
-
-### 1.2 Folder / group hierarchy
-Lets a user organize channels into "Music", "News", "Coding", etc., with
-per-group default download options.
-
-- `channel_groups` SQLite table: `(id, parent_id, name)`.
-- `Channel` gains `group_id: Option<i64>`.
-- Sidebar renders as a tree; drag-and-drop to reorganize (desktop) /
-  right-click "Move to group…" (web).
-- Group-level download options inherited by member channels unless
-  overridden per-channel.
-
-### 1.3 Filter UI (date / size / status)
-Today we have sort. Tartube has full filtering with chips and saved sets.
-
-- Filter chips above the video grid: "watched / unwatched / in-progress",
-  "today / this week / this month / older", "< 100 MB / > 1 GB", "has
-  subtitles", "has chapters".
-- Saved filter presets — name a set of chips, restore later.
-- Filter state persists across rescans within a session.
-
-### 1.4 Comments capture
-yt-dlp's `--write-comments` dumps the full comment tree as JSON sidecar.
-
-- Toggle in download dialog: "Include comments (slow)".
-- Stored as `<stem>.comments.json` next to the video.
-- New `/api/comments/:id` endpoint returns paginated comments.
-- Web video player modal gets a "Comments" tab next to "Chapters".
+The four items Tartube still has that we don't, ordered by how visibly
+they change the user experience.
 
 ### 1.5 Per-channel / per-video notes
+
 Free-text user annotations on any channel or video.
 
 - New `notes` table: `(target_kind, target_id, body, updated_at)`.
 - Pencil icon on the channel sidebar entry + video card.
-- Notes are searchable from the global filter.
-
-### 1.6 System tray
-Resurrect the dropped tray module. Minimize to tray, show download
-progress overlay, click to open the main window.
-
-- Conditional on a non-headless desktop session.
-- Right-click → Show / Hide / Quit / Pause downloads.
+- Notes are searchable from the global filter (search hits note body too).
+- Web UI: edit-in-place textarea on click.
 
 ### 1.7 Format conversion pipeline
+
 Post-download re-encode option: H.264/AAC mp4 at a configurable CRF, or
 audio extraction at a target bitrate. Useful for shrinking large 4K files.
 
@@ -107,18 +69,38 @@ audio extraction at a target bitrate. Useful for shrinking large 4K files.
 - Visible in the job log as a separate "transcoding" phase.
 
 ### 1.8 Per-distro packaging
+
 Tartube ships .deb, .rpm, .pkg.tar.zst, .exe, .dmg. We ship a PKGBUILD.
 
 - Codeberg CI matrix for `cargo build --release` on each target.
 - Helpers to generate .deb (via `cargo-deb`), .rpm (via `cargo-generate-rpm`),
   Windows MSI (via `cargo-wix`), and macOS .app + .dmg.
-- GitHub-style release artifacts attached to each tag.
+- Release artifacts attached to each tag.
+
+### 1.3+ Filter presets (extension of completed 1.3)
+
+The chip filters ship, but Tartube also lets you *name* a filter set and
+restore it later. Small UI layer on top of what's already implemented.
+
+- "Save current filters as…" button next to the clear-filters link.
+- Presets stored in localStorage (web) / SQLite (desktop).
+- Dropdown chip to apply a saved preset.
+
+### 1.2+ N-level folder nesting (extension of completed 1.2)
+
+Folders are flat right now (one level under each platform). Tartube
+supports arbitrary nesting.
+
+- Add `parent_id: Option<i64>` to `channel_folders`.
+- Sidebar renders the tree recursively with disclosure triangles.
+- "Move folder into folder" action in the manager.
 
 ## Phase 2 — Polish where Tartube is mature
 
 Things we win on architecturally but lose on real-world ruggedness.
 
 ### 2.1 Integration test coverage
+
 47 unit tests is good for parsers and helpers, useless for end-to-end
 correctness. We need real-yt-dlp integration tests against a recorded
 fixture corpus.
@@ -129,30 +111,35 @@ fixture corpus.
 - Headless web-UI tests via `headless_chrome` or `playwright`.
 
 ### 2.2 Documentation site
+
 README is the only user-facing doc. Need a real docs site with:
 
 - Per-platform setup guide (deeper than current README sections).
 - Troubleshooting playbook for the top 10 yt-dlp errors.
 - Architecture page (for contributors).
-- Hosted via Codeberg Pages or GitHub Pages mirror.
+- Hosted via Codeberg Pages.
 
 ### 2.3 Error recovery / structured logging
+
 Today: errors land in the job log and that's it. Tartube has a "rescue
 recipes" feature where common errors map to documented fixes.
 
 - `Job::failure_reason: Option<ErrorClass>` enum (`RateLimited`,
   `MissingCookies`, `CodecMissing`, `DiskFull`, `Other`).
 - UI surfaces the class with a one-click suggested action.
-- Anonymous opt-in error telemetry to surface new patterns.
+- Optional anonymous error telemetry to surface new patterns.
 
-### 2.4 Backup / restore
-Tartube has database export. We have nothing.
+### 2.4 Library restore (backup is done)
 
-- `/api/backup` → tar of `yt-offline.db` + `config.toml` + `cookies.txt`.
-- `/api/restore` (idempotent merge of watched + positions).
-- "Export library snapshot" button in settings.
+Snapshot DB download works. Restore doesn't.
+
+- "Import library backup…" file picker in settings.
+- Validate schema version before merging.
+- Idempotent merge of watched + positions + flags (so re-importing the
+  same backup twice doesn't break anything).
 
 ### 2.5 Stability hardening
+
 Long-running deployments will surface real bugs.
 
 - Replace remaining `.lock().unwrap()` with poisoning-aware accessors.
@@ -160,45 +147,53 @@ Long-running deployments will surface real bugs.
   and re-queue.
 - Disk-full preflight: refuse to start a download when target dir has
   less free space than the average video size on disk.
+- Panic hook that writes to `yt-offline.crash.log` so users have something
+  to attach to bug reports.
 
 ## Phase 3 — Surpass
 
 Once we're at parity, we push past Tartube on its own ground.
 
 ### 3.1 Cross-compile macOS + Windows binaries
+
 The current "later" roadmap item, blocked behind 1.8.
 
 ### 3.2 Android client
+
 Native client over the existing web API. Background download via
 WorkManager + JobScheduler. Push notifications via Tailscale-routed
 HTTPS or a userland push channel.
 
-### 3.3 Real-time progress via WebSocket
-Replace the adaptive HTTP poll with a persistent `/ws/progress`
-connection. Server pushes job updates; client renders without polling.
-Saves the per-second tick and gives instant feedback.
-
 ### 3.4 Smart auto-tagging
+
 Cluster channels by uploader frequency, content type, and metadata.
 Suggest groups ("looks like a music channel — move to Music?"). Builds
 on Phase 1.2's group system.
 
 ### 3.5 Federation / multi-host
+
 A "remote library" mode where one yt-offline instance can browse
 another's library (read-only) over the same axum API. Useful for a
 "home archive + travel laptop" setup.
 
-### 3.6 Comment viewer with diff
-The Phase 1.4 comments JSON is just data. We can build the *viewer*
-Tartube doesn't have: threaded display, search, "new since last visit"
-highlights, sentiment filter.
+### 3.6 Comment viewer enhancements
+
+The comments capture (1.4) already ships a viewer. Surpass Tartube
+(which only dumps the raw JSON) with:
+
+- Threaded display with collapse/expand at any depth.
+- Full-text search within a video's comments.
+- "New since last visit" highlights.
+- Sentiment / keyword filter chips.
 
 ### 3.7 Library-wide deduplication
+
 Right now `maintenance` finds duplicates by yt-dlp video ID. Surpass by
 fingerprinting media bytes (`ffmpeg`-derived perceptual hashes) so the
 same video re-uploaded under a different ID gets flagged.
 
 ### 3.8 Plugin / scripting hook
+
 Lua or WASM-based hooks that run on download events: pre-download
 filename rewriter, post-download archive uploader, custom metadata
 enricher. Inverts the "we hardcode everything" model.
@@ -213,13 +208,39 @@ Probably never, or much later.
 - Integration with Plex / Jellyfin / Kodi as a *source plugin* rather than a
   symlink generator.
 
+## Recently shipped (highlights)
+
+Roughly reverse-chronological. Items that closed out a roadmap line.
+
+- **System tray** (1.6) — ksni-based SNI tray, minimize-to-tray opt-in.
+- **Filter chips** (1.3) — watch / date / size / has-subs / has-chapters,
+  AND together, persisted to localStorage.
+- **Web downloads modal** — bottom #jobs bar replaced with a ⬇ button
+  in the header opening a full modal. `d` keyboard shortcut.
+- **Desktop screens refactor** — Settings/Stats/Maintenance moved from
+  floating windows to full CentralPanel views with vertical scroll.
+- **WebSocket job progress** (3.3) — replaced HTTP polling.
+- **Mobile-responsive web UI** — proper media queries at 640px / 380px.
+- **Library backup** (2.4 — backup direction) — DB download from settings.
+- **Theme contrast fixes** — every theme now passes per-state fg_stroke
+  contrast checks.
+- **Shuffle play** — random unwatched video on the desktop + web.
+- **Keyboard shortcuts** — `/` `r` `d` `?` in the web UI.
+- **Bulk tagging + channel-name search** — multi-select + flag bulk-set.
+- **Channel folders + per-folder Check all** (1.2) — one-level grouping.
+- **Per-channel download options** (1.1) — JSON-blob overrides applied
+  on scheduled re-checks.
+- **Per-video state flags + smart folders + comments capture** (1.3/1.4)
+  — favourite / bookmark / waiting / archive flags as smart-folder views;
+  `--write-comments` with viewer tab.
+
 ## How to read this
 
-- **Phase 1** is the next ~3 months of work if pursued steadily.
+- **Phase 1** is the remaining parity work — four bounded items.
 - **Phase 2** is concurrent polish — pick up between Phase 1 items.
-- **Phase 3** is the year-1 ambition.
+- **Phase 3** is the year-1 ambition once we're at parity.
 - **Phase 4** items might be valuable, but commit to nothing.
 
 Items inside a phase are loosely ordered by user-visible impact, not strict
-prerequisite. **1.1 (per-channel options)** is the single biggest gap and
-should be tackled first.
+prerequisite. **1.8 (per-distro packaging)** is the biggest multiplier
+for new users; **1.5 (notes)** is the biggest workflow gap.
