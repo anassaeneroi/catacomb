@@ -38,6 +38,19 @@
   .ch-sub.active{color:var(--text)}
   section#content{flex:1;overflow-y:auto;padding:10px;min-width:0}
   .toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+  /* Filter chip row above the grid. Each chip is a button that toggles
+     a single filter dimension; the active state inverts colors so it's
+     obvious what's currently narrowing the view. */
+  .filters{display:flex;align-items:center;gap:4px;margin-bottom:8px;flex-wrap:wrap;font-size:11px;color:var(--muted)}
+  .filter-grp{display:flex;align-items:center;gap:2px;padding:2px;background:var(--bg);border:1px solid var(--border);border-radius:4px}
+  .filter-grp-label{padding:0 4px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+  .chip{background:transparent;color:var(--muted);border:none;border-radius:3px;padding:3px 8px;font-size:11px;cursor:pointer;line-height:1.3}
+  .chip:hover{color:var(--text)}
+  .chip.active{background:var(--accent);color:#000;font-weight:600}
+  .chip-toggle{background:var(--bg);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer}
+  .chip-toggle.active{background:var(--accent);color:#000;border-color:var(--accent);font-weight:600}
+  .chip-clear{background:transparent;color:var(--muted);border:1px dashed var(--border);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer}
+  .chip-clear:hover{color:var(--text);border-color:var(--muted)}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
   .ch-card{background:var(--card);border-radius:8px;overflow:hidden;border:2px solid transparent;transition:border-color .15s;cursor:pointer;display:flex;flex-direction:column}
   .ch-card:hover{border-color:var(--accent)}
@@ -193,6 +206,7 @@
         <span id="sel-count" style="font-size:12px;color:var(--muted)"></span>
       </span>
     </div>
+    <div class="filters" id="filters"></div>
     <div class="grid" id="grid"></div>
   </section>
 </main>
@@ -222,6 +236,13 @@ let library=[], channelUrls=[], activeChannelIdx=null, activePlaylistIdx=null, s
 let librarySnapshotFolders=[];
 // Smart-folder view selectors — at most one is true at a time.
 let showFavourites=false, showBookmarks=false, showWaiting=false;
+// Filter chips above the grid. Each is independent; the grid filters by
+// the AND of all active chips. Values:
+//   watch: 'all' | 'unwatched' | 'in-progress' | 'watched'
+//   date:  'all' | 'today' | 'week' | 'month' | 'year' | 'older'
+//   size:  'all' | 'small' (<100MB) | 'med' (100MB-1GB) | 'large' (>1GB)
+//   hasSubs / hasChapters: boolean toggles
+let filter={watch:'all',date:'all',size:'all',hasSubs:false,hasChapters:false};
 let musicTracks=[];
 let bulkMode=false, selected=new Set(), selectedId=null;
 let currentPlayingId=null, saveTimer=null;
@@ -370,6 +391,7 @@ function saveUiState(){
       view:currentViewToken(),
       search:document.getElementById('search')?.value||'',
       sort:document.getElementById('sort')?.value||'date-desc',
+      filter,
     }));
   }catch{}
 }
@@ -378,6 +400,9 @@ function restoreUiState(){
   if(!raw)return;
   const s=document.getElementById('search'); if(s&&raw.search)s.value=raw.search;
   const sortEl=document.getElementById('sort'); if(sortEl&&raw.sort)sortEl.value=raw.sort;
+  // Restore filter chips. Defensive merge so an older localStorage payload
+  // missing a new field doesn't break the predicate.
+  if(raw.filter&&typeof raw.filter==='object')filter={...filter,...raw.filter};
   // Map the persisted view back to the matching show* boolean. Channels
   // are stored by name (not by index) so a library re-order doesn't land
   // the user on the wrong channel.
@@ -414,6 +439,42 @@ function setView(ci,pi){resetViewSelectors();activeChannelIdx=ci;activePlaylistI
 function setMusic(){resetViewSelectors();showMusic=true;selected.clear();saveUiState();closeSidebar();renderSidebar();renderGrid()}
 
 /* ── Grid ───────────────────────────────────────────────────────── */
+// Filter chip predicate. Returns true if a video passes every active chip.
+// Date cutoffs use the upload_date (YYYYMMDD); videos with no date pass the
+// 'all' bucket but get dropped by any specific date filter — same as
+// Tartube's behavior.
+function passesFilter(v){
+  // Watch state.
+  if(filter.watch==='unwatched'&&v.watched)return false;
+  if(filter.watch==='watched'&&!v.watched)return false;
+  if(filter.watch==='in-progress'&&!(v.resume_pos&&v.resume_pos>5&&!v.watched))return false;
+  // Date (compares upload_date YYYYMMDD lexically against cutoff strings).
+  if(filter.date!=='all'){
+    if(!v.upload_date)return false;
+    const now=new Date();
+    const ymd=d=>d.getFullYear().toString()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0');
+    const ago=(days)=>{const d=new Date(now);d.setDate(d.getDate()-days);return ymd(d)};
+    const cutoff=filter.date==='today'?ymd(now):
+                 filter.date==='week'?ago(7):
+                 filter.date==='month'?ago(30):
+                 filter.date==='year'?ago(365):null;
+    if(filter.date==='older'){
+      // "Older" = anything more than a year old.
+      if(v.upload_date>=ago(365))return false;
+    } else if(cutoff && v.upload_date<cutoff)return false;
+  }
+  // Size buckets (file_size is bytes; null = no file, drop on any specific size).
+  if(filter.size!=='all'){
+    if(v.file_size==null)return false;
+    const MB=1048576, GB=1073741824;
+    if(filter.size==='small' && v.file_size>=100*MB)return false;
+    if(filter.size==='med' && (v.file_size<100*MB||v.file_size>=GB))return false;
+    if(filter.size==='large' && v.file_size<GB)return false;
+  }
+  if(filter.hasSubs && !(v.subtitles && v.subtitles.length))return false;
+  if(filter.hasChapters && !v.has_chapters)return false;
+  return true;
+}
 function currentVideos(){
   const q=document.getElementById('search').value.toLowerCase();
   const sort=document.getElementById('sort').value;
@@ -421,7 +482,7 @@ function currentVideos(){
   if(showContinue){
     for(const ch of library)
       for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
-        if(v.resume_pos&&v.resume_pos>5&&!v.watched&&(!q||matchesSearch(v,ch?.name||v.channel,q)))
+        if(v.resume_pos&&v.resume_pos>5&&!v.watched&&(!q||matchesSearch(v,ch?.name||v.channel,q))&&passesFilter(v))
           vids.push({...v,channel:ch.name});
     vids.sort((a,b)=>(b.resume_pos||0)-(a.resume_pos||0));
     return vids;
@@ -430,7 +491,7 @@ function currentVideos(){
     // Most-recently-modified across the whole library, capped at 100.
     for(const ch of library)
       for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
-        if(v.mtime_unix&&(!q||matchesSearch(v,ch?.name||v.channel,q)))
+        if(v.mtime_unix&&(!q||matchesSearch(v,ch?.name||v.channel,q))&&passesFilter(v))
           vids.push({...v,channel:ch.name});
     vids.sort((a,b)=>(b.mtime_unix||0)-(a.mtime_unix||0));
     return vids.slice(0,100);
@@ -440,7 +501,7 @@ function currentVideos(){
     const want = showFavourites ? 'favourite' : showBookmarks ? 'bookmark' : 'waiting';
     for(const ch of library)
       for(const v of[...ch.videos,...ch.playlists.flatMap(p=>p.videos)])
-        if(v[want]&&(!q||matchesSearch(v,ch?.name||v.channel,q)))
+        if(v[want]&&(!q||matchesSearch(v,ch?.name||v.channel,q))&&passesFilter(v))
           vids.push({...v,channel:ch.name});
     return vids;
   }
@@ -449,7 +510,7 @@ function currentVideos(){
     if(activeChannelIdx!==null&&i!==activeChannelIdx)continue;
     const pool=activePlaylistIdx!==null?(ch.playlists[activePlaylistIdx]?.videos||[]):[...ch.videos,...ch.playlists.flatMap(p=>p.videos)];
     for(const v of pool)
-      if(!q||matchesSearch(v,ch?.name||v.channel,q))vids.push({...v,channel:ch.name});
+      if((!q||matchesSearch(v,ch?.name||v.channel,q))&&passesFilter(v))vids.push({...v,channel:ch.name});
   }
   if(sort==='date-desc')vids.sort((a,b)=>(b.upload_date||'').localeCompare(a.upload_date||''));
   if(sort==='date-asc')vids.sort((a,b)=>{const ax=a.upload_date||'￿',bx=b.upload_date||'￿';return ax.localeCompare(bx)});
@@ -461,13 +522,46 @@ function currentVideos(){
   return vids;
 }
 
+// Filter chips are rendered every grid pass so the active state always
+// matches the underlying filter object. Hidden on channel-grid + music
+// views where they don't apply.
+function renderFilters(){
+  const el=document.getElementById('filters');
+  if(!el)return;
+  if(showChannels||showMusic){el.style.display='none';return}
+  el.style.display='';
+  const grp=(label,key,opts)=>{
+    const chips=opts.map(([val,txt])=>`<button class="chip${filter[key]===val?' active':''}" onclick="setFilter('${key}','${val}')">${txt}</button>`).join('');
+    return `<div class="filter-grp"><span class="filter-grp-label">${label}</span>${chips}</div>`;
+  };
+  const toggle=(label,key,title)=>`<button class="chip-toggle${filter[key]?' active':''}" title="${esc(title)}" onclick="toggleFilter('${key}')">${label}</button>`;
+  const anyActive=filter.watch!=='all'||filter.date!=='all'||filter.size!=='all'||filter.hasSubs||filter.hasChapters;
+  const clear=anyActive?`<button class="chip-clear" onclick="clearFilters()">✕ Clear filters</button>`:'';
+  el.innerHTML=
+    grp('Watch','watch',[['all','All'],['unwatched','Unwatched'],['in-progress','In progress'],['watched','Watched']])+
+    grp('Date','date',[['all','All'],['today','Today'],['week','Week'],['month','Month'],['year','Year'],['older','Older']])+
+    grp('Size','size',[['all','All'],['small','< 100 MB'],['med','100 MB – 1 GB'],['large','> 1 GB']])+
+    toggle('💬 Subs','hasSubs','Only videos with subtitle tracks')+
+    toggle('🔖 Chapters','hasChapters','Only videos with chapter markers')+
+    clear;
+}
+function setFilter(key,val){filter[key]=val;saveUiState();renderFilters();renderGrid()}
+function toggleFilter(key){filter[key]=!filter[key];saveUiState();renderFilters();renderGrid()}
+function clearFilters(){filter={watch:'all',date:'all',size:'all',hasSubs:false,hasChapters:false};saveUiState();renderFilters();renderGrid()}
 function renderGrid(){
+  renderFilters();
   if(showChannels){renderChannelGrid();return}
   if(showMusic){renderMusicGrid();return}
   const vids=currentVideos();
   setStatus(vids.length+' video'+(vids.length!==1?'s':''));
   const grid=document.getElementById('grid');
-  if(!vids.length){grid.innerHTML='<div class="empty">Nothing here.</div>';return}
+  if(!vids.length){
+    const anyFilter=filter.watch!=='all'||filter.date!=='all'||filter.size!=='all'||filter.hasSubs||filter.hasChapters;
+    grid.innerHTML=anyFilter
+      ? `<div class="empty">Nothing matches the current filters. <button class="chip-clear" style="margin-left:8px" onclick="clearFilters()">✕ Clear filters</button></div>`
+      : '<div class="empty">Nothing here.</div>';
+    return;
+  }
   const showChCol=activeChannelIdx===null&&!showContinue;
   grid.innerHTML=vids.map(v=>{
     const chk=bulkMode?`<input type="checkbox" ${selected.has(v.id)?'checked':''} onchange="toggleSel('${v.id}',this.checked)">`:'';
