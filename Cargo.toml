@@ -24,6 +24,7 @@ rand = "0.8"
 # File-picker dialog for the desktop GUI. xdg-portal backend keeps it pure-Rust
 # (zbus, no GTK/libdbus build dep), consistent with notify-rust above.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+ksni = { version = "0.3.4", features = ["tokio"] }
 
 [profile.release]
 opt-level = 2

@@ -189,6 +189,14 @@ pub struct App {
     /// "text" buffers so the user can type partial values (e.g. an empty
     /// limit-rate field) without us forcing zeroes back.
     channel_options_form: ChannelOptionsForm,
+    /// System-tray event receiver. `None` when the tray failed to start
+    /// (no DBus, hostile sandbox, etc.). When present, [`Self::update`]
+    /// drains it each frame and dispatches viewport commands.
+    tray: Option<crate::tray::TrayHandle>,
+    /// `true` once the user has explicitly chosen Quit (from the tray
+    /// menu or another exit path). The viewport `CloseRequested` handler
+    /// honors this — without it, the close button minimizes to tray.
+    quitting: bool,
 }
 
 /// Scratch struct for the per-channel options dialog. Distinct from
@@ -209,7 +217,7 @@ struct ChannelOptionsForm {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, tray: Option<crate::tray::TrayHandle>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let config_path = cwd.join("config.toml");
 
@@ -356,6 +364,8 @@ impl App {
             folder_create_buffer: String::new(),
             show_move_to_folder: false,
             move_to_folder_target: None,
+            tray,
+            quitting: false,
         }
     }
 
@@ -3040,6 +3050,49 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── System-tray event drain ─────────────────────────────────────
+        // Tray menu activations arrive on a background-thread channel.
+        // Drain them all each frame and translate into viewport commands.
+        // The user pressing the X button on the window will request a
+        // close; if a tray is available we intercept it and hide instead
+        // (minimize-to-tray). The Quit menu item sets `quitting=true`
+        // first so the close request is honored on the next pass.
+        // Ctrl+Q always quits, regardless of tray. Without this the user
+        // has no keyboard escape from minimize-to-tray when the tray icon
+        // happens to be invisible (e.g. GNOME without the AppIndicator
+        // extension). Checked early so it wins over close-cancellation.
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Q)) {
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        if let Some(handle) = &self.tray {
+            while let Ok(evt) = handle.events.try_recv() {
+                match evt {
+                    crate::tray::TrayEvent::Show => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    crate::tray::TrayEvent::Hide => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    }
+                    crate::tray::TrayEvent::Quit => {
+                        self.quitting = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            }
+            // Minimize-to-tray: if the user clicked the close button but
+            // hasn't explicitly chosen Quit, cancel the close and hide
+            // the window instead. Without a tray we fall through to the
+            // normal close flow so the app actually exits.
+            let close_requested = ctx.input(|i| i.viewport().close_requested());
+            if close_requested && !self.quitting {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+
         self.downloader.poll();
         // Snapshot the previous-frame running state BEFORE check_notifications
         // overwrites prev_job_states with the current frame's. Otherwise

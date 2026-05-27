@@ -24,6 +24,7 @@ mod platform;
 mod plex;
 mod stats;
 mod theme;
+mod tray;
 mod web;
 mod ytdlp_bin;
 
@@ -46,6 +47,16 @@ fn main() -> eframe::Result<()> {
         web::run(cfg);
     }
 
+    // Start the optional system tray. Returns None if the icon decode
+    // fails (shouldn't happen — it's embedded) or the thread won't spawn.
+    // A Some result does NOT guarantee a visible tray icon — that depends
+    // on whether a StatusNotifier host is registered (KDE: yes; GNOME:
+    // requires AppIndicator extension; others: varies). When no host
+    // exists, ksni quietly does nothing and the app behaves as if the
+    // tray flag were off.
+    const TRAY_ICON_PNG: &[u8] = include_bytes!("../icon.png");
+    let tray = tray::start(TRAY_ICON_PNG);
+
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
@@ -56,6 +67,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "yt-offline",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::App::new(cc, tray)))),
     )
 }
