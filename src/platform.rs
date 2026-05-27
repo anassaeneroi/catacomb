@@ -351,15 +351,20 @@ fn extract_after<'a>(url: &'a str, marker: &str) -> Option<&'a str> {
 
 // ── Filesystem layout ─────────────────────────────────────────────────────────
 
-/// Absolute path to a given platform's video folder, derived from the
-/// configured YouTube `channels_root` (its parent is treated as the
-/// implicit library root, with each platform as a sibling folder).
+/// Absolute path to a given platform's video folder.
+///
+/// All platforms (including YouTube) are nested as subdirectories of the
+/// configured `channels_root`. So a config with
+/// `directory = "/mnt/library/yt-offline"` puts YouTube channels at
+/// `/mnt/library/yt-offline/channels/<creator>/` and Bandcamp artists at
+/// `/mnt/library/yt-offline/bandcamp/<artist>/`. This keeps everything a
+/// user might want to archive under one tidy umbrella directory.
+///
+/// The function's name predates the layout change — `channels_root` is
+/// really "library root" now, but renaming would touch ~40 call sites
+/// for no functional benefit.
 pub fn platform_root(channels_root: &Path, platform: Platform) -> PathBuf {
-    if platform == Platform::YouTube {
-        // YouTube keeps the legacy path verbatim.
-        return channels_root.to_path_buf();
-    }
-    channels_root.with_file_name(platform.dir_name())
+    channels_root.join(platform.dir_name())
 }
 
 /// Where the `.source-url` sidecar lives for a creator folder.
@@ -486,16 +491,16 @@ mod tests {
     }
 
     #[test]
-    fn platform_root_youtube_is_channels_root() {
-        let cr = Path::new("/foo/channels");
-        assert_eq!(platform_root(cr, Platform::YouTube), cr);
+    fn platform_root_youtube_nests_as_channels_subdir() {
+        let cr = Path::new("/foo/library");
+        assert_eq!(platform_root(cr, Platform::YouTube), Path::new("/foo/library/channels"));
     }
 
     #[test]
-    fn platform_root_others_are_siblings() {
-        let cr = Path::new("/foo/channels");
-        assert_eq!(platform_root(cr, Platform::TikTok), Path::new("/foo/tiktok"));
-        assert_eq!(platform_root(cr, Platform::Twitch), Path::new("/foo/twitch"));
+    fn platform_root_others_nest_too() {
+        let cr = Path::new("/foo/library");
+        assert_eq!(platform_root(cr, Platform::TikTok), Path::new("/foo/library/tiktok"));
+        assert_eq!(platform_root(cr, Platform::Twitch), Path::new("/foo/library/twitch"));
     }
 
     #[test]

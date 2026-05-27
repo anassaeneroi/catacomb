@@ -240,11 +240,13 @@ impl App {
         let channels_root = config.backup.directory.clone();
         let settings_dir = channels_root.display().to_string();
         let _ = std::fs::create_dir_all(&channels_root);
-        let library_root = channels_root
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| channels_root.clone());
-        let _ = std::fs::create_dir_all(&library_root);
+        // library_root is the parent of every platform's per-creator
+        // folder. With the post-2026-05 nested layout every platform
+        // (including YouTube's `channels/`) lives under channels_root,
+        // so the two paths are the same. `library_root` is kept as a
+        // separate field for places that previously expected the
+        // sibling-platform layout (file_url, /files/ mount, maintenance).
+        let library_root = channels_root.clone();
         // Pre-create every platform's folder so scans see them.
         for &p in Platform::all() {
             let dir = platform::platform_root(&channels_root, p);
@@ -275,7 +277,8 @@ impl App {
         let flags = db.get_video_flags().unwrap_or_default();
         let resume_positions = db.get_positions().unwrap_or_default();
 
-        let music_root = channels_root.with_file_name("music");
+        // Music dir nests under channels_root like the platform dirs.
+        let music_root = channels_root.join("music");
         let music_library = library::scan_music(&music_root);
 
         let max_concurrent = config.backup.max_concurrent;

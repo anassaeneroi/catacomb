@@ -2182,13 +2182,11 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     let channels_root = config.backup.directory.clone();
     let _ = std::fs::create_dir_all(&channels_root);
     // library_root holds every platform folder side-by-side (channels/,
-    // tiktok/, twitch/, …). The implicit anchor is the parent of the
-    // user-configured channels dir.
-    let library_root = channels_root
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| channels_root.clone());
-    let _ = std::fs::create_dir_all(&library_root);
+    // tiktok/, twitch/, …). Post-2026-05 layout nests them all under
+    // channels_root, so the two paths are identical. The field is kept
+    // distinct because file_url() and the /files/ static-file mount
+    // still resolve URLs against it as a separate concept.
+    let library_root = channels_root.clone();
     // Pre-create every platform's folder so the static-file mount can serve
     // them without 404ing on first access.
     for &p in crate::platform::Platform::all() {

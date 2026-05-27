@@ -494,9 +494,10 @@ impl Downloader {
         self.enqueue(cmd, url, label);
     }
 
-    /// Path to the music download directory (sibling of `channels_root`).
+    /// Path to the music download directory, nested under `channels_root`
+    /// alongside the platform folders.
     pub fn music_root(&self) -> PathBuf {
-        self.channels_root.with_file_name("music")
+        self.channels_root.join("music")
     }
 
     /// Download `url` as audio-only, storing tracks in `music/<artist>/`.
