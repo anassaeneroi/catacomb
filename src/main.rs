@@ -15,7 +15,9 @@
 
 mod app;
 mod config;
+mod crash;
 mod database;
+mod disk_space;
 mod download_options;
 mod downloader;
 mod error_class;
@@ -32,13 +34,25 @@ mod ytdlp_bin;
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
+    // Load the config first — both modes share the channels_root path,
+    // and the panic hook needs it before anything else runs so a crash
+    // in the very early startup (DB open, tray init, ksni) still lands
+    // in the crash log.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cfg_path = cwd.join("config.toml");
+    let mut cfg = config::Config::load(&cfg_path)
+        .unwrap_or_else(|_| config::Config::default_with_dir(cwd.join("channels")));
+
+    // Install the persistent panic logger. Logs go alongside the SQLite
+    // database; the parent of channels_root is the same "library root"
+    // the desktop UI shows.
+    let crash_dir = cfg.backup.directory.parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| cfg.backup.directory.clone());
+    crash::install(&crash_dir);
+
     // --web [port] → run the web interface instead of the GUI
     if let Some(pos) = args.iter().position(|a| a == "--web") {
-        let mut cfg = {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            config::Config::load(&cwd.join("config.toml"))
-                .unwrap_or_else(|_| config::Config::default_with_dir(cwd.join("channels")))
-        };
         // Override port if provided after --web
         if let Some(port_str) = args.get(pos + 1) {
             if let Ok(port) = port_str.parse::<u16>() {

@@ -329,6 +329,34 @@ impl Downloader {
         // Per-platform download archive keeps cross-platform IDs from colliding
         // (TikTok IDs are numeric, YouTube IDs are 11-char base64, etc.).
         let _ = std::fs::create_dir_all(&platform_dir);
+
+        // Disk-full preflight. Refuse to spawn yt-dlp when the target
+        // filesystem has less than the floor of free space — that's a
+        // near-certain in-progress ENOSPC, which leaves a partial file
+        // and a confusing failure. We surface it as a synthetic Failed
+        // job classified as DiskFull so it appears in the Downloads
+        // panel alongside other classified errors instead of vanishing.
+        //
+        // statvfs returning None (non-Unix host, missing path) skips the
+        // check — better to let yt-dlp run and produce a real error
+        // than refuse on missing data.
+        if let Some(free) = crate::disk_space::available_bytes(&self.channels_root) {
+            if free < crate::disk_space::FREE_SPACE_FLOOR_BYTES {
+                self.push_synthetic_failure(
+                    url,
+                    platform_dir.display().to_string(),
+                    crate::error_class::ErrorClass::DiskFull,
+                    format!(
+                        "only {} free on {} (need at least {})",
+                        crate::disk_space::fmt_bytes(free),
+                        self.channels_root.display(),
+                        crate::disk_space::fmt_bytes(crate::disk_space::FREE_SPACE_FLOOR_BYTES),
+                    ),
+                );
+                return;
+            }
+        }
+
         let archive_path = platform_dir.join("archive.txt");
         let platform_label = info.platform.dir_name();
 
@@ -615,6 +643,36 @@ impl Downloader {
             progress: 0.0,
             log: VecDeque::new(),
             failure_class: None,
+            rx,
+        });
+    }
+
+    /// Push a job that was never going to start — used for preflight
+    /// failures (currently just disk-full). Constructs a closed channel
+    /// so the immediate `Job::drain` sees no progress, and seeds the log
+    /// with the human-readable reason so the UI's last_line + the error
+    /// hint together explain what went wrong.
+    fn push_synthetic_failure(
+        &mut self,
+        url: String,
+        label: String,
+        class: crate::error_class::ErrorClass,
+        reason: String,
+    ) {
+        let (_tx, rx) = std::sync::mpsc::channel::<Msg>();
+        // _tx is dropped here, so any subsequent drain hits the
+        // "channel closed" branch and stays still. We start `state` as
+        // Failed directly rather than running it through the Finished
+        // transition.
+        let mut log = VecDeque::new();
+        log.push_back(format!("[preflight] {reason}"));
+        self.jobs.push(Job {
+            url,
+            label,
+            state: JobState::Failed,
+            progress: 0.0,
+            log,
+            failure_class: Some(class),
             rx,
         });
     }

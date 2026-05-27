@@ -25,6 +25,7 @@ rand = "0.8"
 # (zbus, no GTK/libdbus build dep), consistent with notify-rust above.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 ksni = { version = "0.3.4", features = ["tokio"] }
+libc = "0.2.186"
 
 [profile.release]
 opt-level = 2
