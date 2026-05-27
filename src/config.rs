@@ -61,11 +61,21 @@ impl Default for PlayerSection {
 pub struct UiSection {
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// When true, clicking the window close button hides the window
+    /// into the system tray instead of exiting. The tray menu's Quit
+    /// item (or Ctrl+Q) still terminates the app. Off by default so
+    /// users without a working SNI host don't get stuck in an invisible
+    /// hidden window.
+    #[serde(default)]
+    pub minimize_to_tray: bool,
 }
 
 impl Default for UiSection {
     fn default() -> Self {
-        Self { theme: default_theme() }
+        Self {
+            theme: default_theme(),
+            minimize_to_tray: false,
+        }
     }
 }
 

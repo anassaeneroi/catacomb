@@ -2126,6 +2126,11 @@ impl App {
                             });
                         ui.end_row();
 
+                        ui.label("Minimize to tray:");
+                        ui.checkbox(&mut self.config.ui.minimize_to_tray, "hide window on close instead of quitting")
+                            .on_hover_text("Requires a working StatusNotifier host (KDE native, GNOME with AppIndicator extension). Ctrl+Q always quits.");
+                        ui.end_row();
+
                         ui.label("Auto-check channels:");
                         ui.checkbox(&mut self.config.scheduler.enabled, "enabled");
                         ui.end_row();
@@ -3082,14 +3087,17 @@ impl eframe::App for App {
                     }
                 }
             }
-            // Minimize-to-tray: if the user clicked the close button but
-            // hasn't explicitly chosen Quit, cancel the close and hide
-            // the window instead. Without a tray we fall through to the
-            // normal close flow so the app actually exits.
-            let close_requested = ctx.input(|i| i.viewport().close_requested());
-            if close_requested && !self.quitting {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            // Minimize-to-tray: only intercept the close button when the
+            // user has opted in via config. Default-off because users on
+            // desktops without a working StatusNotifier host (e.g. GNOME
+            // sans AppIndicator extension) would otherwise lose access
+            // to the window entirely. Ctrl+Q is always an escape.
+            if self.config.ui.minimize_to_tray {
+                let close_requested = ctx.input(|i| i.viewport().close_requested());
+                if close_requested && !self.quitting {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
             }
         }
 
