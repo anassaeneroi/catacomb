@@ -113,9 +113,15 @@
   #dl-btn.has-active{color:var(--accent)}
   #dl-badge{position:absolute;top:-4px;right:-4px;background:var(--accent);color:#000;font-size:10px;font-weight:700;border-radius:9px;padding:1px 5px;min-width:16px;text-align:center;line-height:1.2;display:none}
   #dl-btn.has-active #dl-badge{display:inline-block}
-  .job{display:flex;align-items:center;gap:8px;padding:5px 14px;font-size:12px;border-bottom:1px solid var(--border);flex-wrap:wrap;min-width:0}
+  .job-row{border-bottom:1px solid var(--border)}
+  .job{display:flex;align-items:center;gap:8px;padding:5px 14px;font-size:12px;flex-wrap:wrap;min-width:0}
+  .job-row .job{border-bottom:none}
   .badge{font-weight:700;min-width:48px;flex-shrink:0}
   .badge.running{color:#facc15}.badge.done{color:#4ade80}.badge.failed{color:#f87171}
+  /* Error-class badge sits next to the state badge. Subtle so the actual
+     hint below carries the user's attention. */
+  .err-class{font-size:10px;background:#7f1d1d;color:#fecaca;border-radius:3px;padding:1px 6px;text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+  .job-hint{font-size:11px;color:#fecaca;background:rgba(127,29,29,.18);border-left:2px solid #f87171;padding:6px 14px 6px 12px;margin:0 14px 6px}
   progress{flex:1;height:5px;accent-color:var(--accent);min-width:40px}
   footer{background:var(--panel);border-top:1px solid var(--border);padding:8px 12px;display:flex;gap:8px;align-items:center;flex-shrink:0}
   footer input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 9px;border-radius:4px;font-size:13px}
@@ -1639,12 +1645,24 @@ function renderJobs(jobs,queued,maxConcurrent){
   const limitNote=maxConcurrent>0?`<div style="font-size:11px;color:var(--muted);padding:6px 14px">max ${maxConcurrent} concurrent</div>`:'';
   body.innerHTML=hdr+jobs.map((j,i)=>{
     const dismiss=j.state!=='running'?`<button onclick="removeJob(${i})" style="font-size:11px;padding:1px 6px">✕</button>`:'';
-    return `<div class="job">
-      <span class="badge ${j.state}">${j.state}</span>
-      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.label)} — ${esc(j.url)}</span>
-      ${j.state==='running'?`<progress value="${j.progress}" max="1"></progress>`:''}
-      <span class="last-line" style="font-size:11px;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_line)}</span>
-      ${dismiss}
+    // Failed-job hint: when the classifier matched a known pattern, show
+    // the suggested action below the row in a subtle box. Unclassified
+    // failures (error_class === undefined) fall back to just the raw
+    // last_line we already render in the badge row.
+    const errBadge=j.state==='failed'&&j.error_class
+      ? `<span class="err-class" title="${esc(j.error_hint||'')}">${esc(j.error_class)}</span>` : '';
+    const errHint=j.state==='failed'&&j.error_hint
+      ? `<div class="job-hint">${esc(j.error_hint)}</div>` : '';
+    return `<div class="job-row">
+      <div class="job">
+        <span class="badge ${j.state}">${j.state}</span>
+        ${errBadge}
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.label)} — ${esc(j.url)}</span>
+        ${j.state==='running'?`<progress value="${j.progress}" max="1"></progress>`:''}
+        <span class="last-line" style="font-size:11px;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_line)}</span>
+        ${dismiss}
+      </div>
+      ${errHint}
     </div>`;
   }).join('')+queuedHtml+limitNote;
 }

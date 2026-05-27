@@ -61,6 +61,17 @@ pub struct JobSnapshot {
     pub state: &'static str,
     pub progress: f32,
     pub last_line: String,
+    /// Classification of the failure, if `state == "failed"`. One of
+    /// `rate-limited`, `members-only`, `geo-blocked`, `not-found`,
+    /// `codec-missing`, `disk-full`, `network-error`, `bad-cookies`, `other`,
+    /// or `null` while still running / on success. Drives the suggested
+    /// action hint in the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<crate::error_class::ErrorClass>,
+    /// Human-readable one-line suggested action paired with `error_class`.
+    /// Empty when `error_class` is `Other` or `None`.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub error_hint: &'static str,
 }
 
 /// All mutable state shared across axum handlers via `Arc<WebState>`.
@@ -145,6 +156,12 @@ impl WebState {
                 },
                 progress: j.progress,
                 last_line: j.log.back().cloned().unwrap_or_default(),
+                // Skip `Other` so the badge doesn't get a useless generic
+                // label — the raw log line is still shown for that case.
+                error_class: j.failure_class.filter(|c|
+                    *c != crate::error_class::ErrorClass::Other
+                ),
+                error_hint: j.failure_class.map(|c| c.hint()).unwrap_or(""),
             })
             .collect()
     }

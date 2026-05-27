@@ -128,6 +128,11 @@ pub struct Job {
     pub progress: f32,
     /// Rolling log buffer — capped at [`JOB_LOG_CAP`] lines via O(1) front-pop.
     pub log: VecDeque<String>,
+    /// Best-effort classification of the failure, populated when `state`
+    /// transitions to `Failed`. `None` while running or on success. The UI
+    /// surfaces the class + a one-line suggested fix from
+    /// [`crate::error_class`].
+    pub failure_class: Option<crate::error_class::ErrorClass>,
     rx: Receiver<Msg>,
 }
 
@@ -144,6 +149,15 @@ impl Job {
                 Msg::Progress(p) => self.progress = p,
                 Msg::Finished(ok) => {
                     self.state = if ok { JobState::Done } else { JobState::Failed };
+                    // Classify only on the failure transition so the
+                    // classifier doesn't re-run for every poll() call on a
+                    // long-finished job. The log is already in `self.log`
+                    // by this point since we drained Line messages above.
+                    if !ok && self.failure_class.is_none() {
+                        self.failure_class = Some(crate::error_class::classify(
+                            self.log.iter().map(|s| s.as_str()),
+                        ));
+                    }
                 }
             }
         }
@@ -594,7 +608,15 @@ impl Downloader {
             let _ = tx.send(Msg::Finished(ok));
         });
 
-        self.jobs.push(Job { url, label, state: JobState::Running, progress: 0.0, log: VecDeque::new(), rx });
+        self.jobs.push(Job {
+            url,
+            label,
+            state: JobState::Running,
+            progress: 0.0,
+            log: VecDeque::new(),
+            failure_class: None,
+            rx,
+        });
     }
 
     /// Drain pending messages from all job threads and promote queued jobs.

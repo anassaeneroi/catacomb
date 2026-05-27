@@ -1486,6 +1486,24 @@ impl App {
                                 if !last.is_empty() {
                                     ui.label(egui::RichText::new(last).small().monospace());
                                 }
+                                // Failure classification hint. Drawn as a
+                                // colored block so it visually separates
+                                // from the raw stderr last-line above.
+                                if let Some(cls) = job.failure_class {
+                                    if cls != crate::error_class::ErrorClass::Other {
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(
+                                                egui::Color32::from_rgb(220, 110, 110),
+                                                format!("⚠ {}", cls.label()),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(cls.hint())
+                                                    .small()
+                                                    .color(egui::Color32::from_rgb(240, 180, 180)),
+                                            );
+                                        });
+                                    }
+                                }
                                 ui.collapsing("output log", |ui| {
                                     egui::ScrollArea::vertical()
                                         .max_height(180.0)

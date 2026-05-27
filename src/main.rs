@@ -18,6 +18,7 @@ mod config;
 mod database;
 mod download_options;
 mod downloader;
+mod error_class;
 mod library;
 mod maintenance;
 mod platform;
