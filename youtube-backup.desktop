@@ -1,9 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=YouTube Offline
-Comment=Download and manage YouTube channel backups
-Exec=youtube-backup
-Icon=youtube-backup
-Categories=Utility;Video;
+Name=YT Offline
+GenericName=Video Archiver
+Comment=Self-hosted archive for YouTube, TikTok, Twitch, and more
+Exec=yt-offline
+Icon=yt-offline
+Categories=AudioVideo;Video;Network;
+Keywords=youtube;yt-dlp;archive;backup;download;
 StartupNotify=true
 Terminal=false
