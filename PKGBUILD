@@ -19,7 +19,7 @@ optdepends=(
 )
 makedepends=('rust' 'cargo')
 options=('!lto')  # rusqlite bundled sqlite cannot be LTO-linked with rust-lld
-source=("git+https://codeberg.org/anassaeneroi/yt-offline.git")
+source=("git+https://codeberg.org/anassaeneroi/yt-offline.git#branch=main")
 sha256sums=('SKIP')
 
 pkgver() {

@@ -92,7 +92,14 @@
   .meta-tab{padding:4px 10px;cursor:pointer;font-size:12px;border:1px solid transparent;border-bottom:none;border-radius:4px 4px 0 0}
   .meta-tab.active{background:var(--card);border-color:var(--border)}
   .meta-raw{font-family:monospace;font-size:11px;background:var(--bg);padding:10px;border-radius:4px;white-space:pre;overflow:auto;max-height:60vh}
-  #jobs{background:var(--panel);border-top:1px solid var(--border);flex-shrink:0;max-height:40vh;overflow-y:auto}
+  /* Jobs render inside the Downloads modal now. The dl-btn badge
+     on the header shows the active count so users still get an
+     at-a-glance status without the old fixed bottom bar eating
+     screen real estate. */
+  #dl-btn{position:relative}
+  #dl-btn.has-active{color:var(--accent)}
+  #dl-badge{position:absolute;top:-4px;right:-4px;background:var(--accent);color:#000;font-size:10px;font-weight:700;border-radius:9px;padding:1px 5px;min-width:16px;text-align:center;line-height:1.2;display:none}
+  #dl-btn.has-active #dl-badge{display:inline-block}
   .job{display:flex;align-items:center;gap:8px;padding:5px 14px;font-size:12px;border-bottom:1px solid var(--border);flex-wrap:wrap;min-width:0}
   .badge{font-weight:700;min-width:48px;flex-shrink:0}
   .badge.running{color:#facc15}.badge.done{color:#4ade80}.badge.failed{color:#f87171}
@@ -164,6 +171,7 @@
   <span id="hdr-stats"></span>
   <button onclick="shufflePlay()" title="Play a random unwatched video">🎲</button>
   <button onclick="rescan()" title="Rescan library">⟳</button>
+  <button id="dl-btn" onclick="openDownloads()" title="Downloads">⬇<span id="dl-badge">0</span></button>
   <button onclick="openStats()" title="Library statistics">📊</button>
   <button onclick="openMaintenance()" title="Library health">🩺</button>
   <button onclick="showShortcutsHelp()" title="Keyboard shortcuts (?)">?</button>
@@ -189,7 +197,6 @@
   </section>
 </main>
 <div id="details"></div>
-<div id="jobs"></div>
 <footer>
   <input type="url" id="dl-url" placeholder="YouTube URL…" oninput="refreshTwitchClipsVisibility()" onkeydown="if(event.key==='Enter')previewDownload()">
   <button class="primary" onclick="previewDownload()">⬇ Download</button>
@@ -1282,7 +1289,7 @@ function fmtCountdown(secs){
 async function updateYtdlp(btn){
   btn.disabled=true;
   const st=document.getElementById('ytdlp-status');
-  st.textContent='Started — see Downloads bar';
+  st.textContent='Started — click ⬇ in the header to view progress';
   try{
     const r=await fetch('/api/ytdlp/update',{method:'POST'});
     const t=await r.text();
@@ -1505,17 +1512,38 @@ async function repairAll(btn){
 }
 
 /* ── Jobs ───────────────────────────────────────────────────────── */
+// Jobs now live behind the ⬇ Downloads modal instead of a fixed bottom
+// bar. This function:
+//   1. Updates the header badge (active + queued count) on every snapshot
+//   2. If the modal is open, repaints its body so progress bars stay live
+// The modal is identified by its data-downloads-modal attribute so we can
+// reach it without scanning every .modal-bg in the DOM.
 function renderJobs(jobs,queued,maxConcurrent){
-  const el=document.getElementById('jobs');
-  if(!jobs.length&&!queued?.length){el.innerHTML='';return}
+  jobs=jobs||[];queued=queued||[];
+  // Badge: active jobs (running) + queued. Finished/failed don't bump the
+  // badge — they're informational, not in-progress.
+  const activeCount=jobs.filter(j=>j.state==='running').length+queued.length;
+  const btn=document.getElementById('dl-btn');
+  const badge=document.getElementById('dl-badge');
+  if(btn&&badge){
+    badge.textContent=String(activeCount);
+    btn.classList.toggle('has-active',activeCount>0);
+  }
+  // If the modal isn't open we're done.
+  const body=document.getElementById('downloads-body');
+  if(!body)return;
+  if(!jobs.length&&!queued.length){
+    body.innerHTML=`<div class="empty">No active or recent downloads.</div>`;
+    return;
+  }
   const fin=jobs.some(j=>j.state!=='running');
   const hdr=fin?`<div style="padding:4px 14px;display:flex;justify-content:flex-end;border-bottom:1px solid var(--border)"><button onclick="clearFinishedJobs()" style="font-size:11px;padding:2px 8px">✕ Clear finished</button></div>`:'';
-  const queuedHtml=(queued&&queued.length)?queued.map(q=>`<div class="job">
+  const queuedHtml=queued.map(q=>`<div class="job">
       <span class="badge" style="color:var(--muted)">queued</span>
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${esc(q.label)} — ${esc(q.url)}</span>
-    </div>`).join(''):'';
-  const limitNote=maxConcurrent>0?`<div style="font-size:11px;color:var(--muted);padding:2px 14px">max ${maxConcurrent} concurrent</div>`:'';
-  el.innerHTML=hdr+jobs.map((j,i)=>{
+    </div>`).join('');
+  const limitNote=maxConcurrent>0?`<div style="font-size:11px;color:var(--muted);padding:6px 14px">max ${maxConcurrent} concurrent</div>`:'';
+  body.innerHTML=hdr+jobs.map((j,i)=>{
     const dismiss=j.state!=='running'?`<button onclick="removeJob(${i})" style="font-size:11px;padding:1px 6px">✕</button>`:'';
     return `<div class="job">
       <span class="badge ${j.state}">${j.state}</span>
@@ -1525,6 +1553,29 @@ function renderJobs(jobs,queued,maxConcurrent){
       ${dismiss}
     </div>`;
   }).join('')+queuedHtml+limitNote;
+}
+// Open the Downloads modal. If it's already open, do nothing (clicking the
+// ⬇ button again would otherwise stack duplicate modals).
+async function openDownloads(){
+  if(document.querySelector('[data-downloads-modal]'))return;
+  const bg=document.createElement('div');
+  bg.className='modal-bg';
+  bg.setAttribute('data-downloads-modal','1');
+  bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  bg.innerHTML=`<div class="modal" style="max-width:720px;width:100%">
+    <div class="modal-hdr"><h2>⬇ Downloads</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div id="downloads-body" style="overflow:auto;max-height:80vh;min-height:120px"><em style="color:var(--muted);padding:14px;display:block">Loading…</em></div>
+  </div>`;
+  document.body.appendChild(bg);
+  // Repaint immediately from the latest snapshot if we have one — saves a
+  // round trip. Falls through to /api/progress otherwise.
+  try{
+    const d=await(await api('/api/progress')).json();
+    renderJobs(d.jobs,d.queued,d.max_concurrent);
+  }catch(e){
+    document.getElementById('downloads-body').innerHTML=
+      `<div style="color:#f87171;padding:14px">Failed to load: ${esc(e.message)}</div>`;
+  }
 }
 async function clearFinishedJobs(){try{await api('/api/jobs/clear',{method:'POST'});await pollProgress()}catch(e){setStatus('Error: '+e.message)}}
 async function removeJob(idx){try{await api('/api/jobs/'+idx,{method:'DELETE'});await pollProgress()}catch(e){setStatus('Error: '+e.message)}}
@@ -1608,6 +1659,10 @@ document.addEventListener('keydown',(e)=>{
       rescan();
       e.preventDefault();
       break;
+    case 'd':
+      openDownloads();
+      e.preventDefault();
+      break;
     case '?':
       showShortcutsHelp();
       e.preventDefault();
@@ -1624,6 +1679,7 @@ function showShortcutsHelp(){
     <table><tbody>
       ${row('/','Focus search')}
       ${row('r','Rescan library')}
+      ${row('d','Open downloads')}
       ${row('Esc','Close modal / cancel')}
       ${row('?','This help')}
     </tbody></table>
