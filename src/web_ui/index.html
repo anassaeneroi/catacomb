@@ -106,13 +106,44 @@
     aside{position:fixed;top:0;left:0;height:100%;z-index:50;transform:translateX(-100%);width:240px}
     aside.open{transform:translateX(0)}
     #sidebar-overlay.open{display:block}
-    #hdr-stats,#sort{display:none}
+    /* Hide non-essential header chrome on mobile. The remaining
+       buttons — menu, search, ⟳ rescan, 🎲 shuffle, ⚙ settings —
+       are the ones users actually reach for. */
+    #hdr-stats,#sort,#agpl-notice{display:none}
+    header h1{display:none}
+    header{padding:6px 8px;gap:6px}
+    header button{min-width:34px;min-height:34px;padding:4px 7px;font-size:14px}
+    /* Bigger tap targets on cards. The five-button card-foot reflows
+       to a comfortable height instead of cramming icons together. */
     .grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
-    #details{max-height:160px}
-    .chapters-pane{display:none}
+    .card-foot{padding:6px 6px 8px;gap:4px;flex-wrap:wrap}
+    .card-foot button{font-size:13px;padding:6px 8px;min-height:34px}
+    .card-foot button:not(.play){min-width:34px}
+    .card-meta{font-size:10px}
+    /* Modals go full-screen so the cramped 10px page-margin we use on
+       desktop doesn't eat the iPhone safe area. */
+    .modal-bg{padding:0}
+    .modal{max-width:100vw;max-height:100vh;border-radius:0;border:none}
     .modal video{max-height:55vh}
+    #details{max-height:160px;padding:8px 10px}
+    .chapters-pane{display:none}
     section#content{padding:8px}
-    footer{padding:6px 10px}
+    /* Download bar wraps onto two rows so the URL input + button
+       don't squeeze each other off-screen. */
+    footer{flex-wrap:wrap;padding:6px 10px;gap:6px}
+    footer input{flex-basis:100%;order:-1}
+    /* Bulk-mode actions stack vertically when active. */
+    .toolbar{flex-wrap:wrap}
+    #bulk-actions{flex-wrap:wrap;gap:4px}
+    #bulk-actions button{padding:6px 8px;min-height:32px;font-size:12px}
+    /* Job rows: hide the last-line preview on small screens; the
+       progress bar + label are the only things that fit anyway. */
+    .job{padding:4px 10px;font-size:11px}
+    .job .last-line{display:none}
+  }
+  @media(max-width:380px){
+    /* Single-column on very narrow phones. */
+    .grid{grid-template-columns:1fr;gap:6px}
   }
 </style>
 </head>
@@ -1490,7 +1521,7 @@ function renderJobs(jobs,queued,maxConcurrent){
       <span class="badge ${j.state}">${j.state}</span>
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.label)} — ${esc(j.url)}</span>
       ${j.state==='running'?`<progress value="${j.progress}" max="1"></progress>`:''}
-      <span style="font-size:11px;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_line)}</span>
+      <span class="last-line" style="font-size:11px;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_line)}</span>
       ${dismiss}
     </div>`;
   }).join('')+queuedHtml+limitNote;
@@ -1498,25 +1529,62 @@ function renderJobs(jobs,queued,maxConcurrent){
 async function clearFinishedJobs(){try{await api('/api/jobs/clear',{method:'POST'});await pollProgress()}catch(e){setStatus('Error: '+e.message)}}
 async function removeJob(idx){try{await api('/api/jobs/'+idx,{method:'DELETE'});await pollProgress()}catch(e){setStatus('Error: '+e.message)}}
 
+// Progress updates come over a WebSocket (`/ws/progress`) when available
+// and fall back to polling `/api/progress` if the upgrade fails (mobile
+// carriers / reverse proxies that strip WS sometimes do this). The two
+// paths share `applyProgressSnapshot` so the rendering logic is single-
+// sourced.
 let wasRunning=false;
+let progressWs=null;
+let pollTimer=null;
+function applyProgressSnapshot(d){
+  if(!d)return;
+  renderJobs(d.jobs,d.queued,d.max_concurrent);
+  const run=d.jobs.some(j=>j.state==='running')||(d.queued&&d.queued.length>0);
+  if(wasRunning&&!run)loadLibrary();
+  wasRunning=run;
+}
 async function pollProgress(){
   try{
     const d=await(await api('/api/progress')).json();
-    renderJobs(d.jobs,d.queued,d.max_concurrent);
-    const run=d.jobs.some(j=>j.state==='running')||(d.queued&&d.queued.length>0);
-    if(wasRunning&&!run)await loadLibrary();
-    wasRunning=run;
-    // Poll fast while something's happening, slow when idle. Halves request
-    // count + JSON parses + battery use when the tab sits open all day.
-    schedulePoll(run?600:5000);
+    applyProgressSnapshot(d);
+    schedulePoll(wasRunning?600:5000);
   }catch{schedulePoll(2000)}
 }
-let pollTimer=null;
 function schedulePoll(ms){
   if(pollTimer)clearTimeout(pollTimer);
   pollTimer=setTimeout(pollProgress,ms);
 }
-schedulePoll(600);
+function startProgressFeed(){
+  // Build the ws URL relative to the current page so the same code works
+  // for http/https + custom port + reverse-proxy mounts.
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  const url=`${proto}//${location.host}/ws/progress`;
+  try{
+    progressWs=new WebSocket(url);
+  }catch{
+    schedulePoll(600);
+    return;
+  }
+  progressWs.onopen=()=>{
+    // Stop the polling timer once the socket's live — pushes are
+    // authoritative until the connection drops.
+    if(pollTimer){clearTimeout(pollTimer);pollTimer=null}
+  };
+  progressWs.onmessage=(ev)=>{
+    try{applyProgressSnapshot(JSON.parse(ev.data))}catch{}
+  };
+  const onClose=()=>{
+    progressWs=null;
+    // Reconnect attempt after a short backoff; HTTP polling fills in
+    // the gap so the UI never goes blank.
+    schedulePoll(600);
+    setTimeout(()=>{if(!progressWs)startProgressFeed()},5000);
+  };
+  progressWs.onclose=onClose;
+  progressWs.onerror=onClose;
+}
+startProgressFeed();
 
 /* ── Keyboard shortcuts ─────────────────────────────────────────── */
 // Listed in the ? help dialog below. Skip when the user is typing in a

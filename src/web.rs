@@ -109,6 +109,12 @@ pub struct WebState {
     /// Per-IP failure tracker for [`post_login`]. Each entry is the number of
     /// recent failures and the instant the lockout (if any) expires.
     pub login_attempts: Mutex<HashMap<std::net::IpAddr, LoginAttempt>>,
+    /// Push channel for `/ws/progress` subscribers. A background tokio task
+    /// ticks every 500 ms while jobs are active and broadcasts a fresh
+    /// [`ProgressResponse`] snapshot here; the WebSocket handler forwards
+    /// each message to its client. The `/api/progress` HTTP endpoint stays
+    /// available as a fallback for clients that can't open a socket.
+    pub progress_tx: tokio::sync::broadcast::Sender<String>,
 }
 
 /// Failed-login tracking entry. After [`LOGIN_LOCKOUT_AFTER`] failures from
@@ -994,6 +1000,68 @@ async fn get_music(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         }
     }).collect();
     Json(serde_json::json!({ "tracks": track_infos }))
+}
+
+/// `GET /ws/progress` — WebSocket upgrade that streams the same
+/// [`ProgressResponse`] payload as the polling HTTP endpoint, pushed
+/// from the background broadcast task. Clients should treat the JSON
+/// payload identically to `/api/progress`.
+///
+/// On socket close (auth lost, network drop, server restart) the JS
+/// client falls back to polling `/api/progress` so users with broken
+/// WebSocket setups (some reverse proxies, certain mobile carriers)
+/// still see updates.
+async fn ws_progress(
+    State(state): State<Arc<WebState>>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> axum::response::Response {
+    ws.on_upgrade(move |socket| ws_progress_handler(socket, state))
+}
+
+async fn ws_progress_handler(
+    mut socket: axum::extract::ws::WebSocket,
+    state: Arc<WebState>,
+) {
+    use axum::extract::ws::Message;
+    // Subscribe before sending the initial snapshot so we don't miss a
+    // broadcast that fires between the snapshot build and the subscribe.
+    let mut rx = state.progress_tx.subscribe();
+    // Initial snapshot so the UI shows the current state immediately
+    // (without waiting up to 5s for the next idle broadcast tick).
+    let initial = {
+        let mut dl = state.downloader.lock().unwrap();
+        dl.poll();
+        let queued = dl.pending_snapshots().into_iter()
+            .map(|(label, url)| QueuedSnapshot { label, url })
+            .collect::<Vec<_>>();
+        ProgressResponse {
+            jobs: WebState::job_snapshots(&dl),
+            queued,
+            max_concurrent: dl.max_concurrent,
+        }
+    };
+    if let Ok(json) = serde_json::to_string(&initial) {
+        if socket.send(Message::Text(json)).await.is_err() { return; }
+    }
+    loop {
+        tokio::select! {
+            msg = rx.recv() => match msg {
+                Ok(json) => {
+                    if socket.send(Message::Text(json)).await.is_err() { break; }
+                }
+                // Subscriber lagged. Resync via the next broadcast tick.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            },
+            // Drain inbound frames (mostly pongs / client closes) so the
+            // socket doesn't stall.
+            frame = socket.recv() => match frame {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Err(_)) => break,
+                _ => {}
+            },
+        }
+    }
 }
 
 async fn get_progress(State(state): State<Arc<WebState>>) -> impl IntoResponse {
@@ -2021,6 +2089,10 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
 
     let password_required_initial = db.get_setting("password_hash").ok().flatten().is_some();
     let flags = db.get_video_flags().unwrap_or_default();
+    // Capacity 16 is plenty — only a small number of browser tabs ever
+    // subscribe and the broadcast is lossy by design (subscribers that lag
+    // get a Lagged error and just resubscribe).
+    let (progress_tx, _initial_rx) = tokio::sync::broadcast::channel::<String>(16);
     let state = Arc::new(WebState {
         library: Mutex::new(library),
         downloader: Mutex::new(downloader),
@@ -2037,7 +2109,45 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         last_scheduled_check: Mutex::new(None),
         password_required_cache: AtomicBool::new(password_required_initial),
         library_version: AtomicU64::new(1),
+        progress_tx,
         login_attempts: Mutex::new(HashMap::new()),
+    });
+
+    // Broadcast progress snapshots to WebSocket subscribers. Ticks fast
+    // (every 500 ms) while any download is active or queued; slow
+    // (every 5 s) when idle, just to keep clients refreshed if state
+    // changed via direct flag/option/folder edits.
+    let progress_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            // Pick interval based on whether there's anything to report on.
+            let interval_ms = {
+                let dl = progress_state.downloader.lock().unwrap();
+                if dl.any_running() || dl.pending_count() > 0 { 500 } else { 5_000 }
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+            // Skip broadcast when no one's listening — saves the JSON encode.
+            if progress_state.progress_tx.receiver_count() == 0 {
+                continue;
+            }
+            // Drive the same poll() that /api/progress does so the snapshot
+            // includes the latest stdout/stderr lines.
+            let snapshot = {
+                let mut dl = progress_state.downloader.lock().unwrap();
+                dl.poll();
+                let queued = dl.pending_snapshots().into_iter()
+                    .map(|(label, url)| QueuedSnapshot { label, url })
+                    .collect::<Vec<_>>();
+                ProgressResponse {
+                    jobs: WebState::job_snapshots(&dl),
+                    queued,
+                    max_concurrent: dl.max_concurrent,
+                }
+            };
+            if let Ok(json) = serde_json::to_string(&snapshot) {
+                let _ = progress_state.progress_tx.send(json);
+            }
+        }
     });
 
     // Background scheduler — ticks every 60 s; runs channel checks when due.
@@ -2081,6 +2191,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/", get(get_index))
         .route("/api/library", get(get_library))
         .route("/api/progress", get(get_progress))
+        .route("/ws/progress", get(ws_progress))
         .route("/api/download", post(post_download))
         .route("/api/watched/:id", post(post_watched))
         .route("/api/videos/:id/flags/:flag", post(post_video_flag))
