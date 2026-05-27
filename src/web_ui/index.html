@@ -123,8 +123,16 @@
   .err-class{font-size:10px;background:#7f1d1d;color:#fecaca;border-radius:3px;padding:1px 6px;text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
   .job-hint{font-size:11px;color:#fecaca;background:rgba(127,29,29,.18);border-left:2px solid #f87171;padding:6px 14px 6px 12px;margin:0 14px 6px}
   progress{flex:1;height:5px;accent-color:var(--accent);min-width:40px}
-  footer{background:var(--panel);border-top:1px solid var(--border);padding:8px 12px;display:flex;gap:8px;align-items:center;flex-shrink:0}
-  footer input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 9px;border-radius:4px;font-size:13px}
+  footer{background:var(--panel);border-top:1px solid var(--border);padding:6px 12px;display:flex;gap:8px;align-items:center;flex-shrink:0;justify-content:center;min-height:24px}
+  /* "New download" form inside the Downloads modal. Replaces the old
+     bottom-of-page footer; sits between the modal header and the
+     active-jobs list. */
+  .dl-new{padding:10px 14px;display:flex;flex-direction:column;gap:8px}
+  .dl-new-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .dl-new-row input[type="url"]{flex:1;min-width:200px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 9px;border-radius:4px;font-size:13px}
+  .dl-new-row select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:5px 6px;font-size:12px}
+  .dl-new-flags{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+  .dl-new-flags label{display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap}
   .preview-thumb{width:100%;max-width:280px;aspect-ratio:16/9;object-fit:cover;border-radius:4px;background:#000;flex-shrink:0}
   .empty{text-align:center;color:var(--muted);padding:40px;font-size:13px}
   @media(max-width:640px){
@@ -154,10 +162,10 @@
     #details{max-height:160px;padding:8px 10px}
     .chapters-pane{display:none}
     section#content{padding:8px}
-    /* Download bar wraps onto two rows so the URL input + button
-       don't squeeze each other off-screen. */
-    footer{flex-wrap:wrap;padding:6px 10px;gap:6px}
-    footer input{flex-basis:100%;order:-1}
+    /* Modal "new download" form stacks vertically on small screens so
+       the URL + button + quality picker don't squeeze each other. */
+    .dl-new-row{flex-direction:column;align-items:stretch}
+    .dl-new-row input[type="url"]{width:100%}
     /* Bulk-mode actions stack vertically when active. */
     .toolbar{flex-wrap:wrap}
     #bulk-actions{flex-wrap:wrap;gap:4px}
@@ -218,20 +226,7 @@
 </main>
 <div id="details"></div>
 <footer>
-  <input type="url" id="dl-url" placeholder="YouTube URL…" oninput="refreshTwitchClipsVisibility()" onkeydown="if(event.key==='Enter')previewDownload()">
-  <button class="primary" onclick="previewDownload()">⬇ Download</button>
-  <select id="dl-quality" title="Download quality" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px" onchange="updateDlMode()">
-    <option value="best">Best quality</option>
-    <option value="1080p">1080p</option>
-    <option value="720p">720p</option>
-    <option value="480p">480p</option>
-    <option value="360p">360p</option>
-    <option value="music">🎵 Music</option>
-  </select>
-  <label id="fast-mode-label" style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Stop at the first already-downloaded video. Faster for large channels but may miss new videos if gaps exist in the archive."><input type="checkbox" id="dl-full-scan"> Fast mode</label>
-  <label id="live-mode-label" style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Record an ongoing live broadcast (Twitch/YouTube Live) from the start instead of joining live. Waits if the stream has not begun yet."><input type="checkbox" id="dl-live"> 🔴 Live</label>
-  <label id="twitch-clips-label" style="display:none;align-items:center;gap:4px;font-size:12px;white-space:nowrap;cursor:pointer" title="Twitch only: pull the channel's Clips listing instead of its VODs. Rewrites the URL to twitch.tv/&lt;channel&gt;/clips before submitting."><input type="checkbox" id="dl-twitch-clips"> Clips only</label>
-  <span id="agpl-notice" style="font-size:10px;color:var(--muted);margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+  <span id="agpl-notice" style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
 </footer>
 
 <script>
@@ -759,9 +754,13 @@ function refreshTwitchClipsVisibility(){
 function dlQuality(){return document.getElementById('dl-quality')?.value||'best'}
 function updateDlMode(){
   const isMusic=dlQuality()==='music';
-  document.getElementById('fast-mode-label').style.display=isMusic?'none':'flex';
+  // The labels only exist while the Downloads modal is open; nothing to
+  // do when this is called from a stale event handler outside it.
+  const fast=document.getElementById('fast-mode-label');
+  const live=document.getElementById('live-mode-label');
+  if(fast)fast.style.display=isMusic?'none':'flex';
   // Live recording makes no sense for music-only mode.
-  document.getElementById('live-mode-label').style.display=isMusic?'none':'flex';
+  if(live)live.style.display=isMusic?'none':'flex';
 }
 async function confirmDownload(url,btn){
   if(btn)btn.closest('.modal-bg').remove();
@@ -1700,17 +1699,58 @@ function renderJobs(jobs,queued,maxConcurrent){
 }
 // Open the Downloads modal. If it's already open, do nothing (clicking the
 // ⬇ button again would otherwise stack duplicate modals).
+//
+// Layout:
+//   ┌──────────────────────────────────────────────────────┐
+//   │ ⬇ Downloads                                    [✕]   │
+//   ├──────────────────────────────────────────────────────┤
+//   │ New download                                         │
+//   │ [URL input………………] [quality▾] [⬇ Download]            │
+//   │ [☐ Fast] [☐ 🔴 Live] [☐ Clips]                        │
+//   ├──────────────────────────────────────────────────────┤
+//   │ Active + recent jobs…                                │
+//   └──────────────────────────────────────────────────────┘
 async function openDownloads(){
   if(document.querySelector('[data-downloads-modal]'))return;
   const bg=document.createElement('div');
   bg.className='modal-bg';
   bg.setAttribute('data-downloads-modal','1');
   bg.onclick=e=>{if(e.target===bg)bg.remove()};
-  bg.innerHTML=`<div class="modal" style="max-width:720px;width:100%">
+  // Inline the URL/quality/flags form inside the modal. The element IDs
+  // (dl-url, dl-quality, dl-full-scan, dl-live, dl-twitch-clips) match
+  // the names global helpers (previewDownload, fullScan, dlLive,
+  // refreshTwitchClipsVisibility…) already look up by getElementById,
+  // so those helpers keep working unchanged.
+  bg.innerHTML=`<div class="modal" style="max-width:760px;width:100%">
     <div class="modal-hdr"><h2>⬇ Downloads</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
-    <div id="downloads-body" style="overflow:auto;max-height:80vh;min-height:120px"><em style="color:var(--muted);padding:14px;display:block">Loading…</em></div>
+    <div class="dl-new">
+      <div class="dl-new-row">
+        <input type="url" id="dl-url" placeholder="Paste a YouTube / TikTok / Twitch / … URL…" oninput="refreshTwitchClipsVisibility()" onkeydown="if(event.key==='Enter')previewDownload()">
+        <select id="dl-quality" title="Download quality" onchange="updateDlMode()">
+          <option value="best">Best quality</option>
+          <option value="1080p">1080p</option>
+          <option value="720p">720p</option>
+          <option value="480p">480p</option>
+          <option value="360p">360p</option>
+          <option value="music">🎵 Music</option>
+        </select>
+        <button class="primary" onclick="previewDownload()">⬇ Download</button>
+      </div>
+      <div class="dl-new-flags">
+        <label id="fast-mode-label" title="Stop at the first already-downloaded video. Faster for large channels but may miss new videos if gaps exist in the archive."><input type="checkbox" id="dl-full-scan"> Fast mode</label>
+        <label id="live-mode-label" title="Record an ongoing live broadcast (Twitch/YouTube Live) from the start instead of joining live. Waits if the stream has not begun yet."><input type="checkbox" id="dl-live"> 🔴 Live</label>
+        <label id="twitch-clips-label" style="display:none" title="Twitch only: pull the channel's Clips listing instead of its VODs."><input type="checkbox" id="dl-twitch-clips"> Clips only</label>
+      </div>
+    </div>
+    <hr style="border-color:var(--border);margin:0">
+    <div id="downloads-body" style="overflow:auto;max-height:60vh;min-height:120px"><em style="color:var(--muted);padding:14px;display:block">Loading…</em></div>
   </div>`;
   document.body.appendChild(bg);
+  // Focus the URL input so users can paste + hit Enter immediately. Slight
+  // delay so the focus survives the DOM-attach + any pending click event.
+  setTimeout(()=>document.getElementById('dl-url')?.focus(),0);
+  // Hide the Clips-only checkbox unless the URL is a Twitch channel.
+  refreshTwitchClipsVisibility();
   // Repaint immediately from the latest snapshot if we have one — saves a
   // round trip. Falls through to /api/progress otherwise.
   try{
