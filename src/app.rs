@@ -29,6 +29,20 @@ const BROWSERS: &[(&str, &str)] = &[
     ("none", "None (no cookies)"),
 ];
 
+/// Top-level navigation. The desktop swaps the CentralPanel content
+/// between these instead of stacking floating windows. Smaller dialogs
+/// (channel options, folder manager, move-to-folder) stay as floating
+/// `egui::Window` since they're modal-ish actions, not screens.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum Screen {
+    /// Channel sidebar + video grid + detail panel. The default.
+    #[default]
+    Library,
+    Settings,
+    Stats,
+    Maintenance,
+}
+
 #[derive(Clone, PartialEq)]
 enum SortMode {
     Title,
@@ -90,7 +104,10 @@ pub struct App {
     search: String,
     downloader: Downloader,
     show_downloads: bool,
-    show_settings: bool,
+    /// Which top-level screen is currently rendered into CentralPanel.
+    /// Settings / Stats / Maintenance now take the full window (with
+    /// scroll) instead of floating over the library.
+    current_screen: Screen,
     dl_url: String,
     dl_full_scan: bool,
     dl_quality: DownloadQuality,
@@ -154,11 +171,9 @@ pub struct App {
     // is.
     backup_save_tx: Sender<PathBuf>,
     backup_save_rx: Receiver<PathBuf>,
-    // Maintenance (library health) window
-    show_maintenance: bool,
+    // Maintenance (library health) screen state. The flag is gone now —
+    // Screen::Maintenance + this report's presence drive the render.
     health_report: Option<crate::maintenance::HealthReport>,
-    // Statistics window
-    show_stats: bool,
     stats_report: Option<crate::stats::StatsReport>,
     // Per-channel download-options dialog state
     show_channel_options: bool,
@@ -286,7 +301,7 @@ impl App {
             search: String::new(),
             downloader: Downloader::new(channels_root, browser, max_concurrent, use_bundled_ytdlp),
             show_downloads: false,
-            show_settings: false,
+            current_screen: Screen::Library,
             dl_url: String::new(),
             dl_full_scan: true,
             dl_quality: DownloadQuality::Best,
@@ -332,9 +347,7 @@ impl App {
             cookies_pick_rx,
             backup_save_tx,
             backup_save_rx,
-            show_maintenance: false,
             health_report: None,
-            show_stats: false,
             stats_report: None,
             show_channel_options: false,
             channel_options_target: None,
@@ -929,27 +942,37 @@ impl App {
                 if ui.selectable_label(self.show_downloads, dl_label).clicked() {
                     self.show_downloads = !self.show_downloads;
                 }
-                if ui.selectable_label(self.show_stats, "📊 Stats").clicked() {
-                    self.show_stats = !self.show_stats;
-                    if self.show_stats {
+                // Top-level screen nav. Clicking the active screen returns
+                // to Library (which is the canonical "home" view).
+                if ui.selectable_label(self.current_screen == Screen::Library, "📚 Library").clicked() {
+                    self.current_screen = Screen::Library;
+                }
+                if ui.selectable_label(self.current_screen == Screen::Stats, "📊 Stats").clicked() {
+                    if self.current_screen == Screen::Stats {
+                        self.current_screen = Screen::Library;
+                    } else {
                         self.stats_report = Some(crate::stats::build(
                             &self.library,
                             &self.watched,
                             &self.resume_positions,
                             crate::stats::now_unix(),
                         ));
+                        self.current_screen = Screen::Stats;
                     }
                 }
-                if ui.selectable_label(self.show_maintenance, "🩺 Maintenance").clicked() {
-                    self.show_maintenance = !self.show_maintenance;
-                    if self.show_maintenance {
+                if ui.selectable_label(self.current_screen == Screen::Maintenance, "🩺 Maintenance").clicked() {
+                    if self.current_screen == Screen::Maintenance {
+                        self.current_screen = Screen::Library;
+                    } else {
                         self.health_report =
                             Some(crate::maintenance::scan(&self.library_root, &self.library));
+                        self.current_screen = Screen::Maintenance;
                     }
                 }
-                if ui.selectable_label(self.show_settings, "⚙ Settings").clicked() {
-                    self.show_settings = !self.show_settings;
-                    if self.show_settings {
+                if ui.selectable_label(self.current_screen == Screen::Settings, "⚙ Settings").clicked() {
+                    if self.current_screen == Screen::Settings {
+                        self.current_screen = Screen::Library;
+                    } else {
                         self.settings_dir = self.channels_root.display().to_string();
                         self.settings_plex_path = self.config.plex.library_path
                             .as_deref().map(|p| p.display().to_string()).unwrap_or_default();
@@ -967,6 +990,7 @@ impl App {
                         } else {
                             "no cookies.txt".to_string()
                         };
+                        self.current_screen = Screen::Settings;
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1473,11 +1497,7 @@ impl App {
             });
     }
 
-    fn maintenance_window(&mut self, ctx: &egui::Context) {
-        if !self.show_maintenance {
-            return;
-        }
-        let mut open = self.show_maintenance;
+    fn maintenance_screen(&mut self, ctx: &egui::Context) {
         let report = self.health_report.clone().unwrap_or_default();
 
         // Actions are collected during rendering and applied after the closure
@@ -1486,18 +1506,19 @@ impl App {
         let mut to_repair: Vec<String> = Vec::new();
         let mut rescan_health = false;
 
-        egui::Window::new("🩺 Library health")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(620.0)
-            .default_height(500.0)
-            .show(ctx, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("← Library").clicked() {
+                    self.current_screen = Screen::Library;
+                }
+                ui.heading("🩺 Library health");
+                ui.separator();
                 if ui.button("⟳ Rescan health").clicked() {
                     rescan_health = true;
                 }
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.heading(format!("Duplicates ({})", report.duplicates.len()));
                     if report.duplicates.is_empty() {
                         ui.label(egui::RichText::new("No duplicate video IDs found.").weak());
@@ -1563,9 +1584,8 @@ impl App {
                             }
                         });
                     }
-                });
             });
-        self.show_maintenance = open;
+        });
 
         // ── Apply collected actions ────────────────────────────────────────
         let mut changed = false;
@@ -1595,24 +1615,35 @@ impl App {
         }
     }
 
-    fn stats_window(&mut self, ctx: &egui::Context) {
-        if !self.show_stats { return; }
-        let mut open = self.show_stats;
+    fn stats_screen(&mut self, ctx: &egui::Context) {
         let report = match &self.stats_report {
             Some(r) => r.clone(),
-            None => return,
+            None => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("← Library").clicked() {
+                            self.current_screen = Screen::Library;
+                        }
+                        ui.heading("📊 Library statistics");
+                    });
+                    ui.separator();
+                    ui.label(egui::RichText::new("No stats yet — try Recompute.").weak());
+                });
+                return;
+            }
         };
         let mut rescan = false;
-        egui::Window::new("📊 Library statistics")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(560.0)
-            .default_height(520.0)
-            .show(ctx, |ui| {
-                if ui.button("⟳ Recompute").clicked() { rescan = true; }
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("← Library").clicked() {
+                    self.current_screen = Screen::Library;
+                }
+                ui.heading("📊 Library statistics");
                 ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                if ui.button("⟳ Recompute").clicked() { rescan = true; }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.heading("Totals");
                     egui::Grid::new("stats_totals").num_columns(2).striped(true).show(ui, |ui| {
                         ui.label("Channels");      ui.label(report.total_channels.to_string()); ui.end_row();
@@ -1665,7 +1696,6 @@ impl App {
                     }
                 });
             });
-        self.show_stats = open;
         if rescan {
             self.stats_report = Some(crate::stats::build(
                 &self.library, &self.watched, &self.resume_positions, crate::stats::now_unix(),
@@ -2011,17 +2041,16 @@ impl App {
         }
     }
 
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        if !self.show_settings {
-            return;
-        }
-        let mut open = self.show_settings;
-        egui::Window::new("⚙ Settings")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(480.0)
-            .show(ctx, |ui| {
+    fn settings_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("← Library").clicked() {
+                    self.current_screen = Screen::Library;
+                }
+                ui.heading("⚙ Settings");
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 egui::Grid::new("settings_grid")
                     .num_columns(2)
                     .spacing([12.0, 8.0])
@@ -2443,7 +2472,7 @@ impl App {
                     );
                 });
             });
-        self.show_settings = open;
+        });
     }
 
     fn detail_panel(&mut self, ctx: &egui::Context) {
@@ -3089,20 +3118,26 @@ impl eframe::App for App {
         }
 
         self.top_bar(ctx);
-        self.channel_panel(ctx);
-        if self.show_downloads {
-            self.downloads_panel(ctx);
-        }
-        self.settings_window(ctx);
-        self.maintenance_window(ctx);
-        self.stats_window(ctx);
+        // Floating sub-dialogs that overlay any screen.
         self.channel_options_window(ctx);
         self.folder_manager_window(ctx);
         self.move_to_folder_window(ctx);
-        self.detail_panel(ctx);
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.video_list(ctx, ui);
-        });
+
+        match self.current_screen {
+            Screen::Library => {
+                self.channel_panel(ctx);
+                if self.show_downloads {
+                    self.downloads_panel(ctx);
+                }
+                self.detail_panel(ctx);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    self.video_list(ctx, ui);
+                });
+            }
+            Screen::Settings => self.settings_screen(ctx),
+            Screen::Stats => self.stats_screen(ctx),
+            Screen::Maintenance => self.maintenance_screen(ctx),
+        }
     }
 }
 
