@@ -250,16 +250,18 @@ impl App {
             let dir = platform::platform_root(&channels_root, p);
             let _ = std::fs::create_dir_all(&dir);
         }
-        let mut library = library::scan_channels(&channels_root);
+        // Open the DB first so the library scanner can use info_cache to
+        // skip re-parsing unchanged info.json sidecars. Cold start still
+        // pays full cost; every subsequent launch is faster.
+        let db_path = channels_root.join("yt-offline.db");
+        let db = Database::open(&db_path)
+            .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
+        let mut library = library::scan_channels_with_cache(&channels_root, Some(&db));
         let status = format!(
             "{} channels, {} videos",
             library.len(),
             library.iter().map(|c| c.total_videos()).sum::<usize>()
         );
-
-        let db_path = channels_root.join("yt-offline.db");
-        let db = Database::open(&db_path)
-            .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
         // Hydrate per-channel download options + folder assignments from
         // SQLite onto the scanned library before publishing it to the UI.
         if let Ok(map) = db.get_all_channel_options() {
@@ -294,16 +296,48 @@ impl App {
         let (thumb_request_tx, thumb_request_rx) = std::sync::mpsc::channel::<PathBuf>();
         let (thumb_result_tx, thumb_result_rx) =
             std::sync::mpsc::channel::<(PathBuf, Option<egui::ColorImage>)>();
-        let ctx = cc.egui_ctx.clone();
-        std::thread::spawn(move || {
-            while let Ok(path) = thumb_request_rx.recv() {
-                let img = decode_thumbnail_image(&path);
-                if thumb_result_tx.send((path, img)).is_err() {
-                    break;
-                }
-                ctx.request_repaint();
-            }
-        });
+        // Decode pool: shared Receiver behind a Mutex (mpsc::Receiver is
+        // !Sync so we can't hand it directly to multiple threads). Each
+        // worker spends ~all its time in image::open + resize, so lock
+        // contention is negligible — there's at most one recv per thumb
+        // decode and the decode itself is milliseconds.
+        let thumb_request_rx = std::sync::Arc::new(std::sync::Mutex::new(thumb_request_rx));
+        // Size the pool at half the available cores, clamped to [2, 8].
+        // Thumbnail decoding is CPU-bound (image crate is pure Rust), so
+        // more workers help up to the core count; leaving half the cores
+        // free keeps the rest of the UI + downloads + scans responsive.
+        let n_workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .saturating_div(2)
+            .clamp(2, 8);
+        for worker_id in 0..n_workers {
+            let rx = thumb_request_rx.clone();
+            let tx = thumb_result_tx.clone();
+            let ctx = cc.egui_ctx.clone();
+            std::thread::Builder::new()
+                .name(format!("yt-offline-thumb-{worker_id}"))
+                .spawn(move || {
+                    loop {
+                        // Hold the lock only for the recv itself; release
+                        // before decoding so other workers can claim the
+                        // next path while we work on this one.
+                        let path = match rx.lock() {
+                            Ok(guard) => match guard.recv() {
+                                Ok(p) => p,
+                                Err(_) => break,
+                            },
+                            Err(_) => break,
+                        };
+                        let img = decode_thumbnail_image(&path);
+                        if tx.send((path, img)).is_err() {
+                            break;
+                        }
+                        ctx.request_repaint();
+                    }
+                })
+                .ok();
+        }
 
         Self {
             config,
@@ -437,7 +471,7 @@ impl App {
     }
 
     fn rescan(&mut self) {
-        let mut new_lib = library::scan_channels(&self.channels_root);
+        let mut new_lib = library::scan_channels_with_cache(&self.channels_root, Some(&self.db));
         if let Ok(map) = self.db.get_all_channel_options() {
             library::apply_channel_options(&mut new_lib, &map);
         }

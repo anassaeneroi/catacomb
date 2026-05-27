@@ -52,6 +52,11 @@ const FILE_POOL_SIZE: u32 = 4;
 /// Construction always returns a pool with at least one usable connection
 /// and the schema initialised. Subsequent method calls borrow a connection,
 /// run their query, and return it — no external `Mutex` is needed.
+///
+/// `Clone` is cheap: the inner `r2d2::Pool` is an `Arc` so we hand out
+/// new references, not new pools. This lets the library scanner take
+/// its own handle for per-thread cache lookups during parallel scans.
+#[derive(Clone)]
 pub struct Database {
     pool: Pool,
 }
@@ -152,6 +157,19 @@ impl Database {
                 folder_id INTEGER NOT NULL,
                 PRIMARY KEY (platform, handle),
                 FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE
+            );
+            -- Cache of parsed info.json fields keyed by the file's absolute
+            -- path + mtime. Library scans hit this first; on miss they
+            -- parse the JSON and upsert here so the next scan is free.
+            -- The keyed-by-mtime invalidation means yt-dlp re-writing an
+            -- info.json (e.g. after a metadata refresh) auto-invalidates
+            -- without explicit eviction.
+            CREATE TABLE IF NOT EXISTS info_cache (
+                path          TEXT PRIMARY KEY,
+                mtime_unix    INTEGER NOT NULL,
+                duration_secs REAL,
+                has_chapters  INTEGER NOT NULL DEFAULT 0,
+                upload_date   TEXT
             );",
         )?;
         Ok(())
@@ -422,6 +440,63 @@ impl Database {
             .filter_map(std::result::Result::ok)
             .collect();
         Ok(map)
+    }
+
+    /// Look up the cached parse of an info.json sidecar. Returns
+    /// `(duration_secs, has_chapters, upload_date)` if the cache row's
+    /// `mtime_unix` matches the supplied value (cache hit), or `None`
+    /// when the row is missing or stale.
+    ///
+    /// Used by the library scan hot path. The lookup itself is two SQL
+    /// columns + an integer compare, dominated by the SQLite call
+    /// overhead (~microseconds) rather than JSON parsing (~hundreds of
+    /// microseconds), which is the savings we're harvesting.
+    pub fn info_cache_get(
+        &self,
+        path: &str,
+        mtime_unix: u64,
+    ) -> Option<(Option<f64>, bool, Option<String>)> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT mtime_unix, duration_secs, has_chapters, upload_date \
+             FROM info_cache WHERE path = ?1",
+        ).ok()?;
+        let mut rows = stmt.query([path]).ok()?;
+        let row = rows.next().ok().flatten()?;
+        let stored_mtime: i64 = row.get(0).ok()?;
+        if stored_mtime != mtime_unix as i64 {
+            return None;
+        }
+        let dur: Option<f64> = row.get(1).ok()?;
+        let chap: i64 = row.get(2).ok()?;
+        let date: Option<String> = row.get(3).ok()?;
+        Some((dur, chap != 0, date))
+    }
+
+    /// Upsert a parsed info.json result into the cache. Called on miss
+    /// by the library scanner. Errors are swallowed — a cache miss next
+    /// time costs the same as no cache at all.
+    pub fn info_cache_put(
+        &self,
+        path: &str,
+        mtime_unix: u64,
+        duration_secs: Option<f64>,
+        has_chapters: bool,
+        upload_date: Option<&str>,
+    ) {
+        let conn = self.conn();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO info_cache \
+                (path, mtime_unix, duration_secs, has_chapters, upload_date) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                path,
+                mtime_unix as i64,
+                duration_secs,
+                has_chapters as i64,
+                upload_date,
+            ],
+        );
     }
 
     /// Idempotently merge another yt-offline database into this one.

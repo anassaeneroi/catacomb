@@ -18,7 +18,11 @@ optdepends=(
     'libnotify: desktop notifications when downloads finish'
 )
 makedepends=('rust' 'cargo')
-options=('!lto')  # rusqlite bundled sqlite cannot be LTO-linked with rust-lld
+# Disable makepkg's environment-level LTO so we don't double up with the
+# Cargo.toml profile (which sets lto = "thin"). Full LTO via rust-lld
+# previously broke the rusqlite bundled-sqlite link; thin LTO in Cargo
+# does the cross-crate inlining we actually want.
+options=('!lto')
 source=("git+https://codeberg.org/anassaeneroi/yt-offline.git#branch=main")
 sha256sums=('SKIP')
 

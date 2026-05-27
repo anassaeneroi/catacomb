@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::database::Database;
 use crate::download_options::DownloadOptions;
 use crate::platform::{self, Platform};
 
@@ -197,7 +198,18 @@ pub fn find_video<'a>(channels: &'a [Channel], id: &str) -> Option<(&'a Video, &
 /// Per-channel info.json reads are parallelised across the available CPUs
 /// because that's where ~all the time goes for large libraries (one fs read
 /// + one JSON parse per video, multiplied by thousands).
-pub fn scan_channels(youtube_root: &Path) -> Vec<Channel> {
+/// Walk the channels directory and return the enriched library tree.
+///
+/// `cache` is an optional handle to the SQLite database holding the
+/// `info_cache` table; when present, the scanner skips re-parsing
+/// info.json sidecars whose `mtime` is unchanged since the last scan.
+/// The cache is best-effort; any SQLite error falls through to a fresh
+/// parse without complaint. Each parallel scan worker checks out its
+/// own r2d2 connection so per-file lookups don't serialise.
+///
+/// Pass `None` from contexts that don't have a DB yet (early startup,
+/// the in-memory fallback path).
+pub fn scan_channels_with_cache(youtube_root: &Path, cache: Option<&Database>) -> Vec<Channel> {
     // Gather (platform, channel-folder-name, full-path) across every platform.
     let mut dirs: Vec<(Platform, String, PathBuf)> = Vec::new();
     for &platform in Platform::all() {
@@ -216,8 +228,11 @@ pub fn scan_channels(youtube_root: &Path) -> Vec<Channel> {
         .map(|n| n.get())
         .unwrap_or(4)
         .min(dirs.len().max(1));
-    let mut channels = parallel_map(dirs, n_workers, |(platform, name, path)| {
-        let (videos, playlists) = scan_channel_dir(&path);
+    // Hand each worker its own Database handle via .clone() (Arc inside,
+    // cheap). Workers without a cache get None.
+    let cache_handle: Option<Database> = cache.cloned();
+    let mut channels = parallel_map(dirs, n_workers, move |(platform, name, path)| {
+        let (videos, playlists) = scan_channel_dir_with_cache(&path, cache_handle.as_ref());
         if videos.is_empty() && playlists.is_empty() { return None; }
         let meta = load_channel_meta(&videos);
         let total_videos_cached =
@@ -432,24 +447,47 @@ fn collect_raw_videos(entries: impl Iterator<Item = std::fs::DirEntry>) -> Vec<R
     by_stem.into_values().collect()
 }
 
-fn enrich(raws: Vec<RawVideo>) -> Vec<Video> {
+fn enrich_with_cache(raws: Vec<RawVideo>, cache: Option<&Database>) -> Vec<Video> {
     let mut videos: Vec<Video> = raws.into_iter().map(|raw| {
         // Parse info.json once for both duration and chapter presence.
+        // The cache (if provided) lets us skip the read+JSON parse when
+        // the file's mtime is unchanged since last scan — the dominant
+        // cost on a warm-filesystem rescan.
         let (duration_secs, has_chapters, upload_date) = raw.info_path.as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .map(|val| {
-                let dur = val.get("duration").and_then(|v| v.as_f64());
-                let chap = val.get("chapters")
-                    .and_then(|c| c.as_array())
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false);
-                // Prefer `upload_date`; fall back to `release_date` for premiere/live content.
-                let date = val.get("upload_date")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| val.get("release_date").and_then(|v| v.as_str()))
-                    .map(|s| s.to_string());
-                (dur, chap, date)
+            .map(|p| {
+                let mtime = std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
+                let path_str = p.to_string_lossy();
+                // Cache hit: return early without reading or parsing.
+                if let (Some(mt), Some(db)) = (mtime, cache) {
+                    if let Some(hit) = db.info_cache_get(&path_str, mt) {
+                        return hit;
+                    }
+                }
+                // Cache miss: parse the file, then upsert the result.
+                let parsed = std::fs::read_to_string(p.as_path()).ok()
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .map(|val| {
+                        let dur = val.get("duration").and_then(|v| v.as_f64());
+                        let chap = val.get("chapters")
+                            .and_then(|c| c.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        // Prefer `upload_date`; fall back to `release_date` for premiere/live.
+                        let date = val.get("upload_date")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| val.get("release_date").and_then(|v| v.as_str()))
+                            .map(|s| s.to_string());
+                        (dur, chap, date)
+                    })
+                    .unwrap_or((None, false, None));
+                if let (Some(mt), Some(db)) = (mtime, cache) {
+                    db.info_cache_put(&path_str, mt, parsed.0, parsed.1, parsed.2.as_deref());
+                }
+                parsed
             })
             .unwrap_or((None, false, None));
         let metadata = raw.video_path.as_ref()
@@ -481,16 +519,19 @@ fn enrich(raws: Vec<RawVideo>) -> Vec<Video> {
     videos
 }
 
-/// Scan a single flat directory for video files and return enriched `Video` entries.
-///
-/// Used when rescanning a playlist directory without a full library reload.
-pub fn scan_video_files(dir: &Path) -> Vec<Video> {
+/// Scan a single flat directory for video files and return enriched
+/// `Video` entries. Used when rescanning a playlist directory without
+/// a full library reload.
+pub fn scan_video_files_with_cache(dir: &Path, cache: Option<&Database>) -> Vec<Video> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let raws = collect_raw_videos(entries.flatten().filter(|e| e.path().is_file()));
-    enrich(raws)
+    enrich_with_cache(raws, cache)
 }
 
-fn scan_channel_dir(dir: &Path) -> (Vec<Video>, Vec<Playlist>) {
+fn scan_channel_dir_with_cache(
+    dir: &Path,
+    cache: Option<&Database>,
+) -> (Vec<Video>, Vec<Playlist>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return (Vec::new(), Vec::new()) };
 
     let mut file_entries = Vec::new();
@@ -500,7 +541,7 @@ fn scan_channel_dir(dir: &Path) -> (Vec<Video>, Vec<Playlist>) {
         let path = entry.path();
         if path.is_dir() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let videos = scan_video_files(&path);
+            let videos = scan_video_files_with_cache(&path, cache);
             if !videos.is_empty() {
                 playlists.push(Playlist { name, path, videos });
             }
@@ -510,7 +551,7 @@ fn scan_channel_dir(dir: &Path) -> (Vec<Video>, Vec<Playlist>) {
     }
 
     let raws = collect_raw_videos(file_entries.into_iter());
-    let videos = enrich(raws);
+    let videos = enrich_with_cache(raws, cache);
     playlists.sort_by_key(|p| p.name.to_lowercase());
     (videos, playlists)
 }

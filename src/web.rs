@@ -126,6 +126,12 @@ pub struct WebState {
     /// each message to its client. The `/api/progress` HTTP endpoint stays
     /// available as a fallback for clients that can't open a socket.
     pub progress_tx: tokio::sync::broadcast::Sender<String>,
+    /// Cached serialized body of `/api/library` keyed by the
+    /// `library_version` it was built against. On hit, handlers ship
+    /// the cached bytes without re-walking the channel tree or
+    /// re-serializing. The Arc lets concurrent responses share one
+    /// allocation. Cleared / replaced lazily on the next miss.
+    pub library_body_cache: Mutex<Option<(u64, std::sync::Arc<String>)>>,
 }
 
 /// Failed-login tracking entry. After [`LOGIN_LOCKOUT_AFTER`] failures from
@@ -868,8 +874,16 @@ async fn auth_middleware(
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 async fn get_index() -> impl IntoResponse {
+    // No-store on the HTML body: the binary upgrades change the embedded
+    // markup without changing the URL, and we don't want a long-lived
+    // browser tab serving a months-old UI against a fresh API. The JSON
+    // endpoints still ETag their own bodies so library data remains
+    // efficiently cached.
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         HTML_UI,
     )
 }
@@ -891,13 +905,48 @@ async fn get_library(
             ], StatusCode::NOT_MODIFIED).into_response();
         }
     }
+    // Body cache: if we already serialized the payload for this version,
+    // hand out the cached String. The 304 above catches clients with a
+    // matching ETag; the body cache catches clients without one (curl,
+    // freshly-opened tabs, mobile WebViews that don't store ETags
+    // reliably). Serializing a multi-MB library JSON for every reload
+    // burns measurable CPU on large installations.
+    {
+        let cache = state.library_body_cache.lock().unwrap();
+        if let Some((cached_ver, body)) = cache.as_ref() {
+            if *cached_ver == version {
+                let body = body.clone();
+                drop(cache);
+                return (
+                    [
+                        (header::ETAG, etag),
+                        (header::CACHE_CONTROL, "no-cache".to_string()),
+                        (header::CONTENT_TYPE, "application/json".to_string()),
+                    ],
+                    body.as_str().to_string(),
+                ).into_response();
+            }
+        }
+    }
+
     let payload = build_library_payload(&state).await;
+    // Re-check the version: if the library changed while we were
+    // building (a download finished, watched toggled, etc.), the body
+    // we just produced is stale for the *new* version. Don't cache
+    // anything in that case — we'll serialize again next time.
+    let post_version = state.library_version.load(Ordering::Relaxed);
+    let body = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    if post_version == version {
+        let body_arc = std::sync::Arc::new(body.clone());
+        *state.library_body_cache.lock().unwrap() = Some((version, body_arc));
+    }
     (
         [
             (header::ETAG, etag),
             (header::CACHE_CONTROL, "no-cache".to_string()),
+            (header::CONTENT_TYPE, "application/json".to_string()),
         ],
-        Json(payload),
+        body,
     ).into_response()
 }
 
@@ -1613,7 +1662,7 @@ async fn get_description(
 }
 
 async fn post_rescan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    let mut new_lib = library::scan_channels(&state.channels_root);
+    let mut new_lib = library::scan_channels_with_cache(&state.channels_root, Some(&state.db));
     if let Ok(map) = state.db.get_all_channel_options() {
         library::apply_channel_options(&mut new_lib, &map);
     }
@@ -1667,7 +1716,7 @@ async fn post_maintenance_remove(
 ) -> impl IntoResponse {
     let (removed, errors) = maintenance::remove_files(&state.library_root, &body.paths);
     // Refresh the library so the removed copies disappear from the UI.
-    let mut new_lib = library::scan_channels(&state.channels_root);
+    let mut new_lib = library::scan_channels_with_cache(&state.channels_root, Some(&state.db));
     if let Ok(map) = state.db.get_all_channel_options() {
         library::apply_channel_options(&mut new_lib, &map);
     }
@@ -2151,9 +2200,12 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("config.toml");
 
-    let mut library = library::scan_channels(&channels_root);
+    // Open the DB first so the scanner can consult info_cache to skip
+    // re-parsing unchanged info.json files (the dominant cost on a
+    // warm-filesystem rescan of a large library).
     let db = Database::open(&db_path)
         .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
+    let mut library = library::scan_channels_with_cache(&channels_root, Some(&db));
     if let Ok(map) = db.get_all_channel_options() {
         library::apply_channel_options(&mut library, &map);
     }
@@ -2199,6 +2251,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         library_version: AtomicU64::new(1),
         progress_tx,
         login_attempts: Mutex::new(HashMap::new()),
+        library_body_cache: Mutex::new(None),
     });
 
     // Broadcast progress snapshots to WebSocket subscribers. Ticks fast
