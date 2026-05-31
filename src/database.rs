@@ -170,6 +170,19 @@ impl Database {
                 duration_secs REAL,
                 has_chapters  INTEGER NOT NULL DEFAULT 0,
                 upload_date   TEXT
+            );
+            -- Free-text user annotations on a channel or a video.
+            -- `target_kind` is 'channel' or 'video'; `target_id` is
+            -- 'platform/handle' for channels or the video ID for videos.
+            -- An empty body is treated as 'no note' and deleted rather
+            -- than stored, so the table only holds rows the user cares
+            -- about.
+            CREATE TABLE IF NOT EXISTS notes (
+                target_kind TEXT NOT NULL,
+                target_id   TEXT NOT NULL,
+                body        TEXT NOT NULL,
+                updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (target_kind, target_id)
             );",
         )?;
         Ok(())
@@ -348,6 +361,58 @@ impl Database {
             if a { bundle.archive.insert(id.clone()); }
         }
         Ok(bundle)
+    }
+
+    /// Fetch a single note body. `target_kind` is `"channel"` or
+    /// `"video"`; `target_id` is `"platform/handle"` or the video ID.
+    /// Returns `None` when no note exists.
+    pub fn get_note(&self, target_kind: &str, target_id: &str) -> Result<Option<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT body FROM notes WHERE target_kind = ?1 AND target_id = ?2",
+        )?;
+        let mut rows = stmt.query([target_kind, target_id])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
+    /// Upsert (or delete) a note. An empty / whitespace-only body deletes
+    /// the row so we never store blank notes — that keeps `get_all_notes`
+    /// and the search index free of noise.
+    pub fn set_note(&self, target_kind: &str, target_id: &str, body: &str) -> Result<()> {
+        let conn = self.conn();
+        if body.trim().is_empty() {
+            conn.execute(
+                "DELETE FROM notes WHERE target_kind = ?1 AND target_id = ?2",
+                [target_kind, target_id],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO notes (target_kind, target_id, body, updated_at) \
+                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP) \
+                 ON CONFLICT(target_kind, target_id) \
+                 DO UPDATE SET body = excluded.body, updated_at = CURRENT_TIMESTAMP",
+                rusqlite::params![target_kind, target_id, body],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Bulk fetch of every note as `((target_kind, target_id) → body)`.
+    /// Hydrated into memory at startup so the UI can render note
+    /// indicators + search bodies without per-item SQL.
+    pub fn get_all_notes(&self) -> Result<HashMap<(String, String), String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT target_kind, target_id, body FROM notes")?;
+        let map = stmt
+            .query_map([], |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+        Ok(map)
     }
 
     /// Bulk fetch of every channel's options, returned as
@@ -700,6 +765,39 @@ impl Database {
                     "SELECT count(*) FROM channel_assignments", [], |r| r.get(0))?;
                 let assignments_added = (assignments_after - assignments_before).max(0);
 
+                // notes: keep the later updated_at, same pattern as watched.
+                // The notes table is newer than the others, so a backup from
+                // before it existed won't have it — guard with a table check
+                // and skip the merge silently when it's absent.
+                let mut notes_added: i64 = 0;
+                let has_notes: i64 = conn.query_row(
+                    "SELECT count(*) FROM bk.sqlite_master \
+                     WHERE type = 'table' AND name = 'notes'",
+                    [], |r| r.get(0))?;
+                if has_notes > 0 {
+                    let notes_before: i64 = conn.query_row(
+                        "SELECT count(*) FROM notes", [], |r| r.get(0))?;
+                    conn.execute(
+                        "INSERT OR IGNORE INTO notes (target_kind, target_id, body, updated_at) \
+                         SELECT target_kind, target_id, body, updated_at FROM bk.notes", [])?;
+                    conn.execute(
+                        "UPDATE notes SET \
+                            body = (SELECT bk.notes.body FROM bk.notes \
+                                WHERE bk.notes.target_kind = main.notes.target_kind \
+                                AND bk.notes.target_id = main.notes.target_id), \
+                            updated_at = (SELECT bk.notes.updated_at FROM bk.notes \
+                                WHERE bk.notes.target_kind = main.notes.target_kind \
+                                AND bk.notes.target_id = main.notes.target_id) \
+                         WHERE EXISTS (\
+                             SELECT 1 FROM bk.notes \
+                             WHERE bk.notes.target_kind = main.notes.target_kind \
+                             AND bk.notes.target_id = main.notes.target_id \
+                             AND bk.notes.updated_at > main.notes.updated_at)", [])?;
+                    let notes_after: i64 = conn.query_row(
+                        "SELECT count(*) FROM notes", [], |r| r.get(0))?;
+                    notes_added = (notes_after - notes_before).max(0);
+                }
+
                 Ok(RestoreSummary {
                     watched_added: watched_added as u64,
                     positions_added: positions_added as u64,
@@ -707,6 +805,7 @@ impl Database {
                     flags_added: flags_added as u64,
                     folders_added: folders_added as u64,
                     assignments_added: assignments_added as u64,
+                    notes_added: notes_added as u64,
                 })
             })();
             match summary {
@@ -738,6 +837,7 @@ pub struct RestoreSummary {
     pub flags_added: u64,
     pub folders_added: u64,
     pub assignments_added: u64,
+    pub notes_added: u64,
 }
 
 #[cfg(test)]
@@ -850,6 +950,59 @@ mod restore_tests {
         let err = live.restore_from_backup(&bad).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("missing required table"), "{msg}");
+    }
+
+    #[test]
+    fn notes_upsert_get_and_empty_delete() {
+        let dir = ScratchDir::new("notes");
+        let db = Database::open(&dir.join("notes.db")).unwrap();
+
+        // No note yet.
+        assert_eq!(db.get_note("video", "v1").unwrap(), None);
+
+        // Set + read back.
+        db.set_note("video", "v1", "remember this clip").unwrap();
+        assert_eq!(db.get_note("video", "v1").unwrap().as_deref(), Some("remember this clip"));
+
+        // Overwrite.
+        db.set_note("video", "v1", "updated text").unwrap();
+        assert_eq!(db.get_note("video", "v1").unwrap().as_deref(), Some("updated text"));
+
+        // Channel note keyed separately.
+        db.set_note("channel", "youtube/Andrewism", "great anarchist channel").unwrap();
+        assert_eq!(
+            db.get_note("channel", "youtube/Andrewism").unwrap().as_deref(),
+            Some("great anarchist channel"),
+        );
+
+        // get_all_notes returns both.
+        let all = db.get_all_notes().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.get(&("video".into(), "v1".into())).map(String::as_str), Some("updated text"));
+
+        // Empty body deletes the row.
+        db.set_note("video", "v1", "   ").unwrap();
+        assert_eq!(db.get_note("video", "v1").unwrap(), None);
+        assert_eq!(db.get_all_notes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn notes_merge_keeps_later_on_restore() {
+        let dir = ScratchDir::new("notes-merge");
+        let live = Database::open(&dir.join("live.db")).unwrap();
+        let backup = Database::open(&dir.join("backup.db")).unwrap();
+
+        // A note only in the backup gets pulled in; a note newer on the
+        // backup side wins the conflict.
+        backup.set_note("video", "only-backup", "from backup").unwrap();
+        live.set_note("video", "shared", "old live text").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        backup.set_note("video", "shared", "newer backup text").unwrap();
+
+        let summary = live.restore_from_backup(&dir.join("backup.db")).unwrap();
+        assert_eq!(summary.notes_added, 1); // only-backup is the new row
+        assert_eq!(live.get_note("video", "only-backup").unwrap().as_deref(), Some("from backup"));
+        assert_eq!(live.get_note("video", "shared").unwrap().as_deref(), Some("newer backup text"));
     }
 }
 

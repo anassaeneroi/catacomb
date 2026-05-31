@@ -235,6 +235,17 @@ let library=[], channelUrls=[], activeChannelIdx=null, activePlaylistIdx=null, s
 // Folder list from the most-recent /api/library response; populated by
 // loadLibrary() and read by renderSidebar() to draw the Folders group.
 let librarySnapshotFolders=[];
+// Notes map: "video:<id>" or "channel:<platform>/<handle>" → body text.
+// Fetched once on load via /api/notes; updated locally on edit. Drives
+// the 📝 indicator on cards/channels and feeds the global search.
+let notes={};
+async function loadNotes(){
+  try{ notes=await(await api('/api/notes')).json(); }
+  catch{ notes={}; }
+}
+// Convenience accessors keyed the same way the server stores them.
+function videoNote(id){ return notes['video:'+id]||''; }
+function channelNote(platform,handle){ return notes['channel:'+platform+'/'+handle]||''; }
 // Smart-folder view selectors — at most one is true at a time.
 let showFavourites=false, showBookmarks=false, showWaiting=false;
 // Filter chips above the grid. Each is independent; the grid filters by
@@ -320,6 +331,8 @@ function renderSidebar(){
       s+=`<div class="ch-sub" style="color:var(--accent)" onclick="downloadChannelByIdx(${i})">⬇ Check for new videos</div>`;
       s+=`<div class="ch-sub" onclick="openChannelOptions(${i})">⚙ Channel options…</div>`;
       s+=`<div class="ch-sub" onclick="openMoveToFolder(${i})">📁 Move to folder…</div>`;
+      const hasNote=!!channelNote(ch.platform,ch.name);
+      s+=`<div class="ch-sub" onclick="editChannelNote(${i})"${hasNote?' style="color:var(--accent)"':''}>📝 ${hasNote?'Edit note…':'Add note…'}</div>`;
     }
     return s;
   };
@@ -588,6 +601,7 @@ function renderGrid(){
         <button onclick="toggleFlag('${v.id}','favourite',this)" title="Favourite" style="${v.favourite?'color:#facc15':''}">${v.favourite?'★':'☆'}</button>
         <button onclick="toggleFlag('${v.id}','bookmark',this)" title="Bookmark" style="${v.bookmark?'color:var(--accent)':''}">🔖</button>
         <button onclick="toggleFlag('${v.id}','waiting',this)" title="Waiting list" style="${v.waiting?'color:var(--accent)':''}">⏳</button>
+        <button onclick="editNote('video','${v.id}',${JSON.stringify(v.title).replace(/"/g,'&quot;')})" title="${videoNote(v.id)?'Edit note':'Add note'}" style="${videoNote(v.id)?'color:var(--accent)':''}">📝</button>
       </div>
     </div>`;
   }).join('');
@@ -616,6 +630,56 @@ async function toggleFlag(videoId,flag,btn){
     // Undo on failure.
     v[flag]=!newValue;
     setStatus('Error: '+e.message);
+  }
+}
+
+/* ── Notes ──────────────────────────────────────────────────────── */
+// Open a small modal to edit a free-text note on a video or channel.
+// `kind` is 'video' or 'channel'; `id` is the video ID or
+// '<platform>/<handle>'. `title` is shown in the header for context.
+function editNote(kind,id,title){
+  const key=kind+':'+id;
+  const current=notes[key]||'';
+  const bg=document.createElement('div');bg.className='modal-bg';
+  bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  bg.innerHTML=`<div class="modal" style="max-width:480px;width:100%">
+    <div class="modal-hdr"><h2>📝 Note — ${esc(title||id)}</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <textarea id="note-text" style="width:100%;min-height:160px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:13px;resize:vertical" placeholder="Anything you want to remember about this…">${esc(current)}</textarea>
+    <div class="settings-hint">Notes are searchable from the filter box. Leave empty to delete.</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button onclick="this.closest('.modal-bg').remove()">Cancel</button>
+      <button class="primary" onclick="saveNote('${esc(kind)}','${esc(id)}',this)">Save</button>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+  setTimeout(()=>document.getElementById('note-text')?.focus(),0);
+}
+// Channel note: keyed by "<platform>/<handle>". Convenience wrapper so
+// the sidebar sub-action doesn't have to build the composite id inline.
+function editChannelNote(idx){
+  const ch=library[idx]; if(!ch)return;
+  editNote('channel',ch.platform+'/'+ch.name,ch.name);
+}
+async function saveNote(kind,id,btn){
+  const body=document.getElementById('note-text')?.value||'';
+  btn.disabled=true;
+  try{
+    const r=await api(`/api/notes/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({body}),
+    });
+    if(!r.ok)throw new Error(await r.text());
+    // Update the local map so indicators + search reflect immediately.
+    const key=kind+':'+id;
+    if(body.trim()) notes[key]=body; else delete notes[key];
+    btn.closest('.modal-bg').remove();
+    setStatus('Note saved');
+    renderGrid();
+    if(activeChannelIdx!==null||true)renderSidebar();
+  }catch(e){
+    setStatus('Note error: '+e.message);
+    btn.disabled=false;
   }
 }
 function renderChannelGrid(){
@@ -1396,7 +1460,9 @@ async function uploadRestoreDb(input){
     const r=await fetch('/api/restore/db',{method:'POST',headers:{'Content-Type':'application/x-sqlite3'},body:f});
     if(!r.ok){throw new Error(await r.text())}
     const s=await r.json();
-    status.textContent=`Imported: ${s.watched_added}W · ${s.positions_added}P · ${s.options_added}opts · ${s.flags_added}flags · ${s.folders_added}folders · ${s.assignments_added}assigns`;
+    status.textContent=`Imported: ${s.watched_added}W · ${s.positions_added}P · ${s.options_added}opts · ${s.flags_added}flags · ${s.folders_added}folders · ${s.assignments_added}assigns · ${s.notes_added||0}notes`;
+    // Pull in any imported notes so indicators + search reflect them.
+    loadNotes();
     setStatus('Library snapshot imported');
     // Refresh the sidebar / grid so the new flags / folders show up.
     loadLibrary();
@@ -1906,7 +1972,10 @@ function matchesSearch(v,chName,q){
   const t=(v.title||'').toLowerCase();
   const id=(v.id||'').toLowerCase();
   const ch=(chName||'').toLowerCase();
-  return t.includes(q)||id.includes(q)||ch.includes(q);
+  // Search also hits the per-video note body so a user can find a clip
+  // by something they wrote about it, not just its title.
+  const note=videoNote(v.id).toLowerCase();
+  return t.includes(q)||id.includes(q)||ch.includes(q)||note.includes(q);
 }
 function p(n){return String(n).padStart(2,'0')}
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
@@ -1944,7 +2013,7 @@ applyTheme(localStorage.getItem('theme')||'dark');
 // before we can resolve `channel:<name>` back to an index — do that
 // after loadLibrary() resolves.
 (async()=>{
-  await loadLibrary();
+  await Promise.all([loadLibrary(), loadNotes()]);
   restoreUiState();
   renderSidebar();
   renderGrid();

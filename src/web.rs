@@ -1985,6 +1985,9 @@ async fn post_assign_folder(
 #[derive(Deserialize)]
 struct FlagToggleBody { value: bool }
 
+#[derive(Deserialize)]
+struct NoteBody { body: String }
+
 /// `POST /api/videos/:id/flags/:flag` — set or clear a single per-video
 /// flag (`bookmark` / `favourite` / `waiting` / `archive`). The watched
 /// flag is handled by the separate `POST /api/watched/:id` endpoint for
@@ -2015,6 +2018,37 @@ async fn post_video_flag(
         if body.value { target.insert(video_id); } else { target.remove(&video_id); }
     }
     bump_library_version(&state);
+    (StatusCode::OK, "ok").into_response()
+}
+
+/// `GET /api/notes` — return every note as a map of
+/// `"<kind>:<id>" → body`. The UI fetches this once on load and keeps it
+/// in memory to render note indicators + include note bodies in the
+/// global search. Small table, so a single bulk fetch is cheap.
+async fn get_notes(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let map = state.db.get_all_notes().unwrap_or_default();
+    // Flatten the (kind, id) tuple key into "kind:id" for JSON object keys.
+    let flat: HashMap<String, String> = map
+        .into_iter()
+        .map(|((kind, id), body)| (format!("{kind}:{id}"), body))
+        .collect();
+    Json(flat).into_response()
+}
+
+/// `POST /api/notes/:kind/:id` — upsert a note. An empty body deletes it.
+/// `kind` must be `channel` or `video`; `id` is `platform/handle` for
+/// channels (URL-encoded `/` becomes `%2F`) or the bare video ID.
+async fn post_note(
+    State(state): State<Arc<WebState>>,
+    Path((kind, id)): Path<(String, String)>,
+    Json(body): Json<NoteBody>,
+) -> impl IntoResponse {
+    if kind != "channel" && kind != "video" {
+        return (StatusCode::BAD_REQUEST, "kind must be channel or video").into_response();
+    }
+    if let Err(e) = state.db.set_note(&kind, &id, &body.body) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
     (StatusCode::OK, "ok").into_response()
 }
 
@@ -2365,6 +2399,8 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/download", post(post_download))
         .route("/api/watched/:id", post(post_watched))
         .route("/api/videos/:id/flags/:flag", post(post_video_flag))
+        .route("/api/notes", get(get_notes))
+        .route("/api/notes/:kind/:id", post(post_note))
         .route("/api/folders", post(post_create_folder))
         .route("/api/folders/:id/rename", post(post_rename_folder))
         .route("/api/folders/:id/check", post(post_check_folder))

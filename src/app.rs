@@ -101,6 +101,12 @@ pub struct App {
     library: Vec<library::Channel>,
     sidebar_view: SidebarView,
     selected_video: Option<String>,
+    /// Edit buffer for the selected video's note, plus the id it belongs
+    /// to. When `note_target` != `selected_video` we (re)load the note
+    /// from the DB into `note_buffer`. Keeps the textarea editable
+    /// without a DB round-trip per keystroke.
+    note_buffer: String,
+    note_target: Option<String>,
     search: String,
     downloader: Downloader,
     show_downloads: bool,
@@ -351,6 +357,8 @@ impl App {
             library,
             sidebar_view: SidebarView::All,
             selected_video: None,
+            note_buffer: String::new(),
+            note_target: None,
             search: String::new(),
             downloader: Downloader::new(channels_root, browser, max_concurrent, use_bundled_ytdlp, use_pot_provider),
             show_downloads: false,
@@ -2715,6 +2723,35 @@ impl App {
 
                 ui.separator();
 
+                // ── Note editor ──────────────────────────────────────
+                // Lazy-load the note from the DB the first time we render
+                // for a given video. Subsequent frames edit the in-memory
+                // buffer; we persist on focus-loss / explicit Save.
+                if self.note_target.as_deref() != Some(selected_id.as_str()) {
+                    self.note_buffer = self.db
+                        .get_note("video", &selected_id)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    self.note_target = Some(selected_id.clone());
+                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("📝 Note").small().strong());
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.note_buffer)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("Anything you want to remember — searchable"),
+                    );
+                    // Persist when the field loses focus (matches how the
+                    // web UI saves on modal close) so we don't write per
+                    // keystroke.
+                    if resp.lost_focus() {
+                        let _ = self.db.set_note("video", &selected_id, &self.note_buffer);
+                    }
+                });
+
+                ui.separator();
+
                 let description = self.description(&video);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -3322,9 +3359,9 @@ impl eframe::App for App {
                     // Rescan so channel rows pick up new folder assignments.
                     self.rescan();
                     self.status = format!(
-                        "Imported: {}W · {}P · {}F · {}flags · {}folders · {}assigns",
+                        "Imported: {}W · {}P · {}F · {}flags · {}folders · {}assigns · {}notes",
                         s.watched_added, s.positions_added, s.options_added,
-                        s.flags_added, s.folders_added, s.assignments_added,
+                        s.flags_added, s.folders_added, s.assignments_added, s.notes_added,
                     );
                 }
                 Err(e) => self.status = format!("Restore failed: {e}"),
