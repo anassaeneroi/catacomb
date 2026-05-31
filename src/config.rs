@@ -35,6 +35,17 @@ pub struct BackupSection {
     /// `yt-dlp` found on the system PATH.
     #[serde(default)]
     pub use_bundled_ytdlp: bool,
+    /// If true and the bundled yt-dlp is in use, spawn the bgutil-pot
+    /// HTTP server on startup and pass its extractor-args to every
+    /// yt-dlp invocation. YouTube increasingly requires a per-video
+    /// Proof-of-Origin token; without one, format URLs come back empty.
+    ///
+    /// Only effective in tandem with `use_bundled_ytdlp` because the
+    /// matching Python plugin gets pip-installed into the bundled venv,
+    /// not the system Python. System-yt-dlp users who want POT support
+    /// install the plugin and run the server themselves.
+    #[serde(default)]
+    pub use_pot_provider: bool,
 }
 
 fn default_max_concurrent() -> usize { 3 }
@@ -160,6 +171,7 @@ impl Config {
                 directory: dir,
                 max_concurrent: default_max_concurrent(),
                 use_bundled_ytdlp: false,
+                use_pot_provider: false,
             },
             player: PlayerSection::default(),
             ui: UiSection::default(),

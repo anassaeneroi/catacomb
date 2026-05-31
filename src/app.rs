@@ -283,6 +283,7 @@ impl App {
 
         let max_concurrent = config.backup.max_concurrent;
         let use_bundled_ytdlp = config.backup.use_bundled_ytdlp;
+        let use_pot_provider = config.backup.use_pot_provider;
         let browser = config.player.browser.clone();
         let config_bind = config.web.bind.clone();
         let password_set = db.get_setting("password_hash").ok().flatten().is_some();
@@ -351,7 +352,7 @@ impl App {
             sidebar_view: SidebarView::All,
             selected_video: None,
             search: String::new(),
-            downloader: Downloader::new(channels_root, browser, max_concurrent, use_bundled_ytdlp),
+            downloader: Downloader::new(channels_root, browser, max_concurrent, use_bundled_ytdlp, use_pot_provider),
             show_downloads: false,
             current_screen: Screen::Library,
             dl_url: String::new(),
@@ -2237,6 +2238,43 @@ impl App {
                         });
                         ui.end_row();
 
+                        ui.label("POT token provider:");
+                        ui.horizontal(|ui| {
+                            // Disabled when the bundled yt-dlp isn't in use — the
+                            // Python plugin lives in that venv. System-yt-dlp users
+                            // who want POT install the plugin themselves.
+                            let pot_available = self.config.backup.use_bundled_ytdlp;
+                            ui.add_enabled_ui(pot_available, |ui| {
+                                ui.checkbox(&mut self.config.backup.use_pot_provider, "enable")
+                                    .on_hover_text(
+                                        "Spawn the bgutil-pot HTTP server and pass its \
+                                         extractor-args to yt-dlp. YouTube increasingly \
+                                         requires a Proof-of-Origin token for each video — \
+                                         without one, format URLs come back empty.\n\n\
+                                         Requires the bundled yt-dlp (Python plugin lives \
+                                         in that venv).",
+                                    );
+                            });
+                            let pot_installed = crate::pot_provider::installed();
+                            let pot_btn = if pot_installed { "Update" } else { "Install" };
+                            if ui.add_enabled(pot_available, egui::Button::new(pot_btn))
+                                .on_hover_text(
+                                    "Download (or update) the bgutil-pot binary from GitHub \
+                                     and pip-install the matching Python plugin into the \
+                                     bundled venv. Streams output as a job.",
+                                )
+                                .clicked()
+                            {
+                                self.downloader.start_pot_provider_update();
+                            }
+                            if pot_installed {
+                                ui.label(egui::RichText::new("✓ installed").weak().small());
+                            } else {
+                                ui.label(egui::RichText::new("not installed").weak().small());
+                            }
+                        });
+                        ui.end_row();
+
                         ui.label("Web UI port:");
                         ui.add(
                             egui::DragValue::new(&mut self.config.web.port)
@@ -2552,6 +2590,7 @@ impl App {
                         }
                         self.downloader.max_concurrent = self.config.backup.max_concurrent;
                         self.downloader.use_bundled_ytdlp = self.config.backup.use_bundled_ytdlp;
+                        self.downloader.use_pot_provider = self.config.backup.use_pot_provider;
                         if dir_changed {
                             self.channels_root = new_dir.clone();
                             self.library_root = new_dir

@@ -25,6 +25,7 @@ mod library;
 mod maintenance;
 mod platform;
 mod plex;
+mod pot_provider;
 mod stats;
 mod theme;
 mod tray;

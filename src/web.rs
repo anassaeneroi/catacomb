@@ -347,6 +347,13 @@ struct SettingsPayload {
     /// Whether the bundled yt-dlp binary is installed on disk (sent by server only).
     #[serde(skip_deserializing, default)]
     bundled_ytdlp_installed: bool,
+    /// If true and use_bundled_ytdlp is on, spawn the bgutil-pot HTTP
+    /// server and pass its extractor-args to yt-dlp. See pot_provider.rs.
+    #[serde(default)]
+    use_pot_provider: bool,
+    /// Whether the bgutil-pot binary is installed on disk (sent by server only).
+    #[serde(skip_deserializing, default)]
+    pot_provider_installed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1198,6 +1205,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let scheduler_interval_hours = cfg.scheduler.interval_hours;
     let max_concurrent = cfg.backup.max_concurrent;
     let use_bundled_ytdlp = cfg.backup.use_bundled_ytdlp;
+    let use_pot_provider = cfg.backup.use_pot_provider;
     drop(cfg);
 
     let scheduler_next_check_secs = if scheduler_enabled {
@@ -1227,6 +1235,8 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         max_concurrent,
         use_bundled_ytdlp,
         bundled_ytdlp_installed: crate::ytdlp_bin::bundled_installed(),
+        use_pot_provider,
+        pot_provider_installed: crate::pot_provider::installed(),
     })
 }
 
@@ -1259,6 +1269,7 @@ async fn post_settings(
         cfg.backup.max_concurrent = body.max_concurrent;
     }
     cfg.backup.use_bundled_ytdlp = body.use_bundled_ytdlp;
+    cfg.backup.use_pot_provider = body.use_pot_provider;
 
     if let Err(e) = cfg.save(&state.config_path) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("save failed: {e}")).into_response();
@@ -1271,15 +1282,17 @@ async fn post_settings(
     let scheduler_interval_hours = cfg.scheduler.interval_hours;
     let max_concurrent = cfg.backup.max_concurrent;
     let use_bundled_ytdlp = cfg.backup.use_bundled_ytdlp;
+    let use_pot_provider = cfg.backup.use_pot_provider;
     drop(cfg);
 
-    // Apply the new concurrency limit and binary choice to the live downloader.
+    // Apply the new concurrency limit and binary choices to the live downloader.
     {
         let mut dl = state.downloader.lock().unwrap();
         if body.max_concurrent > 0 {
             dl.max_concurrent = body.max_concurrent;
         }
         dl.use_bundled_ytdlp = use_bundled_ytdlp;
+        dl.use_pot_provider = use_pot_provider;
     }
 
     if let Some(new_pwd) = &body.new_download_password {
@@ -1327,6 +1340,8 @@ async fn post_settings(
         max_concurrent,
         use_bundled_ytdlp,
         bundled_ytdlp_installed: crate::ytdlp_bin::bundled_installed(),
+        use_pot_provider,
+        pot_provider_installed: crate::pot_provider::installed(),
     }).into_response()
 }
 
@@ -2114,6 +2129,21 @@ async fn post_ytdlp_update(State(state): State<Arc<WebState>>) -> impl IntoRespo
     (StatusCode::ACCEPTED, "started bundled yt-dlp update").into_response()
 }
 
+/// `POST /api/pot/update` — download (or update) the bgutil-pot binary
+/// and pip-install the Python plugin into the bundled venv. Refuses if
+/// the bundled yt-dlp venv isn't installed yet (the plugin needs
+/// somewhere to live).
+async fn post_pot_update(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    if !crate::ytdlp_bin::bundled_installed() {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            "install the bundled yt-dlp first — the POT plugin gets pip-installed into its venv",
+        ).into_response();
+    }
+    state.downloader.lock().unwrap().start_pot_provider_update();
+    (StatusCode::ACCEPTED, "started POT provider install").into_response()
+}
+
 /// Delete cookies.txt, removing all stored session cookies.
 pub fn clear_cookies() -> Result<(), String> {
     let p = cookies_path();
@@ -2218,6 +2248,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         config.player.browser.clone(),
         config.backup.max_concurrent,
         config.backup.use_bundled_ytdlp,
+        config.backup.use_pot_provider,
     );
     let music_root = downloader.music_root();
     let _ = std::fs::create_dir_all(&music_root);
@@ -2365,6 +2396,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         )
         .route("/api/stats", get(get_stats))
         .route("/api/ytdlp/update", post(post_ytdlp_update))
+        .route("/api/pot/update", post(post_pot_update))
         .route("/api/music", get(get_music))
         .route("/api/login", post(post_login))
         .route("/api/logout", post(post_logout))

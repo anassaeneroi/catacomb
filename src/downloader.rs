@@ -185,10 +185,23 @@ pub struct Downloader {
     /// If true, invoke the bundled yt-dlp under [`ytdlp_bin::bundled_dir`]
     /// instead of the system PATH yt-dlp.
     pub use_bundled_ytdlp: bool,
+    /// If true and the bundled yt-dlp is in use, spawn the bgutil-pot
+    /// HTTP server on first download and pass its extractor-args to
+    /// every yt-dlp invocation. See [`crate::pot_provider`].
+    pub use_pot_provider: bool,
+    /// Running bgutil-pot server child. Lazily spawned in [`Self::start`]
+    /// on the first job after the flag turns on; killed in [`Drop`].
+    pot_server: Option<std::process::Child>,
 }
 
 impl Downloader {
-    pub fn new(channels_root: PathBuf, browser: String, max_concurrent: usize, use_bundled_ytdlp: bool) -> Self {
+    pub fn new(
+        channels_root: PathBuf,
+        browser: String,
+        max_concurrent: usize,
+        use_bundled_ytdlp: bool,
+        use_pot_provider: bool,
+    ) -> Self {
         Self {
             jobs: Vec::new(),
             pending: VecDeque::new(),
@@ -196,6 +209,24 @@ impl Downloader {
             browser,
             max_concurrent,
             use_bundled_ytdlp,
+            use_pot_provider,
+            pot_server: None,
+        }
+    }
+
+    /// Lazy-spawn the POT server on first use. We don't spin it up on
+    /// app start because most users won't have it installed; doing the
+    /// check + spawn on first download means there's no per-launch
+    /// penalty when the feature is off, and an obvious place to surface
+    /// "did you install the binary?" errors when it's on.
+    fn ensure_pot_server(&mut self) {
+        if !self.use_pot_provider { return; }
+        if !self.use_bundled_ytdlp { return; } // plugin is in the bundled venv
+        if self.pot_server.is_some() { return; } // already running
+        if !crate::pot_provider::installed() { return; } // not installed, skip silently
+        match crate::pot_provider::spawn_server() {
+            Ok(child) => { self.pot_server = Some(child); }
+            Err(_) => { /* failure surfaces as missing POT → yt-dlp warns */ }
         }
     }
 
@@ -325,6 +356,12 @@ impl Downloader {
         live: bool,
         channel_options: Option<&DownloadOptions>,
     ) {
+        // Make sure the POT server is up before we hand the URL to
+        // yt-dlp — the Python plugin checks the HTTP endpoint at
+        // extractor-time, so a too-late start means the first request
+        // misses POT and YouTube hands back empty formats.
+        self.ensure_pot_server();
+
         let platform_dir = platform::platform_root(&self.channels_root, info.platform);
         // Per-platform download archive keeps cross-platform IDs from colliding
         // (TikTok IDs are numeric, YouTube IDs are 11-char base64, etc.).
@@ -551,8 +588,37 @@ impl Downloader {
         self.enqueue(cmd, url, label);
     }
 
+    /// Enqueue a job that installs (or updates) the bgutil-pot binary
+    /// and pip-installs the matching Python plugin into the bundled
+    /// venv. Same UX shape as [`Self::start_ytdlp_update`] — progress
+    /// streams into the Downloads modal.
+    ///
+    /// Before enqueueing we kill any already-running server child so
+    /// the install can overwrite the binary in place without an "ETXTBSY"
+    /// from the OS. The next download after install completes will
+    /// re-spawn the server via [`Self::ensure_pot_server`].
+    pub fn start_pot_provider_update(&mut self) {
+        if let Some(mut child) = self.pot_server.take() {
+            crate::pot_provider::kill_server(&mut child);
+        }
+        let cmd = crate::pot_provider::install_command();
+        let url = "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest".to_string();
+        let label = "install bgutil-pot + Python plugin".to_string();
+        self.enqueue(cmd, url, label);
+    }
+
     /// Spawn `cmd` on a background thread, streaming its output into a new [`Job`].
     fn spawn_job(&mut self, mut cmd: Command, url: String, label: String) {
+        // POT provider extractor-arg. yt-dlp lets us pass multiple
+        // --extractor-args flags; this one points the bgutil plugin at
+        // our local server. Only emitted when the user opted in *and*
+        // the server child is actually running — yt-dlp would warn
+        // about an unreachable base_url otherwise.
+        if self.use_pot_provider && self.pot_server.is_some() {
+            cmd.arg("--extractor-args")
+                .arg(crate::pot_provider::extractor_args());
+        }
+
         let (tx, rx) = channel();
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -705,6 +771,18 @@ impl Downloader {
             if j.state != JobState::Running {
                 self.jobs.remove(idx);
             }
+        }
+    }
+}
+
+impl Drop for Downloader {
+    /// Tear down the bgutil-pot child if we spawned one. Without this
+    /// the server keeps running after yt-offline exits — orphaned and
+    /// still bound to port 4416, blocking the next launch from
+    /// re-spawning.
+    fn drop(&mut self) {
+        if let Some(mut child) = self.pot_server.take() {
+            crate::pot_provider::kill_server(&mut child);
         }
     }
 }

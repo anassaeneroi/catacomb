@@ -1301,6 +1301,16 @@ async function openSettings(){
       <span style="font-size:11px;color:var(--muted)">${cur.bundled_ytdlp_installed?'✓ installed':'not installed'}</span>
       <span id="ytdlp-status" style="font-size:11px;color:var(--muted)"></span>
     </div>
+    <div class="settings-row" style="margin-top:8px">
+      <label for="cf-pot-provider">Use POT token provider</label>
+      <input type="checkbox" id="cf-pot-provider" ${cur.use_pot_provider?'checked':''} ${cur.use_bundled_ytdlp?'':'disabled'}>
+    </div>
+    <div class="settings-hint" style="margin-bottom:6px">Spawns the bgutil-pot HTTP server (loopback only) and points yt-dlp at it. YouTube increasingly requires a Proof-of-Origin token bound to each video ID — without one, format URLs come back empty. Requires the bundled yt-dlp; the matching Python plugin is pip-installed into the bundled venv on Install.</div>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+      <button onclick="updatePotProvider(this)" ${cur.use_bundled_ytdlp?'':'disabled'}>${cur.pot_provider_installed?'⟳ Update POT':'⤓ Install POT'}</button>
+      <span style="font-size:11px;color:var(--muted)">${cur.pot_provider_installed?'✓ installed':'not installed'}</span>
+      <span id="pot-status" style="font-size:11px;color:var(--muted)"></span>
+    </div>
     <hr style="border-color:var(--border);margin:12px 0">
     <div style="font-weight:700;margin-bottom:8px">Plex</div>
     <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
@@ -1429,6 +1439,18 @@ async function updateYtdlp(btn){
   }catch(e){st.textContent='Error: '+e.message}
   finally{btn.disabled=false}
 }
+async function updatePotProvider(btn){
+  btn.disabled=true;
+  const st=document.getElementById('pot-status');
+  st.textContent='Started — click ⬇ in the header to view progress';
+  try{
+    const r=await fetch('/api/pot/update',{method:'POST'});
+    const t=await r.text();
+    if(!r.ok)throw new Error(t);
+    setStatus('POT provider install job started');
+  }catch(e){st.textContent='Error: '+e.message}
+  finally{btn.disabled=false}
+}
 async function runScheduler(btn){
   btn.disabled=true;
   const st=document.getElementById('sched-status');
@@ -1452,8 +1474,9 @@ async function saveSettings(btn){
   const schedInterval=parseInt(document.getElementById('cf-sched-interval')?.value||'24',10);
   const maxConcurrent=parseInt(document.getElementById('cf-max-concurrent')?.value||'3',10);
   const useBundledYtdlp=document.getElementById('cf-ytdlp-bundled')?.checked||false;
+  const usePotProvider=document.getElementById('cf-pot-provider')?.checked||false;
   const sourceUrl=document.getElementById('cf-source-url')?.value;
-  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp};
+  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider};
   if(bindMode)payload.bind_mode=bindMode;
   if(plexPath!==undefined)payload.plex_library_path=plexPath;
   if(sourceUrl!==undefined)payload.source_url=sourceUrl;
