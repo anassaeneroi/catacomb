@@ -3,6 +3,11 @@ name = "yt-offline"
 version = "0.1.0"
 edition = "2021"
 description = "Self-hosted archive for YouTube, TikTok, Twitch, Vimeo, Bandcamp, SoundCloud, Odysee and more. Desktop GUI + web UI, bundled yt-dlp with curl_cffi impersonation, Plex export, SQLite-backed resume tracking. AGPL-3.0."
+license = "AGPL-3.0-only"
+repository = "https://codeberg.org/anassaeneroi/yt-offline"
+homepage = "https://codeberg.org/anassaeneroi/yt-offline"
+authors = ["InannaBeloved <anassaeneroi@pm.me>"]
+readme = "README.md"
 
 [dependencies]
 eframe = "0.29"
@@ -42,3 +47,47 @@ codegen-units = 1
 # runtime; those are less informative without symbols but usable with
 # addr2line against the unstripped build artifact.
 strip = "debuginfo"
+
+# ── Debian / Ubuntu package (cargo-deb) ──────────────────────────────────────
+# `cargo deb` reads this to build a .deb. Runtime deps mirror the PKGBUILD:
+# yt-dlp + ffmpeg + mpv are invoked as subprocesses, xdg-utils provides
+# xdg-open, and libxcb is needed by the eframe/winit windowing stack.
+[package.metadata.deb]
+maintainer = "InannaBeloved <anassaeneroi@pm.me>"
+copyright = "2026, InannaBeloved <anassaeneroi@pm.me>"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Self-hosted archive for YouTube, TikTok, Twitch, Vimeo, Bandcamp, \
+SoundCloud, Odysee and more. Ships a desktop GUI and a mobile-friendly \
+web UI, with a bundled yt-dlp (curl_cffi impersonation), Plex export, \
+and SQLite-backed resume tracking."""
+section = "video"
+priority = "optional"
+# yt-dlp / ffmpeg / mpv are runtime subprocess deps, not link-time, so
+# cargo-deb's auto-detection won't find them — list explicitly. libxcb
+# is the one shared library the GUI actually dlopens.
+depends = "libc6, libxcb1, yt-dlp, ffmpeg, mpv, xdg-utils"
+recommends = "libnotify4"
+assets = [
+    ["target/release/yt-offline", "usr/bin/", "755"],
+    ["youtube-backup.desktop", "usr/share/applications/yt-offline.desktop", "644"],
+    ["icon.png", "usr/share/pixmaps/yt-offline.png", "644"],
+    ["README.md", "usr/share/doc/yt-offline/README.md", "644"],
+]
+
+# ── Fedora / RHEL / openSUSE package (cargo-generate-rpm) ─────────────────────
+# `cargo generate-rpm` reads this. Run `cargo build --release` first; it
+# packages the already-built binary rather than building itself.
+[package.metadata.generate-rpm]
+summary = "Self-hosted multi-platform video archiver with desktop + web UI"
+license = "AGPLv3"
+# RPM distro package names differ from Debian's. yt-dlp is `yt-dlp` on
+# Fedora; ffmpeg lives in RPM Fusion but we still declare the dep.
+requires = { yt-dlp = "*", ffmpeg = "*", mpv = "*", "xdg-utils" = "*" }
+assets = [
+    { source = "target/release/yt-offline", dest = "/usr/bin/yt-offline", mode = "755" },
+    { source = "youtube-backup.desktop", dest = "/usr/share/applications/yt-offline.desktop", mode = "644" },
+    { source = "icon.png", dest = "/usr/share/pixmaps/yt-offline.png", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/yt-offline/README.md", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/yt-offline/LICENSE", mode = "644" },
+]

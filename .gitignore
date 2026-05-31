@@ -4,6 +4,9 @@
 # Rust build artifacts
 /target/
 
+# Packaging output (.deb / .rpm / .AppImage + downloaded appimagetool)
+/dist/
+
 # makepkg build artifacts (finished .pkg.tar.zst is NOT ignored)
 /pkg/
 /src/yt-offline/
