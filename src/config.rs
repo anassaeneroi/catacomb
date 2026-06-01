@@ -20,6 +20,47 @@ pub struct Config {
     pub web: WebSection,
     #[serde(default)]
     pub plex: PlexSection,
+    #[serde(default)]
+    pub subtitles: SubtitlesSection,
+}
+
+/// `[subtitles]` table — global subtitle download defaults. Per-channel
+/// [`crate::download_options::DownloadOptions`] can override any of these.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SubtitlesSection {
+    /// Master switch. When false, no subtitle flags are emitted at all.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Include auto-generated (machine) captions via `--write-auto-subs`.
+    /// Off-by-default-ish content is noisy; keep it on globally but let
+    /// channels turn it off.
+    #[serde(default = "default_true")]
+    pub auto_generated: bool,
+    /// Embed subtitle tracks into the video container (`--embed-subs`),
+    /// in addition to writing sidecar files. Soft subs, toggleable in
+    /// the player.
+    #[serde(default)]
+    pub embed: bool,
+    /// Convert downloaded subtitles to this format (`--convert-subs`).
+    /// Empty = keep native. Common: "srt" (Plex-friendly), "vtt", "ass".
+    #[serde(default)]
+    pub format: String,
+    /// Comma-separated language codes (`--sub-langs`). Empty = all
+    /// available. e.g. "en", "en,ja", "en.*" for all English variants.
+    #[serde(default)]
+    pub langs: String,
+}
+
+impl Default for SubtitlesSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_generated: true,
+            embed: false,
+            format: String::new(),
+            langs: String::new(),
+        }
+    }
 }
 
 /// `[backup]` table — where to store downloaded videos.
@@ -49,6 +90,7 @@ pub struct BackupSection {
 }
 
 fn default_max_concurrent() -> usize { 3 }
+fn default_true() -> bool { true }
 
 /// `[player]` table — external player and browser cookie source.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -178,6 +220,7 @@ impl Config {
             scheduler: SchedulerSection::default(),
             web: WebSection::default(),
             plex: PlexSection::default(),
+            subtitles: SubtitlesSection::default(),
         }
     }
 }

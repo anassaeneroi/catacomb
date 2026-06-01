@@ -10,7 +10,7 @@
 //! | Flag | Purpose |
 //! |---|---|
 //! | `--cookies cookies.txt` | Pass browser cookies for age-gated/member videos |
-//! | `--write-subs --write-auto-subs` | Download subtitles alongside the video |
+//! | `--write-subs` (+ optionally `--write-auto-subs` / `--sub-langs` / `--convert-subs` / `--embed-subs`) | Subtitles, per the `[subtitles]` config + per-channel overrides |
 //! | `--write-thumbnail` | Download channel/video thumbnails |
 //! | `--write-description` | Save video description as a sidecar `.description` file |
 //! | `--write-info-json` | Save full metadata as a `.info.json` sidecar |
@@ -191,6 +191,10 @@ pub struct Downloader {
     /// Running bgutil-pot server child. Lazily spawned in [`Self::start`]
     /// on the first job after the flag turns on; killed in [`Drop`].
     pot_server: Option<std::process::Child>,
+    /// Global subtitle defaults from `[subtitles]` config. Per-channel
+    /// [`DownloadOptions`] override individual fields. Set by the app /
+    /// web layer at construction and on settings save.
+    pub subtitle_defaults: crate::config::SubtitlesSection,
 }
 
 impl Downloader {
@@ -210,6 +214,46 @@ impl Downloader {
             use_bundled_ytdlp,
             use_pot_provider,
             pot_server: None,
+            subtitle_defaults: crate::config::SubtitlesSection::default(),
+        }
+    }
+
+    /// Resolve global `[subtitles]` config + per-channel overrides into
+    /// the yt-dlp subtitle flag set, appending to `cmd`.
+    ///
+    /// Resolution: a per-channel `Some` wins over the global default for
+    /// each field. When subtitles are disabled (globally or per-channel),
+    /// nothing is emitted — yt-dlp then writes no subs.
+    fn apply_subtitle_flags(&self, cmd: &mut Command, opts: Option<&DownloadOptions>) {
+        let g = &self.subtitle_defaults;
+        // Per-channel override-or-global for each knob.
+        let enabled = opts.and_then(|o| o.subtitles_enabled).unwrap_or(g.enabled);
+        if !enabled { return; }
+        let auto = opts.and_then(|o| o.subtitles_auto).unwrap_or(g.auto_generated);
+        let embed = opts.and_then(|o| o.subtitles_embed).unwrap_or(g.embed);
+        // Format: per-channel Some(non-empty) wins; else global.
+        let format = opts
+            .and_then(|o| o.subtitle_format.as_deref())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(g.format.as_str());
+        // Langs: per-channel list wins; else global comma string.
+        let langs: String = match opts {
+            Some(o) if !o.subtitle_langs.is_empty() => o.subtitle_langs.join(","),
+            _ => g.langs.clone(),
+        };
+
+        cmd.arg("--write-subs");
+        if auto {
+            cmd.arg("--write-auto-subs");
+        }
+        if !langs.is_empty() {
+            cmd.arg("--sub-langs").arg(langs);
+        }
+        if !format.is_empty() {
+            cmd.arg("--convert-subs").arg(format);
+        }
+        if embed {
+            cmd.arg("--embed-subs");
         }
     }
 
@@ -455,9 +499,7 @@ impl Downloader {
         let mut cmd = self.ytdlp_cmd();
         cmd.arg("--newline").arg("--no-color");
         self.apply_cookie_flags(&mut cmd);
-        cmd.arg("--write-subs")
-            .arg("--write-auto-subs")
-            .arg("--write-thumbnail")
+        cmd.arg("--write-thumbnail")
             .arg("--write-description")
             .arg("--write-info-json")
             // Don't write channel/playlist-level metafiles (avatar, info.json,
@@ -492,6 +534,10 @@ impl Downloader {
             .arg(archive_path.display().to_string());
         self.apply_impersonation(info.platform, &mut cmd);
         self.apply_platform_extras(info.platform, &mut cmd);
+        // Subtitle flags: global [subtitles] config merged with per-channel
+        // overrides. Done here (not in opts.apply) so it works even when a
+        // channel has no options row.
+        self.apply_subtitle_flags(&mut cmd, channel_options);
         // Per-channel option overrides win when present — they're applied
         // last so a `--limit-rate` / `--match-filter` / passthrough arg from
         // the channel settings takes priority over the global defaults.
@@ -522,9 +568,10 @@ impl Downloader {
         self.apply_cookie_flags(&mut cmd);
         cmd.arg("--write-thumbnail")
             .arg("--write-info-json")
-            .arg("--write-description")
-            .arg("--write-subs")
-            .arg("--write-auto-subs");
+            .arg("--write-description");
+        // Repair has no channel-options context, so subtitles use the
+        // global [subtitles] defaults.
+        self.apply_subtitle_flags(&mut cmd, None);
         // `repair()` rebuilds a YouTube watch URL from a stored video ID, so
         // the source platform is always YouTube here regardless of where the
         // original video lives on disk.
@@ -903,6 +950,75 @@ mod tests {
         let abs = "/home/luna/cookies.txt";
         let input = "[download]  47.2% of 100MiB";
         assert_eq!(redact_sensitive(input, abs), input);
+    }
+
+    // ── Subtitle resolver ────────────────────────────────────────────────
+    fn dl_with_subs(subs: crate::config::SubtitlesSection) -> Downloader {
+        let mut d = Downloader::new(
+            std::path::PathBuf::from("/tmp"), "none".into(), 1, false, false);
+        d.subtitle_defaults = subs;
+        d
+    }
+    fn args_of(d: &Downloader, opts: Option<&DownloadOptions>) -> Vec<String> {
+        let mut cmd = Command::new("yt-dlp");
+        d.apply_subtitle_flags(&mut cmd, opts);
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn subs_global_defaults_emit_write_and_auto() {
+        let d = dl_with_subs(crate::config::SubtitlesSection::default());
+        let args = args_of(&d, None);
+        assert!(args.contains(&"--write-subs".to_string()));
+        assert!(args.contains(&"--write-auto-subs".to_string()));
+        // No langs/format/embed by default.
+        assert!(!args.contains(&"--embed-subs".to_string()));
+        assert!(!args.iter().any(|a| a == "--convert-subs"));
+    }
+
+    #[test]
+    fn subs_disabled_emits_nothing() {
+        let mut g = crate::config::SubtitlesSection::default();
+        g.enabled = false;
+        let d = dl_with_subs(g);
+        assert!(args_of(&d, None).is_empty());
+    }
+
+    #[test]
+    fn subs_global_format_embed_langs() {
+        let g = crate::config::SubtitlesSection {
+            enabled: true, auto_generated: false, embed: true,
+            format: "srt".into(), langs: "en,ja".into(),
+        };
+        let d = dl_with_subs(g);
+        let args = args_of(&d, None);
+        assert!(args.contains(&"--write-subs".to_string()));
+        assert!(!args.contains(&"--write-auto-subs".to_string())); // auto off
+        assert!(args.windows(2).any(|w| w == ["--sub-langs", "en,ja"]));
+        assert!(args.windows(2).any(|w| w == ["--convert-subs", "srt"]));
+        assert!(args.contains(&"--embed-subs".to_string()));
+    }
+
+    #[test]
+    fn subs_per_channel_overrides_global() {
+        // Global: enabled+auto. Channel: force OFF.
+        let d = dl_with_subs(crate::config::SubtitlesSection::default());
+        let opts = DownloadOptions { subtitles_enabled: Some(false), ..Default::default() };
+        assert!(args_of(&d, Some(&opts)).is_empty());
+
+        // Global: auto on. Channel: auto off + embed on + own langs.
+        let opts2 = DownloadOptions {
+            subtitles_auto: Some(false),
+            subtitles_embed: Some(true),
+            subtitle_langs: vec!["en".into()],
+            subtitle_format: Some("vtt".into()),
+            ..Default::default()
+        };
+        let args = args_of(&d, Some(&opts2));
+        assert!(!args.contains(&"--write-auto-subs".to_string()));
+        assert!(args.contains(&"--embed-subs".to_string()));
+        assert!(args.windows(2).any(|w| w == ["--sub-langs", "en"]));
+        assert!(args.windows(2).any(|w| w == ["--convert-subs", "vtt"]));
     }
     // URL classification tests live in `platform` now — see its tests module.
 }

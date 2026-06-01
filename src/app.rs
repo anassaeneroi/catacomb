@@ -226,7 +226,22 @@ struct ChannelOptionsForm {
     date_after: String,
     match_filter: String,
     subtitle_langs: String,       // comma-separated
+    // Per-channel subtitle override tri-states: 0 = use global default,
+    // 1 = force on, 2 = force off. Map to Option<bool> on save.
+    subs_enabled_idx: usize,
+    subs_auto_idx: usize,
+    subs_embed_idx: usize,
+    subtitle_format: String,      // "" = global default
     extra_args: String,           // one per line
+}
+
+/// Map an `Option<bool>` override to the tri-state combo index.
+fn tri_to_idx(v: Option<bool>) -> usize {
+    match v { None => 0, Some(true) => 1, Some(false) => 2 }
+}
+/// Inverse of [`tri_to_idx`].
+fn idx_to_tri(i: usize) -> Option<bool> {
+    match i { 1 => Some(true), 2 => Some(false), _ => None }
 }
 
 impl App {
@@ -292,6 +307,13 @@ impl App {
         let use_bundled_ytdlp = config.backup.use_bundled_ytdlp;
         let use_pot_provider = config.backup.use_pot_provider;
         let browser = config.player.browser.clone();
+        // Build the downloader up front so we can seed its subtitle
+        // defaults from config before it goes into the struct literal.
+        let mut downloader = Downloader::new(
+            channels_root.clone(), browser.clone(), max_concurrent,
+            use_bundled_ytdlp, use_pot_provider,
+        );
+        downloader.subtitle_defaults = config.subtitles.clone();
         let config_bind = config.web.bind.clone();
         let password_set = db.get_setting("password_hash").ok().flatten().is_some();
         let plex_path_str = config.plex.library_path
@@ -361,7 +383,7 @@ impl App {
             note_buffer: String::new(),
             note_target: None,
             search: String::new(),
-            downloader: Downloader::new(channels_root, browser, max_concurrent, use_bundled_ytdlp, use_pot_provider),
+            downloader,
             show_downloads: false,
             current_screen: Screen::Library,
             dl_url: String::new(),
@@ -448,6 +470,10 @@ impl App {
             date_after: opts.date_after.clone().unwrap_or_default(),
             match_filter: opts.match_filter.clone().unwrap_or_default(),
             subtitle_langs: opts.subtitle_langs.join(", "),
+            subs_enabled_idx: tri_to_idx(opts.subtitles_enabled),
+            subs_auto_idx: tri_to_idx(opts.subtitles_auto),
+            subs_embed_idx: tri_to_idx(opts.subtitles_embed),
+            subtitle_format: opts.subtitle_format.clone().unwrap_or_default(),
             extra_args: opts.extra_args.join("\n"),
         }
     }
@@ -480,6 +506,10 @@ impl App {
             match_filter: trim_opt(&f.match_filter),
             subtitle_langs: f.subtitle_langs.split(',')
                 .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            subtitles_enabled: idx_to_tri(f.subs_enabled_idx),
+            subtitles_auto: idx_to_tri(f.subs_auto_idx),
+            subtitles_embed: idx_to_tri(f.subs_embed_idx),
+            subtitle_format: trim_opt(&f.subtitle_format),
             extra_args: f.extra_args.lines()
                 .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         }
@@ -1946,6 +1976,36 @@ impl App {
                         .hint_text("en, ja"),
                 );
 
+                // Per-channel subtitle overrides. "Default" defers to the
+                // global [subtitles] config; the other choices force the
+                // behavior for this channel only.
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Subtitle overrides (Default = use global setting):").small().weak());
+                let form = &mut self.channel_options_form;
+                let tri_combo = |ui: &mut egui::Ui, id: &str, label: &str, idx: &mut usize| {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        egui::ComboBox::from_id_salt(id)
+                            .selected_text(match *idx { 1 => "On", 2 => "Off", _ => "Default" })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(idx, 0, "Default");
+                                ui.selectable_value(idx, 1, "On");
+                                ui.selectable_value(idx, 2, "Off");
+                            });
+                    });
+                };
+                tri_combo(ui, "subs_enabled", "Download subtitles", &mut form.subs_enabled_idx);
+                tri_combo(ui, "subs_auto", "Auto-generated captions", &mut form.subs_auto_idx);
+                tri_combo(ui, "subs_embed", "Embed into video", &mut form.subs_embed_idx);
+                ui.horizontal(|ui| {
+                    ui.label("Convert format");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.subtitle_format)
+                            .desired_width(120.0)
+                            .hint_text("global (srt/vtt/ass)"),
+                    ).on_hover_text("Blank = use the global setting. e.g. srt for Plex.");
+                });
+
                 ui.add_space(6.0);
                 ui.label("Extra yt-dlp args (one per line):");
                 ui.add(
@@ -2524,6 +2584,33 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.separator();
+                ui.heading("Subtitles (global defaults)");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Applied to every download. Individual channels can override these \
+                         in their Channel options dialog.",
+                    ).small().weak(),
+                );
+                let subs = &mut self.config.subtitles;
+                ui.checkbox(&mut subs.enabled, "Download subtitles");
+                ui.add_enabled_ui(subs.enabled, |ui| {
+                    ui.checkbox(&mut subs.auto_generated, "Include auto-generated (machine) captions");
+                    ui.checkbox(&mut subs.embed, "Embed subtitles into the video file")
+                        .on_hover_text("--embed-subs: soft subs toggleable in the player, in addition to sidecar files.");
+                    ui.horizontal(|ui| {
+                        ui.label("Languages (comma sep, blank = all):");
+                        ui.add(egui::TextEdit::singleline(&mut subs.langs).desired_width(160.0).hint_text("en, ja"));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Convert to format (blank = native):");
+                        ui.add(egui::TextEdit::singleline(&mut subs.format).desired_width(100.0).hint_text("srt"))
+                            .on_hover_text("--convert-subs. srt is the most player/Plex-compatible.");
+                    });
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
                 ui.heading("Backup");
                 ui.add_space(4.0);
                 ui.label(
@@ -2713,6 +2800,7 @@ impl App {
                         self.downloader.max_concurrent = self.config.backup.max_concurrent;
                         self.downloader.use_bundled_ytdlp = self.config.backup.use_bundled_ytdlp;
                         self.downloader.use_pot_provider = self.config.backup.use_pot_provider;
+                        self.downloader.subtitle_defaults = self.config.subtitles.clone();
                         if dir_changed {
                             self.channels_root = new_dir.clone();
                             self.library_root = new_dir

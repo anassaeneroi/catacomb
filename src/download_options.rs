@@ -67,6 +67,24 @@ pub struct DownloadOptions {
     #[serde(default)]
     pub subtitle_langs: Vec<String>,
 
+    /// Per-channel subtitle overrides. Each `None` falls back to the
+    /// global `[subtitles]` config. Resolved in [`crate::downloader`]'s
+    /// subtitle-flag builder, not here, because `apply()` doesn't have
+    /// the global config in scope.
+    ///
+    /// - `subtitles_enabled`: master on/off for this channel.
+    /// - `subtitles_auto`: include auto-generated captions.
+    /// - `subtitles_embed`: embed into the container.
+    /// - `subtitle_format`: convert to this format (empty string = native).
+    #[serde(default)]
+    pub subtitles_enabled: Option<bool>,
+    #[serde(default)]
+    pub subtitles_auto: Option<bool>,
+    #[serde(default)]
+    pub subtitles_embed: Option<bool>,
+    #[serde(default)]
+    pub subtitle_format: Option<String>,
+
     /// Raw passthrough — every entry is appended as a separate argument to
     /// yt-dlp. Lets users access any flag we haven't exposed yet. Equivalent
     /// to Tartube's `extra_cmd_string`.
@@ -131,9 +149,10 @@ impl DownloadOptions {
                 cmd.arg("--match-filter").arg(filter);
             }
         }
-        if !self.subtitle_langs.is_empty() {
-            cmd.arg("--sub-langs").arg(self.subtitle_langs.join(","));
-        }
+        // Subtitle flags (langs / write / auto / embed / convert) are
+        // emitted by the downloader's subtitle resolver, which merges
+        // these per-channel overrides with the global [subtitles] config.
+        // apply() handles everything else.
         for arg in &self.extra_args {
             if !arg.is_empty() {
                 cmd.arg(arg);
@@ -189,17 +208,9 @@ mod tests {
         assert_eq!(args, vec!["--limit-rate", "500K"]);
     }
 
-    #[test]
-    fn subtitle_langs_join_with_commas() {
-        let mut cmd = Command::new("yt-dlp");
-        DownloadOptions {
-            subtitle_langs: vec!["en".into(), "ja".into(), "es".into()],
-            ..Default::default()
-        }
-        .apply(&mut cmd);
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(args, vec!["--sub-langs", "en,ja,es"]);
-    }
+    // Subtitle-flag emission moved to the downloader's resolver (it merges
+    // these per-channel langs with the global [subtitles] config). The
+    // resolver's behavior is tested in downloader.rs.
 
     #[test]
     fn skip_auth_check_emits_extractor_arg() {

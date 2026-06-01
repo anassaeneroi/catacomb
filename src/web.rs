@@ -2304,13 +2304,14 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     let watched = db.get_watched().unwrap_or_default();
     let positions = db.get_positions().unwrap_or_default();
 
-    let downloader = Downloader::new(
+    let mut downloader = Downloader::new(
         channels_root.clone(),
         config.player.browser.clone(),
         config.backup.max_concurrent,
         config.backup.use_bundled_ytdlp,
         config.backup.use_pot_provider,
     );
+    downloader.subtitle_defaults = config.subtitles.clone();
     let music_root = downloader.music_root();
     let _ = std::fs::create_dir_all(&music_root);
     let transcode = AtomicBool::new(config.web.transcode);
