@@ -64,7 +64,7 @@ impl ErrorClass {
     pub fn hint(self) -> &'static str {
         match self {
             ErrorClass::RateLimited =>
-                "YouTube is rate-limiting you. Add cookies from a logged-in browser session (Settings → Cookies), or wait 10–60 minutes and retry.",
+                "YouTube is rate-limiting you or demanding a captcha (bot detection). Refresh your cookies.txt from a logged-in browser session (Settings → Cookies), enable the POT token provider, and/or wait 10–60 minutes before retrying.",
             ErrorClass::MembersOnly =>
                 "This video requires a logged-in session with access (members-only, private, or paid). Update cookies.txt from an account that can view it.",
             ErrorClass::Geoblocked =>
@@ -102,12 +102,18 @@ where
         let l = line.to_ascii_lowercase();
 
         // ── Rate limits / bot challenges ─────────────────────────────
+        // Checked first so a bot-challenge phrasing that also contains
+        // "video unavailable" (e.g. YouTube's captcha wall) is classified
+        // as rate-limited rather than NotFound below.
         if l.contains("http error 429")
             || l.contains("too many requests")
             || l.contains("sign in to confirm you")
             || l.contains("sign in to confirm your age")
             || l.contains("ratelimit")
             || l.contains("rate limit")
+            || l.contains("captcha")
+            || l.contains("requiring a captcha challenge")
+            || l.contains("not a bot")
         {
             return ErrorClass::RateLimited;
         }
@@ -226,6 +232,18 @@ mod tests {
         assert_eq!(
             classify_str("ERROR: [youtube] xyz: Video unavailable. This video has been removed by the uploader."),
             ErrorClass::NotFound
+        );
+    }
+
+    #[test]
+    fn captcha_wall_is_rate_limited_not_not_found() {
+        // The captcha line also contains "Video unavailable", which the
+        // NotFound rule would otherwise grab. The RateLimited rule must
+        // win because the fix is "refresh cookies / wait", not "the
+        // upload is gone".
+        assert_eq!(
+            classify_str("ERROR: [youtube] tfoprUBw0H0: Video unavailable. YouTube is requiring a captcha challenge before playback"),
+            ErrorClass::RateLimited
         );
     }
 
