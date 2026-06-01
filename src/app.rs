@@ -232,6 +232,7 @@ struct ChannelOptionsForm {
     subs_auto_idx: usize,
     subs_embed_idx: usize,
     subtitle_format: String,      // "" = global default
+    youtube_player_clients: String, // "" = global default
     extra_args: String,           // one per line
 }
 
@@ -314,6 +315,7 @@ impl App {
             use_bundled_ytdlp, use_pot_provider,
         );
         downloader.subtitle_defaults = config.subtitles.clone();
+        downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
         let config_bind = config.web.bind.clone();
         let password_set = db.get_setting("password_hash").ok().flatten().is_some();
         let plex_path_str = config.plex.library_path
@@ -474,6 +476,7 @@ impl App {
             subs_auto_idx: tri_to_idx(opts.subtitles_auto),
             subs_embed_idx: tri_to_idx(opts.subtitles_embed),
             subtitle_format: opts.subtitle_format.clone().unwrap_or_default(),
+            youtube_player_clients: opts.youtube_player_clients.clone().unwrap_or_default(),
             extra_args: opts.extra_args.join("\n"),
         }
     }
@@ -510,6 +513,7 @@ impl App {
             subtitles_auto: idx_to_tri(f.subs_auto_idx),
             subtitles_embed: idx_to_tri(f.subs_embed_idx),
             subtitle_format: trim_opt(&f.subtitle_format),
+            youtube_player_clients: trim_opt(&f.youtube_player_clients),
             extra_args: f.extra_args.lines()
                 .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         }
@@ -2007,6 +2011,20 @@ impl App {
                 });
 
                 ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("YouTube player clients");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.youtube_player_clients)
+                            .desired_width(160.0)
+                            .hint_text("global (e.g. tv,mweb)"),
+                    ).on_hover_text(
+                        "Per-channel --extractor-args youtube:player_client override. \
+                         Blank = use the global setting. If this channel keeps hitting \
+                         captchas, try 'tv,mweb' — those clients are currently the least \
+                         bot-checked.");
+                });
+
+                ui.add_space(6.0);
                 ui.label("Extra yt-dlp args (one per line):");
                 ui.add(
                     egui::TextEdit::multiline(&mut self.channel_options_form.extra_args)
@@ -2457,6 +2475,19 @@ impl App {
                         });
                         ui.end_row();
 
+                        ui.label("YouTube player clients:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.config.backup.youtube_player_clients)
+                                .desired_width(180.0)
+                                .hint_text("default (e.g. tv,mweb)"),
+                        ).on_hover_text(
+                            "Comma-separated --extractor-args youtube:player_client list. \
+                             Blank = let yt-dlp pick (recommended). YouTube's bot-detection \
+                             targets different clients over time; if you keep hitting \
+                             captchas, 'tv,mweb' are currently the least-checked. \
+                             Per-channel overrides live in each channel's options.");
+                        ui.end_row();
+
                         ui.label("Web UI port:");
                         ui.add(
                             egui::DragValue::new(&mut self.config.web.port)
@@ -2801,6 +2832,7 @@ impl App {
                         self.downloader.use_bundled_ytdlp = self.config.backup.use_bundled_ytdlp;
                         self.downloader.use_pot_provider = self.config.backup.use_pot_provider;
                         self.downloader.subtitle_defaults = self.config.subtitles.clone();
+                        self.downloader.youtube_player_clients = self.config.backup.youtube_player_clients.clone();
                         if dir_changed {
                             self.channels_root = new_dir.clone();
                             self.library_root = new_dir

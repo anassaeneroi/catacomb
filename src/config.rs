@@ -87,6 +87,14 @@ pub struct BackupSection {
     /// install the plugin and run the server themselves.
     #[serde(default)]
     pub use_pot_provider: bool,
+    /// YouTube player clients to try, as a comma-separated list passed to
+    /// `--extractor-args youtube:player_client=…`. Empty = let yt-dlp pick
+    /// its defaults (recommended). YouTube's bot-detection cracks down on
+    /// different clients over time; setting e.g. `tv,mweb` routes around a
+    /// client that's currently being captcha-walled. Per-channel overrides
+    /// live in [`crate::download_options::DownloadOptions`].
+    #[serde(default)]
+    pub youtube_player_clients: String,
 }
 
 fn default_max_concurrent() -> usize { 3 }
@@ -214,6 +222,7 @@ impl Config {
                 max_concurrent: default_max_concurrent(),
                 use_bundled_ytdlp: false,
                 use_pot_provider: false,
+                youtube_player_clients: String::new(),
             },
             player: PlayerSection::default(),
             ui: UiSection::default(),

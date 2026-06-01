@@ -231,6 +231,10 @@ pub struct Downloader {
     /// [`DownloadOptions`] override individual fields. Set by the app /
     /// web layer at construction and on settings save.
     pub subtitle_defaults: crate::config::SubtitlesSection,
+    /// Global `backup.youtube_player_clients` (comma-separated). Empty =
+    /// yt-dlp defaults. Per-channel options can override. Set at
+    /// construction + on settings save.
+    pub youtube_player_clients: String,
     /// Scheduled auto-retries: `(fire_at, spec, attempt_number)`. Populated
     /// when a job fails with a retryable class; drained in [`Self::poll`]
     /// once `fire_at` passes, re-issuing the download. Kept separate from
@@ -269,6 +273,7 @@ impl Downloader {
             use_pot_provider,
             pot_server: None,
             subtitle_defaults: crate::config::SubtitlesSection::default(),
+            youtube_player_clients: String::new(),
             retry_queue: Vec::new(),
             rate_limited_backoff: false,
             pending_retry_spec: None,
@@ -282,6 +287,23 @@ impl Downloader {
     /// Resolution: a per-channel `Some` wins over the global default for
     /// each field. When subtitles are disabled (globally or per-channel),
     /// nothing is emitted — yt-dlp then writes no subs.
+    /// Append `--extractor-args youtube:player_client=…` when a client
+    /// list is configured (per-channel override or global default). Empty
+    /// = omit the flag entirely so yt-dlp uses its own default client set
+    /// (the recommended baseline). Only meaningful for YouTube; the
+    /// youtube: namespace is ignored by other extractors so it's harmless
+    /// to always pass.
+    fn apply_player_client(&self, cmd: &mut Command, opts: Option<&DownloadOptions>) {
+        let clients = opts
+            .and_then(|o| o.youtube_player_clients.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(self.youtube_player_clients.as_str())
+            .trim();
+        if clients.is_empty() { return; }
+        cmd.arg("--extractor-args")
+            .arg(format!("youtube:player_client={clients}"));
+    }
+
     fn apply_subtitle_flags(&self, cmd: &mut Command, opts: Option<&DownloadOptions>) {
         let g = &self.subtitle_defaults;
         // Per-channel override-or-global for each knob.
@@ -630,6 +652,9 @@ impl Downloader {
         // overrides. Done here (not in opts.apply) so it works even when a
         // channel has no options row.
         self.apply_subtitle_flags(&mut cmd, channel_options);
+        // YouTube player-client selection (global default + per-channel
+        // override). Lets the user route around a captcha-walled client.
+        self.apply_player_client(&mut cmd, channel_options);
         // Per-channel option overrides win when present — they're applied
         // last so a `--limit-rate` / `--match-filter` / passthrough arg from
         // the channel settings takes priority over the global defaults.

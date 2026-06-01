@@ -85,6 +85,13 @@ pub struct DownloadOptions {
     #[serde(default)]
     pub subtitle_format: Option<String>,
 
+    /// Per-channel YouTube player-client override (comma-separated, e.g.
+    /// "tv,mweb"). `None` defers to the global
+    /// `backup.youtube_player_clients`. Resolved in the downloader, not
+    /// `apply()`, since the global default lives in config.
+    #[serde(default)]
+    pub youtube_player_clients: Option<String>,
+
     /// Raw passthrough — every entry is appended as a separate argument to
     /// yt-dlp. Lets users access any flag we haven't exposed yet. Equivalent
     /// to Tartube's `extra_cmd_string`.
