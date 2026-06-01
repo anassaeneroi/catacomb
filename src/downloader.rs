@@ -132,8 +132,40 @@ pub struct Job {
     /// surfaces the class + a one-line suggested fix from
     /// [`crate::error_class`].
     pub failure_class: Option<crate::error_class::ErrorClass>,
+    /// Inputs needed to re-run this job, captured at start time. Lets the
+    /// downloader rebuild the command for an automatic retry after a
+    /// transient (rate-limit / network) failure without the caller
+    /// re-issuing it. `None` for jobs that aren't retryable (e.g. the
+    /// yt-dlp self-update job).
+    retry_spec: Option<RetrySpec>,
+    /// How many automatic retries this job has already consumed. Capped at
+    /// [`MAX_AUTO_RETRIES`] so a permanently-blocked video doesn't loop.
+    retry_count: u8,
+    /// Set once we've evaluated this job's failure for auto-retry, so the
+    /// per-poll scan doesn't schedule the same failure repeatedly.
+    retry_handled: bool,
     rx: Receiver<Msg>,
 }
+
+/// Captured inputs for rebuilding a download command on auto-retry.
+#[derive(Clone)]
+struct RetrySpec {
+    url: String,
+    info: UrlInfo,
+    full_scan: bool,
+    quality: DownloadQuality,
+    live: bool,
+    opts: Option<DownloadOptions>,
+}
+
+/// Max automatic re-queues per job for transient failures. One retry
+/// clears most momentary captchas/resets; more than that and it's a real
+/// block the user needs to act on (refresh cookies, wait longer).
+const MAX_AUTO_RETRIES: u8 = 2;
+
+/// Cooldown before an auto-retry fires. Long enough to let a momentary
+/// rate-limit window pass; short enough that the user isn't left waiting.
+const AUTO_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(90);
 
 impl Job {
     fn drain(&mut self) {
@@ -168,6 +200,10 @@ struct PendingJob {
     cmd: Command,
     url: String,
     label: String,
+    /// Retry spec captured at enqueue time (None for non-retryable jobs).
+    retry_spec: Option<RetrySpec>,
+    /// Attempt number this command represents (0 = first try).
+    retry_count: u8,
 }
 
 /// Manages all active, queued, and recently completed yt-dlp download jobs.
@@ -195,6 +231,24 @@ pub struct Downloader {
     /// [`DownloadOptions`] override individual fields. Set by the app /
     /// web layer at construction and on settings save.
     pub subtitle_defaults: crate::config::SubtitlesSection,
+    /// Scheduled auto-retries: `(fire_at, spec, attempt_number)`. Populated
+    /// when a job fails with a retryable class; drained in [`Self::poll`]
+    /// once `fire_at` passes, re-issuing the download. Kept separate from
+    /// `pending` so the cooldown is honored without blocking a slot.
+    retry_queue: Vec<(std::time::Instant, RetrySpec, u8)>,
+    /// True while the most recent rate-limit hit's adaptive backoff is in
+    /// effect. Set when a job fails rate-limited; makes subsequent jobs in
+    /// the batch sleep longer. Cleared once downloads go quiet.
+    pub rate_limited_backoff: bool,
+    /// Stashed by [`Self::start`] just before it enqueues, consumed by the
+    /// next [`Self::spawn_job`] so the resulting [`Job`] carries the spec
+    /// for auto-retry. Avoids threading `Option<RetrySpec>` through the
+    /// four non-retryable enqueue paths (repair / music / updates).
+    pending_retry_spec: Option<RetrySpec>,
+    /// Attempt number for the job [`Self::start`] is about to enqueue.
+    /// 0 for a user-initiated download; >0 when [`Self::start_retry`] is
+    /// re-issuing a failed one. Consumed by `enqueue`.
+    retry_attempt_override: u8,
 }
 
 impl Downloader {
@@ -215,6 +269,10 @@ impl Downloader {
             use_pot_provider,
             pot_server: None,
             subtitle_defaults: crate::config::SubtitlesSection::default(),
+            retry_queue: Vec::new(),
+            rate_limited_backoff: false,
+            pending_retry_spec: None,
+            retry_attempt_override: 0,
         }
     }
 
@@ -316,18 +374,27 @@ impl Downloader {
     /// The sleep flags throttle request rate so we don't trip YouTube's
     /// bot-detection / captcha wall mid-batch (it tends to fire after
     /// ~30 rapid requests):
-    /// - `--sleep-requests 1`: 1 s between metadata/API requests.
-    /// - `--sleep-interval` / `--max-sleep-interval`: a random 2-6 s
-    ///   pause *between videos*. The jitter is what matters — a fixed
-    ///   cadence looks robotic; a random one looks human and is far less
-    ///   likely to trip the captcha on a long channel scan.
-    fn apply_retry_flags(cmd: &mut Command) {
+    /// - `--sleep-requests`: pause between metadata/API requests.
+    /// - `--sleep-interval` / `--max-sleep-interval`: a random pause
+    ///   *between videos*. The jitter is what matters — a fixed cadence
+    ///   looks robotic; a random one looks human and is far less likely
+    ///   to trip the captcha on a long channel scan.
+    ///
+    /// Adaptive backoff: after a rate-limit hit (`rate_limited_backoff`),
+    /// the sleeps roughly triple for the rest of the batch so we ease off
+    /// instead of hammering an already-suspicious endpoint.
+    fn apply_retry_flags(&self, cmd: &mut Command) {
+        let (req, lo, hi) = if self.rate_limited_backoff {
+            ("3", "8", "20")
+        } else {
+            ("1", "2", "6")
+        };
         cmd.arg("--retries").arg("30")
             .arg("--fragment-retries").arg("30")
             .arg("--retry-sleep").arg("linear=1:30:2")
-            .arg("--sleep-requests").arg("1")
-            .arg("--sleep-interval").arg("2")
-            .arg("--max-sleep-interval").arg("6");
+            .arg("--sleep-requests").arg(req)
+            .arg("--sleep-interval").arg(lo)
+            .arg("--max-sleep-interval").arg(hi);
     }
 
     /// Build a fresh `Command` invoking the currently configured yt-dlp binary.
@@ -362,13 +429,21 @@ impl Downloader {
                 if running >= self.max_concurrent { break; }
             }
             let p = self.pending.pop_front().unwrap();
-            self.spawn_job(p.cmd, p.url, p.label);
+            self.spawn_job(p.cmd, p.url, p.label, p.retry_spec, p.retry_count);
         }
     }
 
     /// Push a command into the pending queue (or start immediately if a slot is free).
+    ///
+    /// Consumes `self.pending_retry_spec` (set by [`Self::start`]) so the
+    /// resulting job carries its retry spec, and `retry_attempt_override`
+    /// for the attempt number (0 on a first run, >0 from a retry). Other
+    /// callers (repair, music, updates) leave the spec `None`, making
+    /// those jobs non-retryable.
     fn enqueue(&mut self, cmd: Command, url: String, label: String) {
-        self.pending.push_back(PendingJob { cmd, url, label });
+        let retry_spec = self.pending_retry_spec.take();
+        let retry_count = self.retry_attempt_override;
+        self.pending.push_back(PendingJob { cmd, url, label, retry_spec, retry_count });
         self.promote_queued();
     }
 
@@ -413,6 +488,23 @@ impl Downloader {
         // extractor-time, so a too-late start means the first request
         // misses POT and YouTube hands back empty formats.
         self.ensure_pot_server();
+
+        // Capture the inputs so spawn_job can attach a RetrySpec for
+        // automatic retry on a transient (rate-limit / network) failure.
+        // Live recordings aren't retried — re-running would start a fresh
+        // recording, not resume.
+        self.pending_retry_spec = if live {
+            None
+        } else {
+            Some(RetrySpec {
+                url: url.clone(),
+                info: info.clone(),
+                full_scan,
+                quality,
+                live,
+                opts: channel_options.cloned(),
+            })
+        };
 
         let platform_dir = platform::platform_root(&self.channels_root, info.platform);
         // Per-platform download archive keeps cross-platform IDs from colliding
@@ -545,7 +637,7 @@ impl Downloader {
             opts.apply(&mut cmd);
         }
         cmd.arg("-o").arg(&out_arg).arg(&url);
-        Self::apply_retry_flags(&mut cmd);
+        self.apply_retry_flags(&mut cmd);
 
         self.enqueue(cmd, url, label);
     }
@@ -577,7 +669,7 @@ impl Downloader {
         // original video lives on disk.
         self.apply_impersonation(Platform::YouTube, &mut cmd);
         cmd.arg("-o").arg(&out_arg).arg(&url);
-        Self::apply_retry_flags(&mut cmd);
+        self.apply_retry_flags(&mut cmd);
 
         self.enqueue(cmd, url, label);
     }
@@ -622,7 +714,7 @@ impl Downloader {
             .arg("-o")
             .arg(&out_arg)
             .arg(&url);
-        Self::apply_retry_flags(&mut cmd);
+        self.apply_retry_flags(&mut cmd);
 
         self.enqueue(cmd, url, label);
     }
@@ -657,7 +749,7 @@ impl Downloader {
     }
 
     /// Spawn `cmd` on a background thread, streaming its output into a new [`Job`].
-    fn spawn_job(&mut self, mut cmd: Command, url: String, label: String) {
+    fn spawn_job(&mut self, mut cmd: Command, url: String, label: String, retry_spec: Option<RetrySpec>, retry_count: u8) {
         // POT provider extractor-arg. yt-dlp lets us pass multiple
         // --extractor-args flags; this one points the bgutil plugin at
         // our local server. Only emitted when the user opted in *and*
@@ -759,6 +851,9 @@ impl Downloader {
             progress: 0.0,
             log: VecDeque::new(),
             failure_class: None,
+            retry_spec,
+            retry_count,
+            retry_handled: false,
             rx,
         });
     }
@@ -789,6 +884,11 @@ impl Downloader {
             progress: 0.0,
             log,
             failure_class: Some(class),
+            // Disk-full preflight isn't auto-retried — retrying without
+            // freeing space would just fail again.
+            retry_spec: None,
+            retry_count: 0,
+            retry_handled: true, // never retry a synthetic preflight failure
             rx,
         });
     }
@@ -800,8 +900,90 @@ impl Downloader {
         for job in &mut self.jobs {
             job.drain();
         }
+        self.schedule_auto_retries();
+        self.fire_due_retries();
         // Re-check after draining: finished jobs free slots for queued ones.
         self.promote_queued();
+        // Once everything's idle, clear the adaptive backoff so the next
+        // fresh batch starts at normal speed.
+        if !self.any_running() && self.pending.is_empty() && self.retry_queue.is_empty() {
+            self.rate_limited_backoff = false;
+        }
+    }
+
+    /// Returns true if `class` warrants an automatic retry. Transient
+    /// failures (rate-limit / captcha / network) are worth retrying; a
+    /// removed video or missing codec is not — retrying changes nothing.
+    fn is_retryable(class: crate::error_class::ErrorClass) -> bool {
+        use crate::error_class::ErrorClass::*;
+        matches!(class, RateLimited | NetworkError)
+    }
+
+    /// Scan freshly-failed jobs; schedule a delayed retry for retryable
+    /// ones under the attempt cap, and engage the adaptive backoff on a
+    /// rate-limit hit so the rest of the batch slows down.
+    fn schedule_auto_retries(&mut self) {
+        let now = std::time::Instant::now();
+        let mut to_schedule: Vec<(RetrySpec, u8)> = Vec::new();
+        for job in &mut self.jobs {
+            if job.retry_handled || job.state != JobState::Failed { continue; }
+            job.retry_handled = true;
+            let Some(class) = job.failure_class else { continue };
+            // A rate-limit hit slows the whole remaining batch.
+            if class == crate::error_class::ErrorClass::RateLimited {
+                self.rate_limited_backoff = true;
+            }
+            if !Self::is_retryable(class) { continue; }
+            if job.retry_count >= MAX_AUTO_RETRIES { continue; }
+            let Some(spec) = job.retry_spec.clone() else { continue };
+            let next_attempt = job.retry_count + 1;
+            to_schedule.push((spec, next_attempt));
+            job.log.push_back(format!(
+                "↻ auto-retry {next_attempt}/{MAX_AUTO_RETRIES} scheduled in {}s (transient {})",
+                AUTO_RETRY_COOLDOWN.as_secs(),
+                class.label(),
+            ));
+        }
+        for (spec, attempt) in to_schedule {
+            // Linear backoff: attempt 1 waits 1× cooldown, attempt 2 waits 2×.
+            let delay = AUTO_RETRY_COOLDOWN * attempt as u32;
+            self.retry_queue.push((now + delay, spec, attempt));
+        }
+    }
+
+    /// Re-issue any retries whose cooldown has elapsed.
+    fn fire_due_retries(&mut self) {
+        let now = std::time::Instant::now();
+        // Partition: due vs not-yet-due. Drain the due ones.
+        let mut still_waiting = Vec::with_capacity(self.retry_queue.len());
+        let due: Vec<(RetrySpec, u8)> = std::mem::take(&mut self.retry_queue)
+            .into_iter()
+            .filter_map(|(at, spec, attempt)| {
+                if at <= now { Some((spec, attempt)) }
+                else { still_waiting.push((at, spec, attempt)); None }
+            })
+            .collect();
+        self.retry_queue = still_waiting;
+        for (spec, attempt) in due {
+            self.start_retry(spec, attempt);
+        }
+    }
+
+    /// Rebuild + enqueue a retry of a previously-failed download. Re-runs
+    /// `start()` to reconstruct the command identically; the attempt count
+    /// rides through via `retry_attempt_override` so the new job knows it's
+    /// a retry (and won't loop past the cap).
+    fn start_retry(&mut self, spec: RetrySpec, attempt: u8) {
+        self.retry_attempt_override = attempt;
+        self.start(
+            spec.url.clone(),
+            &spec.info,
+            spec.full_scan,
+            spec.quality,
+            spec.live,
+            spec.opts.as_ref(),
+        );
+        self.retry_attempt_override = 0;
     }
 
     pub fn any_running(&self) -> bool {
@@ -950,6 +1132,41 @@ mod tests {
         let abs = "/home/luna/cookies.txt";
         let input = "[download]  47.2% of 100MiB";
         assert_eq!(redact_sensitive(input, abs), input);
+    }
+
+    // ── Auto-retry classification ────────────────────────────────────────
+    use crate::error_class::ErrorClass;
+    #[test]
+    fn retryable_only_for_transient_classes() {
+        assert!(Downloader::is_retryable(ErrorClass::RateLimited));
+        assert!(Downloader::is_retryable(ErrorClass::NetworkError));
+        // Permanent / user-action-required classes must NOT auto-retry.
+        assert!(!Downloader::is_retryable(ErrorClass::NotFound));
+        assert!(!Downloader::is_retryable(ErrorClass::MembersOnly));
+        assert!(!Downloader::is_retryable(ErrorClass::Geoblocked));
+        assert!(!Downloader::is_retryable(ErrorClass::CodecMissing));
+        assert!(!Downloader::is_retryable(ErrorClass::DiskFull));
+        assert!(!Downloader::is_retryable(ErrorClass::BadCookies));
+        assert!(!Downloader::is_retryable(ErrorClass::Other));
+    }
+
+    #[test]
+    fn adaptive_backoff_triples_sleeps() {
+        let mut d = Downloader::new(
+            std::path::PathBuf::from("/tmp"), "none".into(), 1, false, false);
+        // Normal: 1/2/6.
+        let mut cmd = Command::new("yt-dlp");
+        d.apply_retry_flags(&mut cmd);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|w| w == ["--sleep-requests", "1"]));
+        assert!(args.windows(2).any(|w| w == ["--max-sleep-interval", "6"]));
+        // After a rate-limit hit: backoff engaged → 3/8/20.
+        d.rate_limited_backoff = true;
+        let mut cmd2 = Command::new("yt-dlp");
+        d.apply_retry_flags(&mut cmd2);
+        let args2: Vec<String> = cmd2.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args2.windows(2).any(|w| w == ["--sleep-requests", "3"]));
+        assert!(args2.windows(2).any(|w| w == ["--max-sleep-interval", "20"]));
     }
 
     // ── Subtitle resolver ────────────────────────────────────────────────
