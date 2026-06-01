@@ -18,7 +18,6 @@
 //! | `--embed-metadata --embed-info-json --embed-chapters` | Embed rich metadata into the MKV |
 //! | `--xattrs` | Store metadata in filesystem extended attributes |
 //! | `--sponsorblock-mark all` | Mark (but don't remove) SponsorBlock segments |
-//! | `--extractor-args youtube:player_client=web` | Use the web player API to avoid throttling |
 //! | `--impersonate <target>` | Browser TLS fingerprint per source platform (see [`crate::platform::Platform::impersonate_target`]) |
 //! | `--break-on-existing` | Stop when the archive file records the video as already downloaded |
 //! | `--download-archive archive.txt` | Record downloaded IDs to avoid re-downloading |
@@ -268,14 +267,23 @@ impl Downloader {
     ///
     /// YouTube occasionally resets connections mid-transfer; with default
     /// settings yt-dlp gives up after 10 quick retries. We bump the retry
-    /// count and add a linear backoff so transient resets self-heal. The
-    /// sleep flags throttle per-IP request rate slightly so we don't trip
-    /// YouTube's rate limiter when many channels are being checked at once.
+    /// count and add a linear backoff so transient resets self-heal.
+    ///
+    /// The sleep flags throttle request rate so we don't trip YouTube's
+    /// bot-detection / captcha wall mid-batch (it tends to fire after
+    /// ~30 rapid requests):
+    /// - `--sleep-requests 1`: 1 s between metadata/API requests.
+    /// - `--sleep-interval` / `--max-sleep-interval`: a random 2-6 s
+    ///   pause *between videos*. The jitter is what matters — a fixed
+    ///   cadence looks robotic; a random one looks human and is far less
+    ///   likely to trip the captcha on a long channel scan.
     fn apply_retry_flags(cmd: &mut Command) {
         cmd.arg("--retries").arg("30")
             .arg("--fragment-retries").arg("30")
             .arg("--retry-sleep").arg("linear=1:30:2")
-            .arg("--sleep-requests").arg("1");
+            .arg("--sleep-requests").arg("1")
+            .arg("--sleep-interval").arg("2")
+            .arg("--max-sleep-interval").arg("6");
     }
 
     /// Build a fresh `Command` invoking the currently configured yt-dlp binary.
@@ -464,8 +472,6 @@ impl Downloader {
             .arg("--xattrs")
             .arg("--sponsorblock-mark")
             .arg("all")
-            .arg("--extractor-args")
-            .arg("youtube:player_client=web")
             .arg("--progress");
         if let Some(fmt) = quality.format_spec() {
             cmd.arg("-f").arg(fmt);
@@ -518,9 +524,7 @@ impl Downloader {
             .arg("--write-info-json")
             .arg("--write-description")
             .arg("--write-subs")
-            .arg("--write-auto-subs")
-            .arg("--extractor-args")
-            .arg("youtube:player_client=web");
+            .arg("--write-auto-subs");
         // `repair()` rebuilds a YouTube watch URL from a stored video ID, so
         // the source platform is always YouTube here regardless of where the
         // original video lives on disk.
@@ -559,9 +563,7 @@ impl Downloader {
             .arg("--write-thumbnail")
             .arg("--write-info-json")
             .arg("--embed-metadata")
-            .arg("--xattrs")
-            .arg("--extractor-args")
-            .arg("youtube:player_client=web");
+            .arg("--xattrs");
         // Music downloads can come from any audio-first platform — classify
         // the URL once so SoundCloud/Bandcamp pulls get their appropriate
         // (typically no-op) impersonation profile.
