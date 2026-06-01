@@ -121,6 +121,14 @@ fn deno_asset() -> &'static str {
 /// a Python virtualenv with `curl_cffi` (for `--impersonate` support) and
 /// the rest of `yt-dlp[default]`, plus a sibling `deno` for JS deciphering.
 ///
+/// We install the **nightly** yt-dlp (`--pre`), not stable. YouTube's
+/// anti-bot measures shift faster than yt-dlp's ~monthly stable cadence,
+/// and stable lags on dependency support too: e.g. stable 2026.3.17 caps
+/// `curl_cffi` at `<0.15` and silently disables *all* impersonate targets
+/// when a newer curl_cffi is present, whereas nightly already accepts it.
+/// Nightly is yt-dlp's own recommended track for users who need to keep
+/// up with extractor + impersonation changes.
+///
 /// Runs through `bash -c` on Unix and PowerShell on Windows.
 pub fn install_command() -> Command {
     let root = bundled_root();
@@ -144,9 +152,9 @@ pub fn install_command() -> Command {
                Write-Host '==> creating Python venv'; \
                & $py.Source -m venv '{venv}'; \
              }}; \
-             Write-Host '==> installing yt-dlp + curl_cffi'; \
+             Write-Host '==> installing nightly yt-dlp + curl_cffi'; \
              & '{venv}\\Scripts\\python.exe' -m pip install --upgrade pip; \
-             & '{venv}\\Scripts\\python.exe' -m pip install --upgrade 'yt-dlp[default]' curl_cffi; \
+             & '{venv}\\Scripts\\python.exe' -m pip install --upgrade --pre 'yt-dlp[default]' curl_cffi; \
              Write-Host '==> downloading deno'; \
              Invoke-WebRequest -Uri '{durl}' -OutFile '{bin}\\deno.zip'; \
              Write-Host '==> extracting deno'; \
@@ -210,8 +218,11 @@ fi
 echo '==> upgrading pip in venv'
 '{venv}/bin/python' -m pip install --upgrade --quiet pip
 
-echo '==> installing yt-dlp[default] + curl_cffi (this fetches a few packages)'
-'{venv}/bin/python' -m pip install --upgrade --quiet --progress-bar off 'yt-dlp[default]' curl_cffi
+# --pre installs the nightly yt-dlp. Stable lags on extractor + dependency
+# support (e.g. it caps curl_cffi at <0.15 and disables impersonation when
+# a newer one is installed); nightly keeps pace with YouTube's changes.
+echo '==> installing nightly yt-dlp[default] + curl_cffi (this fetches a few packages)'
+'{venv}/bin/python' -m pip install --upgrade --pre --quiet --progress-bar off 'yt-dlp[default]' curl_cffi
 
 # ── deno ────────────────────────────────────────────────────────────────────
 echo '==> downloading deno'
