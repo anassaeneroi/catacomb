@@ -1386,6 +1386,16 @@ async function openSettings(){
   const logoutBtn=cur.download_password_required?`<button onclick="logout()">Log out</button>`:'';
   let ck={exists:false,cookies:0};try{ck=await(await api('/api/cookies')).json()}catch{}
   const cookiesStatus=ck.exists?`${ck.cookies} cookie(s) loaded`:'no cookies.txt';
+  // Freshness nudge: expired/soon-to-expire auth cookies make YouTube's
+  // bot-detection worse, so flag them prominently.
+  let cookieWarn='';
+  if(ck.exists&&ck.no_auth_cookies){
+    cookieWarn=`<div class="settings-hint" style="color:#f87171;font-weight:600">⚠ These cookies are anonymous — they have no YouTube login session (no SID/SAPISID/LOGIN_INFO). YouTube captchas anonymous requests most aggressively. Export a fresh cookies.txt while signed in to YouTube.</div>`;
+  }else if(ck.exists&&ck.expired){
+    cookieWarn=`<div class="settings-hint" style="color:#f87171;font-weight:600">⚠ Your login cookies have expired (${Math.abs(ck.days_left||0)}d ago). Refresh them below — stale cookies make YouTube's bot-detection worse.</div>`;
+  }else if(ck.exists&&ck.days_left!=null&&ck.days_left<=3){
+    cookieWarn=`<div class="settings-hint" style="color:#facc15">⚠ Login cookies expire in ${ck.days_left}d. Refresh soon to avoid captcha errors.</div>`;
+  }
   const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
   bg.innerHTML=`<div class="modal" style="max-width:420px;overflow-y:auto">
     <div class="modal-hdr" style="position:sticky;top:0;background:var(--panel);z-index:1;padding-bottom:6px"><h2>Settings</h2></div>
@@ -1412,6 +1422,7 @@ async function openSettings(){
     <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
       <label>Cookies (cookies.txt)</label>
       <div class="settings-hint" id="cookies-status">${cookiesStatus}</div>
+      ${cookieWarn}
       <input type="file" id="cf-cookies-file" accept=".txt,text/plain" onchange="loadCookieFile(this)" style="font-size:11px;color:var(--muted)">
       <textarea id="cf-cookies" placeholder="…or paste Netscape-format cookies.txt here" style="width:100%;height:70px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-family:monospace;font-size:11px;resize:vertical"></textarea>
       <div style="display:flex;gap:6px">

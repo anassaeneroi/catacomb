@@ -577,6 +577,79 @@ pub fn cookies_status() -> (bool, usize) {
     }
 }
 
+/// Cookie-freshness assessment for the UI.
+///
+/// `expires_at` is the **earliest** non-session expiry among the
+/// auth-relevant YouTube/Google cookies (the ones that actually gate
+/// logged-in access — `SID`, `SAPISID`, `__Secure-*`, `LOGIN_INFO`).
+/// `None` means none had a parseable future expiry (all session cookies,
+/// or already expired). `expired` is true when that earliest expiry is in
+/// the past — a strong "refresh your cookies" signal, since stale auth
+/// cookies make YouTube's bot-detection *worse* than none at all.
+#[derive(serde::Serialize, Default)]
+pub struct CookieFreshness {
+    /// Earliest auth-cookie expiry as a UNIX timestamp, if any.
+    pub expires_at: Option<i64>,
+    /// True when the earliest auth-cookie expiry is already past.
+    pub expired: bool,
+    /// Days until `expires_at` (negative if expired). `None` if unknown.
+    pub days_left: Option<i64>,
+    /// True when the jar has cookies but NONE of the login/auth cookies —
+    /// i.e. it's an anonymous/visitor session, not a signed-in one. This
+    /// is the worst case for YouTube bot-detection (anonymous requests get
+    /// captcha'd most aggressively), so we flag it distinctly.
+    pub no_auth_cookies: bool,
+}
+
+/// Names whose expiry actually matters for staying logged in. Other
+/// cookies (prefs, consent) expiring doesn't break auth, so we ignore
+/// them to avoid false "stale" warnings.
+const AUTH_COOKIE_NAMES: &[&str] = &[
+    "SID", "HSID", "SSID", "APISID", "SAPISID",
+    "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+    "LOGIN_INFO",
+];
+
+/// Parse the cookies file and assess freshness. See [`CookieFreshness`].
+pub fn cookies_freshness() -> CookieFreshness {
+    let text = std::fs::read_to_string(cookies_path()).unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    cookies_freshness_from(&text, now)
+}
+
+/// Pure freshness assessment from cookie-jar text + "now". Split out for
+/// testability (the public fn reads the file + clock).
+fn cookies_freshness_from(text: &str, now: i64) -> CookieFreshness {
+    // Netscape format: domain \t flag \t path \t secure \t expiry \t name \t value
+    let mut earliest: Option<i64> = None;
+    let mut saw_auth_cookie = false;
+    let mut saw_any_cookie = false;
+    for line in text.lines() {
+        if line.starts_with('#') || line.trim().is_empty() { continue; }
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 7 { continue; }
+        saw_any_cookie = true;
+        let name = f[5];
+        if !AUTH_COOKIE_NAMES.contains(&name) { continue; }
+        saw_auth_cookie = true;
+        // Expiry 0 = session cookie (no fixed expiry); skip — it's not
+        // a staleness signal on its own.
+        let Ok(exp) = f[4].parse::<i64>() else { continue };
+        if exp == 0 { continue; }
+        earliest = Some(earliest.map_or(exp, |e| e.min(exp)));
+    }
+    CookieFreshness {
+        expires_at: earliest,
+        expired: earliest.is_some_and(|exp| exp < now),
+        days_left: earliest.map(|exp| (exp - now) / 86_400),
+        // Has cookies but no login cookies = anonymous jar.
+        no_auth_cookies: saw_any_cookie && !saw_auth_cookie,
+    }
+}
+
 /// Validate that `text` looks like a Netscape cookie jar and write it to
 /// [`cookies_path`]. Returns the number of cookie entries written, or an error
 /// message if the content doesn't look like a cookies.txt.
@@ -616,6 +689,66 @@ pub fn write_cookies(text: &str) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_freshness_flags_expired_auth_cookie() {
+        let now = 1_700_000_000;
+        // SID expired (past), LOGIN_INFO valid (future). Earliest = SID → expired.
+        let jar = format!(
+            "# Netscape HTTP Cookie File\n\
+             .youtube.com\tTRUE\t/\tTRUE\t{past}\tSID\tabc\n\
+             .youtube.com\tTRUE\t/\tTRUE\t{future}\tLOGIN_INFO\txyz\n",
+            past = now - 86_400, future = now + 30 * 86_400,
+        );
+        let f = cookies_freshness_from(&jar, now);
+        assert!(f.expired, "earliest auth cookie is in the past → expired");
+        assert_eq!(f.expires_at, Some(now - 86_400));
+        assert_eq!(f.days_left, Some(-1));
+    }
+
+    #[test]
+    fn cookie_freshness_fresh_when_all_future() {
+        let now = 1_700_000_000;
+        let jar = format!(
+            ".youtube.com\tTRUE\t/\tTRUE\t{f}\tSID\ta\n\
+             .youtube.com\tTRUE\t/\tTRUE\t{f}\tSAPISID\tb\n",
+            f = now + 10 * 86_400,
+        );
+        let r = cookies_freshness_from(&jar, now);
+        assert!(!r.expired);
+        assert_eq!(r.days_left, Some(10));
+    }
+
+    #[test]
+    fn cookie_freshness_ignores_non_auth_and_session_cookies() {
+        let now = 1_700_000_000;
+        // A non-auth cookie expired + a session (0) auth cookie → no signal.
+        let jar = format!(
+            ".youtube.com\tTRUE\t/\tFALSE\t{past}\tPREF\tx\n\
+             .youtube.com\tTRUE\t/\tTRUE\t0\tSID\ta\n",
+            past = now - 86_400,
+        );
+        let r = cookies_freshness_from(&jar, now);
+        assert_eq!(r.expires_at, None);
+        assert!(!r.expired);
+        // SID present (even as session) → not an anonymous jar.
+        assert!(!r.no_auth_cookies);
+    }
+
+    #[test]
+    fn cookie_freshness_detects_anonymous_jar() {
+        let now = 1_700_000_000;
+        // Only visitor/pref cookies, no login cookies → anonymous.
+        let jar = format!(
+            ".youtube.com\tTRUE\t/\tFALSE\t{f}\tPREF\tx\n\
+             .youtube.com\tTRUE\t/\tTRUE\t{f}\tVISITOR_INFO1_LIVE\ty\n\
+             .youtube.com\tTRUE\t/\tTRUE\t{f}\tYSC\tz\n",
+            f = now + 100 * 86_400,
+        );
+        let r = cookies_freshness_from(&jar, now);
+        assert!(r.no_auth_cookies, "no login cookies → anonymous jar flagged");
+        assert!(!r.expired);
+    }
 
     #[test]
     fn srt_to_vtt_replaces_comma_in_timestamps_only() {
@@ -2255,10 +2388,20 @@ pub fn clear_cookies() -> Result<(), String> {
     Ok(())
 }
 
-/// `GET /api/cookies` — report whether a cookies file exists and its entry count.
+/// `GET /api/cookies` — report whether a cookies file exists, its entry
+/// count, and a freshness assessment (so the UI can nudge the user to
+/// refresh stale/expired auth cookies before downloads start failing).
 async fn get_cookies() -> impl IntoResponse {
     let (exists, count) = cookies_status();
-    Json(serde_json::json!({ "exists": exists, "cookies": count }))
+    let freshness = cookies_freshness();
+    Json(serde_json::json!({
+        "exists": exists,
+        "cookies": count,
+        "expires_at": freshness.expires_at,
+        "expired": freshness.expired,
+        "days_left": freshness.days_left,
+        "no_auth_cookies": freshness.no_auth_cookies,
+    }))
 }
 
 #[derive(Deserialize)]

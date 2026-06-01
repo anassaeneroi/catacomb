@@ -1088,7 +1088,18 @@ impl App {
                         self.settings_cookies_input.clear();
                         let (exists, n) = crate::web::cookies_status();
                         self.settings_cookies_status = if exists {
-                            format!("{n} cookie(s) loaded")
+                            let fresh = crate::web::cookies_freshness();
+                            if fresh.no_auth_cookies {
+                                format!("{n} cookie(s) — ⚠ ANONYMOUS (no YouTube login session); export a fresh cookies.txt while signed in — anonymous requests get captcha'd most")
+                            } else if fresh.expired {
+                                let ago = fresh.days_left.map(|d| d.abs()).unwrap_or(0);
+                                format!("{n} cookie(s) — ⚠ login cookies EXPIRED ({ago}d ago); refresh them (stale cookies worsen bot-detection)")
+                            } else if fresh.days_left.is_some_and(|d| d <= 3) {
+                                let d = fresh.days_left.unwrap_or(0);
+                                format!("{n} cookie(s) — ⚠ login cookies expire in {d}d; refresh soon")
+                            } else {
+                                format!("{n} cookie(s) loaded")
+                            }
                         } else {
                             "no cookies.txt".to_string()
                         };
