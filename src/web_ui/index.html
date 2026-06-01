@@ -882,6 +882,24 @@ function rebuildChannelUrl(ch){
 async function downloadChannelByIdx(i){await downloadChannel(rebuildChannelUrl(library[i]))}
 
 /* ── Per-channel download options ──────────────────────────────── */
+// Tri-state select for an Option<bool> override. `v` is true / false /
+// null|undefined (= use global default). Returns the <select> markup.
+function triSelect(id,v){
+  const sel=(want)=>v===want?' selected':'';
+  // null/undefined → Default; true → On; false → Off.
+  const dflt=(v===true||v===false)?'':' selected';
+  return `<select id="${id}" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px">`
+    +`<option value=""${dflt}>Default</option>`
+    +`<option value="on"${sel(true)}>On</option>`
+    +`<option value="off"${sel(false)}>Off</option>`
+    +`</select>`;
+}
+// Read a tri-state select back into an Option<bool>: "" → null, "on" →
+// true, "off" → false.
+function triValue(id){
+  const v=document.getElementById(id)?.value;
+  return v==='on'?true:v==='off'?false:null;
+}
 async function openChannelOptions(idx){
   const ch=library[idx]; if(!ch)return;
   const platform=ch.platform, handle=ch.name;
@@ -930,6 +948,15 @@ async function openChannelOptions(idx){
     <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:4px">
       <label>Subtitle languages (comma separated, blank = all)</label>
       <input type="text" id="opt-subs" value="${esc(langs)}" placeholder="en, ja" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
+    <div class="settings-hint" style="margin:2px 0 4px"><strong>Subtitle overrides</strong> — "Default" uses the global setting; the others force the behavior for this channel.</div>
+    <div class="settings-row"><label>Download subtitles</label>
+      ${triSelect('opt-subs-enabled',opts.subtitles_enabled)}</div>
+    <div class="settings-row"><label>Auto-generated captions</label>
+      ${triSelect('opt-subs-auto',opts.subtitles_auto)}</div>
+    <div class="settings-row"><label>Embed into video</label>
+      ${triSelect('opt-subs-embed',opts.subtitles_embed)}</div>
+    <div class="settings-row"><label>Convert format (blank = global)</label>
+      <input type="text" id="opt-subs-format" value="${esc(opts.subtitle_format||'')}" placeholder="srt/vtt/ass" style="width:100px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
     <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:4px">
       <label>Extra yt-dlp args (one per line)</label>
       <textarea id="opt-extra" rows="3" placeholder="--no-mtime
@@ -959,6 +986,10 @@ function readChannelOptionsForm(){
     date_after:strOrNull('opt-date'),
     match_filter:strOrNull('opt-filter'),
     subtitle_langs:subs,
+    subtitles_enabled:triValue('opt-subs-enabled'),
+    subtitles_auto:triValue('opt-subs-auto'),
+    subtitles_embed:triValue('opt-subs-embed'),
+    subtitle_format:strOrNull('opt-subs-format'),
     extra_args:extra,
   };
 }
@@ -1429,6 +1460,33 @@ async function openSettings(){
       <span id="pot-status" style="font-size:11px;color:var(--muted)"></span>
     </div>
     <hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">Subtitles (global defaults)</div>
+    <div class="settings-hint" style="margin-bottom:6px">Applied to every download. Individual channels can override these in their Channel options dialog.</div>
+    <div class="settings-row">
+      <label for="cf-subs-enabled">Download subtitles</label>
+      <input type="checkbox" id="cf-subs-enabled" ${cur.subtitles_enabled?'checked':''} onchange="document.getElementById('cf-subs-detail').style.display=this.checked?'block':'none'">
+    </div>
+    <div id="cf-subs-detail" style="display:${cur.subtitles_enabled?'block':'none'};padding-left:8px;border-left:2px solid var(--border)">
+      <div class="settings-row">
+        <label for="cf-subs-auto">Include auto-generated (machine) captions</label>
+        <input type="checkbox" id="cf-subs-auto" ${cur.subtitles_auto?'checked':''}>
+      </div>
+      <div class="settings-row">
+        <label for="cf-subs-embed">Embed subtitles into the video file</label>
+        <input type="checkbox" id="cf-subs-embed" ${cur.subtitles_embed?'checked':''}>
+      </div>
+      <div class="settings-hint" style="margin-bottom:4px">--embed-subs: soft subs toggleable in the player, in addition to sidecar files.</div>
+      <div class="settings-row">
+        <label for="cf-subs-langs">Languages (comma sep, blank = all)</label>
+        <input type="text" id="cf-subs-langs" value="${esc(cur.subtitle_langs||'')}" placeholder="en, ja" style="width:120px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px">
+      </div>
+      <div class="settings-row">
+        <label for="cf-subs-format">Convert to format (blank = native)</label>
+        <input type="text" id="cf-subs-format" value="${esc(cur.subtitle_format||'')}" placeholder="srt" style="width:90px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px">
+      </div>
+      <div class="settings-hint" style="margin-bottom:4px">--convert-subs. srt is the most player/Plex-compatible.</div>
+    </div>
+    <hr style="border-color:var(--border);margin:12px 0">
     <div style="font-weight:700;margin-bottom:8px">Plex</div>
     <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
       <label>Library path</label>
@@ -1595,7 +1653,12 @@ async function saveSettings(btn){
   const useBundledYtdlp=document.getElementById('cf-ytdlp-bundled')?.checked||false;
   const usePotProvider=document.getElementById('cf-pot-provider')?.checked||false;
   const sourceUrl=document.getElementById('cf-source-url')?.value;
-  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider};
+  const subsEnabled=document.getElementById('cf-subs-enabled')?.checked||false;
+  const subsAuto=document.getElementById('cf-subs-auto')?.checked||false;
+  const subsEmbed=document.getElementById('cf-subs-embed')?.checked||false;
+  const subsLangs=document.getElementById('cf-subs-langs')?.value||'';
+  const subsFormat=document.getElementById('cf-subs-format')?.value||'';
+  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider,subtitles_enabled:subsEnabled,subtitles_auto:subsAuto,subtitles_embed:subsEmbed,subtitle_langs:subsLangs,subtitle_format:subsFormat};
   if(bindMode)payload.bind_mode=bindMode;
   if(plexPath!==undefined)payload.plex_library_path=plexPath;
   if(sourceUrl!==undefined)payload.source_url=sourceUrl;

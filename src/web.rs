@@ -354,6 +354,19 @@ struct SettingsPayload {
     /// Whether the bgutil-pot binary is installed on disk (sent by server only).
     #[serde(skip_deserializing, default)]
     pot_provider_installed: bool,
+    /// Global subtitle defaults (the `[subtitles]` config section).
+    /// Round-trips on both GET and POST. Per-channel overrides live in
+    /// each channel's DownloadOptions, not here.
+    #[serde(default)]
+    subtitles_enabled: bool,
+    #[serde(default)]
+    subtitles_auto: bool,
+    #[serde(default)]
+    subtitles_embed: bool,
+    #[serde(default)]
+    subtitle_format: String,
+    #[serde(default)]
+    subtitle_langs: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1206,6 +1219,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let max_concurrent = cfg.backup.max_concurrent;
     let use_bundled_ytdlp = cfg.backup.use_bundled_ytdlp;
     let use_pot_provider = cfg.backup.use_pot_provider;
+    let subs = cfg.subtitles.clone();
     drop(cfg);
 
     let scheduler_next_check_secs = if scheduler_enabled {
@@ -1237,6 +1251,11 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         bundled_ytdlp_installed: crate::ytdlp_bin::bundled_installed(),
         use_pot_provider,
         pot_provider_installed: crate::pot_provider::installed(),
+        subtitles_enabled: subs.enabled,
+        subtitles_auto: subs.auto_generated,
+        subtitles_embed: subs.embed,
+        subtitle_format: subs.format,
+        subtitle_langs: subs.langs,
     })
 }
 
@@ -1270,6 +1289,12 @@ async fn post_settings(
     }
     cfg.backup.use_bundled_ytdlp = body.use_bundled_ytdlp;
     cfg.backup.use_pot_provider = body.use_pot_provider;
+    // Global subtitle defaults.
+    cfg.subtitles.enabled = body.subtitles_enabled;
+    cfg.subtitles.auto_generated = body.subtitles_auto;
+    cfg.subtitles.embed = body.subtitles_embed;
+    cfg.subtitles.format = body.subtitle_format.trim().to_string();
+    cfg.subtitles.langs = body.subtitle_langs.trim().to_string();
 
     if let Err(e) = cfg.save(&state.config_path) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("save failed: {e}")).into_response();
@@ -1283,6 +1308,7 @@ async fn post_settings(
     let max_concurrent = cfg.backup.max_concurrent;
     let use_bundled_ytdlp = cfg.backup.use_bundled_ytdlp;
     let use_pot_provider = cfg.backup.use_pot_provider;
+    let subs = cfg.subtitles.clone();
     drop(cfg);
 
     // Apply the new concurrency limit and binary choices to the live downloader.
@@ -1293,6 +1319,7 @@ async fn post_settings(
         }
         dl.use_bundled_ytdlp = use_bundled_ytdlp;
         dl.use_pot_provider = use_pot_provider;
+        dl.subtitle_defaults = subs.clone();
     }
 
     if let Some(new_pwd) = &body.new_download_password {
@@ -1342,6 +1369,11 @@ async fn post_settings(
         bundled_ytdlp_installed: crate::ytdlp_bin::bundled_installed(),
         use_pot_provider,
         pot_provider_installed: crate::pot_provider::installed(),
+        subtitles_enabled: subs.enabled,
+        subtitles_auto: subs.auto_generated,
+        subtitles_embed: subs.embed,
+        subtitle_format: subs.format,
+        subtitle_langs: subs.langs,
     }).into_response()
 }
 
