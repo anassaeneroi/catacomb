@@ -8,8 +8,16 @@
 //! consults the provider transparently.
 //!
 //! We use the Rust port at <https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs>
-//! (avoids the Node.js dependency of the original) plus the upstream
-//! Python plugin from <https://github.com/Brainicism/bgutil-ytdlp-pot-provider>.
+//! (avoids the Node.js dependency of the original) for *both* the HTTP
+//! server binary *and* the yt-dlp Python plugin — the port ships a
+//! version-matched plugin zip in each release.
+//!
+//! IMPORTANT: do NOT pip-install the upstream `bgutil-ytdlp-pot-provider`
+//! from PyPI. It versions independently (1.x) of jim60105's Rust server
+//! (0.8.x), and yt-dlp refuses to use a token when the plugin and server
+//! major versions mismatch — silently producing no POT. We install the
+//! plugin zip from the same GitHub release as the server so the two stay
+//! in lockstep.
 //!
 //! # Layout
 //!
@@ -19,8 +27,8 @@
 //! ~/.local/share/yt-offline/
 //!   bin/
 //!     bgutil-pot            ← the Rust HTTP server binary
-//!   venv/                   ← reused — pip-install the Python plugin here
-//!     lib/python*/site-packages/yt_dlp_plugins/extractor/bgutil_*.py
+//!   venv/                   ← reused — plugin zip unpacked into site-packages
+//!     lib/python*/site-packages/yt_dlp_plugins/extractor/getpot_bgutil*.py
 //! ```
 //!
 //! # Activation
@@ -101,6 +109,20 @@ fn release_url() -> String {
     )
 }
 
+/// URL of the yt-dlp plugin zip from the *same* release as the server.
+///
+/// CRITICAL: this must come from jim60105's release, not PyPI. The
+/// upstream Brainicism `bgutil-ytdlp-pot-provider` PyPI package versions
+/// independently (it's at 1.x while this Rust port is at 0.8.x) and
+/// yt-dlp refuses to use a token when the plugin and server major
+/// versions mismatch. jim60105 ships a version-matched plugin zip in
+/// each release; installing *that* keeps the two in lockstep. (An
+/// earlier version of this code pip-installed the upstream package and
+/// silently produced no tokens because of the mismatch.)
+fn plugin_zip_url() -> String {
+    "https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest/download/bgutil-ytdlp-pot-provider-rs.zip".to_string()
+}
+
 /// Shell command that downloads the bgutil-pot binary into the bundled
 /// bin dir and `pip install`s the matching Python plugin into the
 /// bundled venv.
@@ -118,6 +140,7 @@ pub fn install_command() -> Command {
     };
     let venv_python_s = venv_python.display().to_string();
     let url = release_url();
+    let plugin_url = plugin_zip_url();
 
     #[cfg(windows)]
     {
@@ -129,12 +152,22 @@ pub fn install_command() -> Command {
              }}; \
              Write-Host '==> downloading bgutil-pot'; \
              Invoke-WebRequest -Uri '{url}' -OutFile '{bin_path}'; \
-             Write-Host '==> installing the Python plugin into the venv'; \
-             & '{venv_python}' -m pip install --upgrade --quiet bgutil-ytdlp-pot-provider; \
+             Write-Host '==> resolving venv site-packages'; \
+             $site = (& '{venv_python}' -c 'import sysconfig; print(sysconfig.get_paths()[\"purelib\"])').Trim(); \
+             Write-Host \"    site-packages: $site\"; \
+             Write-Host '==> removing any stale upstream plugin (pip / old zip)'; \
+             & '{venv_python}' -m pip uninstall -y bgutil-ytdlp-pot-provider 2>$null; \
+             Remove-Item -Force -ErrorAction SilentlyContinue \"$site\\yt_dlp_plugins\\extractor\\getpot_bgutil*.py\"; \
+             Write-Host '==> downloading version-matched plugin zip'; \
+             Invoke-WebRequest -Uri '{plugin_url}' -OutFile \"$env:TEMP\\bgutil-plugin.zip\"; \
+             Write-Host '==> extracting plugin into venv'; \
+             Expand-Archive -Force \"$env:TEMP\\bgutil-plugin.zip\" \"$site\"; \
+             Remove-Item \"$env:TEMP\\bgutil-plugin.zip\"; \
              Write-Host '==> versions'; \
              & '{bin_path}' --version; \
              Write-Host '==> done'",
-            bin_dir = bin_dir, venv_python = venv_python_s, bin_path = bin_path, url = url,
+            bin_dir = bin_dir, venv_python = venv_python_s, bin_path = bin_path,
+            url = url, plugin_url = plugin_url,
         );
         let mut cmd = Command::new("powershell");
         cmd.arg("-NoProfile").arg("-Command").arg(script);
@@ -144,7 +177,8 @@ pub fn install_command() -> Command {
     {
         let script = format!(
             r#"set -e
-command -v curl >/dev/null || {{ echo 'error: curl not installed'; exit 1; }}
+command -v curl  >/dev/null || {{ echo 'error: curl not installed';  exit 1; }}
+command -v unzip >/dev/null || {{ echo 'error: unzip not installed'; exit 1; }}
 
 if [ ! -x '{venv_python}' ]; then
   echo 'error: bundled yt-dlp venv not installed.'
@@ -167,13 +201,38 @@ wait $DLPID
 echo "    done: $(wc -c < '{bin_path}') bytes"
 chmod +x '{bin_path}'
 
-echo '==> installing bgutil-ytdlp-pot-provider Python plugin into the venv'
-'{venv_python}' -m pip install --upgrade --quiet --progress-bar off bgutil-ytdlp-pot-provider
+# Resolve the venv's site-packages dir (python-version-independent).
+SITE="$('{venv_python}' -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+echo "==> venv site-packages: $SITE"
+
+# Remove any stale upstream plugin. The PyPI `bgutil-ytdlp-pot-provider`
+# package versions independently of jim60105's Rust server (1.x vs 0.8.x)
+# and yt-dlp refuses tokens on a major-version mismatch — so we must use
+# the version-matched plugin zip from the same release, not pip.
+echo '==> removing any stale upstream plugin'
+'{venv_python}' -m pip uninstall -y bgutil-ytdlp-pot-provider >/dev/null 2>&1 || true
+rm -f "$SITE"/yt_dlp_plugins/extractor/getpot_bgutil*.py 2>/dev/null || true
+
+echo '==> downloading version-matched plugin zip'
+TMPZIP="$(mktemp -t bgutil-plugin-XXXXXX.zip)"
+curl -fL --no-progress-meter --connect-timeout 30 --max-time 300 --retry 3 \
+  -o "$TMPZIP" '{plugin_url}'
+echo '==> extracting plugin into the venv'
+unzip -o "$TMPZIP" -d "$SITE"
+rm -f "$TMPZIP"
 
 echo '==> versions'
 '{bin_path}' --version
+echo '==> verifying plugin + server are the same version'
+PLUGIN_FILES="$SITE/yt_dlp_plugins/extractor"
+if [ -f "$PLUGIN_FILES/getpot_bgutil_http.py" ]; then
+  echo '    ok: bgutil HTTP plugin installed'
+else
+  echo '    warn: plugin files not found where expected'
+fi
 echo '==> done'"#,
-            bin_dir = bin_dir, venv_python = venv_python_s, bin_path = bin_path, url = url,
+            bin_dir = bin_dir, venv_python = venv_python_s, bin_path = bin_path,
+            url = url, plugin_url = plugin_url,
         );
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(script);
