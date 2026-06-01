@@ -15,7 +15,7 @@ catch up on quickly (Rust + axum + a real web UI + bundled toolchain + a
 modern security model) but trails on feature breadth and years-of-edge-cases
 maturity. The plan below closes those gaps first, then pushes past.
 
-## Current state vs Tartube (2026-05-27)
+## Current state vs Tartube (2026-06-01)
 
 | Area | Us | Tartube | Verdict |
 | --- | --- | --- | --- |
@@ -23,42 +23,36 @@ maturity. The plan below closes those gaps first, then pushes past.
 | Multi-platform sources | ✅ first-class per-platform routing | ✅ generic | We lead |
 | Web UI accessible from any device | ✅ | ❌ desktop only | We lead |
 | Single-binary distribution | ✅ Rust binary + venv installer | ❌ Python+GTK deps | We lead |
+| Per-distro packaging | ✅ .deb / .rpm / AppImage + PKGBUILD + CI | ✅ .deb .rpm .pkg.tar.zst | Tied |
 | Security model (auth, CSP, rate-limit) | ✅ | ❌ never network-facing | We lead |
 | Plex export with NFO sidecars | ✅ | ❌ | We lead |
-| Bundled curl_cffi for impersonation | ✅ | ❌ user-installed | We lead |
+| Anti-bot stack (impersonation + POT + nightly) | ✅ curl_cffi + bgutil-pot + nightly yt-dlp | ❌ user-installed | We lead |
+| Cookie freshness / anonymous-jar warning | ✅ | ❌ | We lead |
+| Auto-retry + adaptive throttle on rate-limit | ✅ | ❌ | We lead |
+| Configurable YouTube player clients | ✅ global + per-channel | ❌ | We lead |
 | Themes | ✅ 10 themes | ❌ GTK default | We lead |
 | Live-stream recording | ✅ | ✅ recent | Tied |
 | WebSocket real-time progress | ✅ | ❌ polling | We lead |
 | Mobile-responsive web UI | ✅ | ❌ desktop only | We lead |
 | Per-channel custom download options | ✅ JSON-blob overrides | ✅ deep | Tied |
-| Folder/group hierarchy | ✅ one-level | ✅ N-level | Tartube leads (depth only) |
+| Subtitle controls (auto / embed / convert) | ✅ global + per-channel | ✅ | Tied |
+| Folder/group hierarchy | ✅ N-level nesting | ✅ N-level | Tied |
 | Filter UI (date / size / watched) | ✅ chip-style | ✅ rich + presets | Tartube leads (presets only) |
 | Comments capture | ✅ `--write-comments` + viewer | ✅ raw JSON | We lead |
 | System tray | ✅ ksni (Linux SNI) | ✅ GTK | Tied |
-| Library backup | ✅ DB snapshot | ✅ | Tied |
-| Per-channel notes / annotations | ❌ | ✅ | **Tartube leads** |
+| Library backup + restore | ✅ DB snapshot + idempotent import | ✅ | Tied |
+| Per-channel notes / annotations | ✅ searchable | ✅ | Tied |
+| Error classification + suggested fixes | ✅ 9-class + hints | ✅ rescue recipes | Tied |
+| Crash log + disk-full preflight | ✅ | partial | We lead |
 | Format conversion / re-encode | ❌ remux only | ✅ ffmpeg pipeline | **Tartube leads** |
 | Maturity / edge cases | ~months | ~years | **Tartube leads** |
-| Per-distro packaging | PKGBUILD only | .deb .rpm .pkg.tar.zst | **Tartube leads** |
 
-Score: 11 ahead, 4 behind, 6 tied. The remaining four gaps are concrete,
-bounded items — see Phase 1 below.
+Score: 16 ahead, 2 behind, 11 tied. The big remaining gap is **format
+conversion (1.7)**; everything else is polish or stretch.
 
 ## Phase 1 — Remaining Tartube parity items
 
-The four items Tartube still has that we don't, ordered by how visibly
-they change the user experience.
-
-### 1.5 Per-channel / per-video notes
-
-Free-text user annotations on any channel or video.
-
-- New `notes` table: `(target_kind, target_id, body, updated_at)`.
-- Pencil icon on the channel sidebar entry + video card.
-- Notes are searchable from the global filter (search hits note body too).
-- Web UI: edit-in-place textarea on click.
-
-### 1.7 Format conversion pipeline
+### 1.7 Format conversion pipeline — the one real parity gap left
 
 Post-download re-encode option: H.264/AAC mp4 at a configurable CRF, or
 audio extraction at a target bitrate. Useful for shrinking large 4K files.
@@ -67,15 +61,6 @@ audio extraction at a target bitrate. Useful for shrinking large 4K files.
 - ffmpeg job runs after the download completes, replaces the source file
   (or keeps both with an `.original.mkv` suffix).
 - Visible in the job log as a separate "transcoding" phase.
-
-### 1.8 Per-distro packaging
-
-Tartube ships .deb, .rpm, .pkg.tar.zst, .exe, .dmg. We ship a PKGBUILD.
-
-- Codeberg CI matrix for `cargo build --release` on each target.
-- Helpers to generate .deb (via `cargo-deb`), .rpm (via `cargo-generate-rpm`),
-  Windows MSI (via `cargo-wix`), and macOS .app + .dmg.
-- Release artifacts attached to each tag.
 
 ### 1.3+ Filter presets (extension of completed 1.3)
 
@@ -86,24 +71,15 @@ restore it later. Small UI layer on top of what's already implemented.
 - Presets stored in localStorage (web) / SQLite (desktop).
 - Dropdown chip to apply a saved preset.
 
-### 1.2+ N-level folder nesting (extension of completed 1.2)
-
-Folders are flat right now (one level under each platform). Tartube
-supports arbitrary nesting.
-
-- Add `parent_id: Option<i64>` to `channel_folders`.
-- Sidebar renders the tree recursively with disclosure triangles.
-- "Move folder into folder" action in the manager.
-
 ## Phase 2 — Polish where Tartube is mature
 
 Things we win on architecturally but lose on real-world ruggedness.
 
 ### 2.1 Integration test coverage
 
-47 unit tests is good for parsers and helpers, useless for end-to-end
-correctness. We need real-yt-dlp integration tests against a recorded
-fixture corpus.
+91 unit tests are good for parsers/helpers/resolvers, but don't cover
+end-to-end correctness. We need real-yt-dlp integration tests against a
+recorded fixture corpus.
 
 - Mock-server fixtures for yt-dlp's JSON output.
 - `cargo test --features integration` exercises the full download pipeline
@@ -119,36 +95,27 @@ README is the only user-facing doc. Need a real docs site with:
 - Architecture page (for contributors).
 - Hosted via Codeberg Pages.
 
-### 2.3 Error recovery / structured logging
+### 2.3 Error recovery / structured logging — DONE
 
-Today: errors land in the job log and that's it. Tartube has a "rescue
-recipes" feature where common errors map to documented fixes.
+Shipped a 9-class error classifier (`RateLimited`, `MembersOnly`,
+`Geoblocked`, `NotFound`, `CodecMissing`, `DiskFull`, `NetworkError`,
+`BadCookies`, `Other`) with a one-line suggested fix per class, surfaced
+in both UIs. Remaining stretch: opt-in anonymous error telemetry to
+surface new patterns.
 
-- `Job::failure_reason: Option<ErrorClass>` enum (`RateLimited`,
-  `MissingCookies`, `CodecMissing`, `DiskFull`, `Other`).
-- UI surfaces the class with a one-click suggested action.
-- Optional anonymous error telemetry to surface new patterns.
+### 2.4 Library restore — DONE
 
-### 2.4 Library restore (backup is done)
+`POST /api/restore/db` + file pickers in both UIs do an idempotent merge
+(watched / positions / flags / folders / notes), schema-validated.
 
-Snapshot DB download works. Restore doesn't.
+### 2.5 Stability hardening — mostly DONE
 
-- "Import library backup…" file picker in settings.
-- Validate schema version before merging.
-- Idempotent merge of watched + positions + flags (so re-importing the
-  same backup twice doesn't break anything).
-
-### 2.5 Stability hardening
-
-Long-running deployments will surface real bugs.
+Done: crash.log panic hook, disk-full preflight (synthetic DiskFull job),
+auto-retry + adaptive throttle on transient failures. Remaining:
 
 - Replace remaining `.lock().unwrap()` with poisoning-aware accessors.
-- Watchdog: if a yt-dlp job hangs past `--socket-timeout * retries`, kill
-  and re-queue.
-- Disk-full preflight: refuse to start a download when target dir has
-  less free space than the average video size on disk.
-- Panic hook that writes to `yt-offline.crash.log` so users have something
-  to attach to bug reports.
+- Hang watchdog: if a yt-dlp job stalls past `--socket-timeout * retries`,
+  kill and re-queue.
 
 ## Phase 3 — Surpass
 
@@ -212,6 +179,25 @@ Probably never, or much later.
 
 Roughly reverse-chronological. Items that closed out a roadmap line.
 
+- **Anti-bot stack** — POT token provider (bgutil-pot, version-matched
+  plugin), nightly yt-dlp for working curl_cffi impersonation, dropped
+  the captcha-prone forced `player_client=web`, auto-retry + adaptive
+  throttle on rate-limit, configurable player clients (global +
+  per-channel), cookie freshness / anonymous-jar warning.
+- **Subtitle controls** — global `[subtitles]` config + per-channel
+  overrides (download / auto / embed / convert-format / langs).
+- **N-level folder nesting** (1.2+) — `parent_id` tree, recursive
+  sidebar, move-folder-into-folder with cycle prevention.
+- **Per-distro packaging** (1.8) — .deb / .rpm / AppImage via
+  scripts/package.sh + Forgejo CI release artifacts.
+- **Per-channel / per-video notes** (1.5) — searchable annotations.
+- **Library restore** (2.4) — idempotent backup import.
+- **Error classification** (2.3) — 9-class classifier + suggested fixes.
+- **Crash log + disk-full preflight** (2.5) — panic→crash.log, statvfs
+  guard before download.
+- **wgpu renderer** — fixed NVIDIA+Wayland crash-on-maximize.
+- **Performance pass** — info.json mtime cache, thumbnail worker pool,
+  /api/library body cache, opt-level=3 + thin LTO.
 - **System tray** (1.6) — ksni-based SNI tray, minimize-to-tray opt-in.
 - **Filter chips** (1.3) — watch / date / size / has-subs / has-chapters,
   AND together, persisted to localStorage.
