@@ -913,6 +913,9 @@ async function openChannelOptions(idx){
     <div class="settings-row"><label>Fetch comments</label>
       <input type="checkbox" id="opt-comments" ${opts.fetch_comments?'checked':''}></div>
     <div class="settings-hint" style="margin-bottom:4px">Adds <code>--write-comments</code>. Embeds the comment tree into info.json — slow for popular videos but enables the Comments tab in the player.</div>
+    <div class="settings-row"><label>Skip auth check</label>
+      <input type="checkbox" id="opt-skipauth" ${opts.skip_auth_check?'checked':''}></div>
+    <div class="settings-hint" style="margin-bottom:4px">Adds <code>--extractor-args youtubetab:skip=authcheck</code>. Safe for <strong>public</strong> channels — silences the "playlists that require authentication may not extract correctly" warning without changing which videos are found. Leave off for members-only/private channels, where that warning means your cookies may not be working.</div>
     <div class="settings-row"><label>Bandwidth cap (KB/s)</label>
       <input type="number" id="opt-rate" value="${opts.limit_rate_kb||''}" placeholder="off" min="0" style="width:90px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
     <div class="settings-row"><label>Min size (MB)</label>
@@ -949,6 +952,7 @@ function readChannelOptionsForm(){
     quality:q?q:null,
     audio_only:document.getElementById('opt-audio')?.checked||false,
     fetch_comments:document.getElementById('opt-comments')?.checked||false,
+    skip_auth_check:document.getElementById('opt-skipauth')?.checked||false,
     limit_rate_kb:intOrNull('opt-rate'),
     min_filesize_mb:intOrNull('opt-minsz'),
     max_filesize_mb:intOrNull('opt-maxsz'),

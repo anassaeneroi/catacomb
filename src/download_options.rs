@@ -79,6 +79,19 @@ pub struct DownloadOptions {
     /// When on, the web UI's player modal exposes a Comments tab.
     #[serde(default)]
     pub fetch_comments: bool,
+
+    /// Skip yt-dlp's channel-tab authentication sanity check by passing
+    /// `--extractor-args youtubetab:skip=authcheck`.
+    ///
+    /// yt-dlp warns ("Playlists that require authentication may not
+    /// extract correctly…") when it can't confirm a channel page loaded
+    /// authenticated. For PUBLIC channels that warning is noise — there's
+    /// no auth-gated content to miss — so this silences it. Leave OFF for
+    /// channels where you archive members-only / private content with
+    /// cookies: there the warning is a real "your cookies aren't working,
+    /// you may be getting an incomplete list" signal worth keeping.
+    #[serde(default)]
+    pub skip_auth_check: bool,
 }
 
 impl DownloadOptions {
@@ -128,6 +141,12 @@ impl DownloadOptions {
         }
         if self.fetch_comments {
             cmd.arg("--write-comments");
+        }
+        if self.skip_auth_check {
+            // Its own --extractor-args flag; the youtubetab: namespace is
+            // distinct from the POT provider's youtubepot-bgutilhttp: one,
+            // so they coexist as separate flags without clobbering.
+            cmd.arg("--extractor-args").arg("youtubetab:skip=authcheck");
         }
     }
 
@@ -180,6 +199,14 @@ mod tests {
         .apply(&mut cmd);
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, vec!["--sub-langs", "en,ja,es"]);
+    }
+
+    #[test]
+    fn skip_auth_check_emits_extractor_arg() {
+        let mut cmd = Command::new("yt-dlp");
+        DownloadOptions { skip_auth_check: true, ..Default::default() }.apply(&mut cmd);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec!["--extractor-args", "youtubetab:skip=authcheck"]);
     }
 
     #[test]

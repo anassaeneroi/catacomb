@@ -219,6 +219,7 @@ struct ChannelOptionsForm {
     quality_idx: usize,           // 0=default, 1=Best, 2=1080p, 3=720p, 4=480p, 5=360p
     audio_only: bool,
     fetch_comments: bool,
+    skip_auth_check: bool,
     limit_rate_kb: String,
     min_filesize_mb: String,
     max_filesize_mb: String,
@@ -440,6 +441,7 @@ impl App {
             quality_idx,
             audio_only: opts.audio_only,
             fetch_comments: opts.fetch_comments,
+            skip_auth_check: opts.skip_auth_check,
             limit_rate_kb: num(opts.limit_rate_kb),
             min_filesize_mb: num(opts.min_filesize_mb),
             max_filesize_mb: num(opts.max_filesize_mb),
@@ -470,6 +472,7 @@ impl App {
             quality,
             audio_only: f.audio_only,
             fetch_comments: f.fetch_comments,
+            skip_auth_check: f.skip_auth_check,
             limit_rate_kb: parse_num(&f.limit_rate_kb),
             min_filesize_mb: parse_num(&f.min_filesize_mb),
             max_filesize_mb: parse_num(&f.max_filesize_mb),
@@ -1902,6 +1905,11 @@ impl App {
                     ui.label("Fetch comments");
                     ui.checkbox(&mut form.fetch_comments, "Embed --write-comments into info.json")
                         .on_hover_text("Slow on popular videos. Once captured, comments are browsable from the player modal in the web UI.");
+                    ui.end_row();
+
+                    ui.label("Skip auth check");
+                    ui.checkbox(&mut form.skip_auth_check, "Suppress the channel-tab authentication warning")
+                        .on_hover_text("Passes --extractor-args youtubetab:skip=authcheck. Safe for PUBLIC channels — it silences yt-dlp's \"playlists that require authentication may not extract correctly\" warning without changing which videos are found. Leave OFF for members-only/private channels, where that warning signals your cookies may not be working.");
                     ui.end_row();
 
                     ui.label("Bandwidth cap (KB/s)");
