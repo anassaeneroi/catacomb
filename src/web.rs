@@ -1766,6 +1766,11 @@ struct FolderCreateBody { name: String }
 #[derive(Deserialize)]
 struct FolderRenameBody { name: String }
 
+/// Body for `POST /api/folders/:id/parent`. `parent_id = null` moves the
+/// folder to the top level.
+#[derive(Deserialize)]
+struct FolderParentBody { parent_id: Option<i64> }
+
 #[derive(Deserialize)]
 struct AssignFolderBody { folder_id: Option<i64> }
 
@@ -1802,6 +1807,28 @@ async fn post_rename_folder(
         Ok(()) => {
             bump_library_version(&state);
             (StatusCode::OK, "ok").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
+    }
+}
+
+/// `POST /api/folders/:id/parent` — reparent a folder for nesting.
+/// `parent_id = null` makes it top-level. The DB layer rejects cycles
+/// (a folder can't become its own descendant) with a 400.
+async fn post_folder_parent(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<FolderParentBody>,
+) -> impl IntoResponse {
+    match state.db.set_folder_parent(id, body.parent_id) {
+        Ok(()) => {
+            bump_library_version(&state);
+            (StatusCode::OK, "ok").into_response()
+        }
+        // A constraint failure here is the cycle guard — surface it as a
+        // 400 with the friendly message the DB layer attached.
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) => {
+            (StatusCode::BAD_REQUEST, msg).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
     }
@@ -2403,6 +2430,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/notes/:kind/:id", post(post_note))
         .route("/api/folders", post(post_create_folder))
         .route("/api/folders/:id/rename", post(post_rename_folder))
+        .route("/api/folders/:id/parent", post(post_folder_parent))
         .route("/api/folders/:id/check", post(post_check_folder))
         .route("/api/backup/db", get(get_backup_db))
         .route("/api/restore/db", post(post_restore_db))

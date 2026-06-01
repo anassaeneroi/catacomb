@@ -30,6 +30,8 @@ pub struct FolderRecord {
     pub id: i64,
     pub name: String,
     pub position: i64,
+    /// Parent folder id for N-level nesting. `None` = top-level folder.
+    pub parent_id: Option<i64>,
 }
 
 /// In-memory representation of the `video_flags` table. Each set holds the
@@ -185,6 +187,19 @@ impl Database {
                 PRIMARY KEY (target_kind, target_id)
             );",
         )?;
+
+        // ── Migration: folders.parent_id (N-level nesting) ───────────────
+        // `folders` predates nesting. Add the column idempotently — SQLite
+        // has no `ADD COLUMN IF NOT EXISTS`, so we attempt the ALTER and
+        // swallow the "duplicate column name" error that fires on an
+        // already-migrated DB. NULL parent_id = top-level folder.
+        let conn = self.conn();
+        match conn.execute("ALTER TABLE folders ADD COLUMN parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE", []) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                if msg.contains("duplicate column") => {}
+            Err(e) => return Err(e),
+        }
         Ok(())
     }
 
@@ -276,15 +291,63 @@ impl Database {
     /// has a deterministic order even before drag-to-reorder ships.
     pub fn list_folders(&self) -> Result<Vec<FolderRecord>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id, name, position FROM folders ORDER BY position, id")?;
+        let mut stmt = conn.prepare("SELECT id, name, position, parent_id FROM folders ORDER BY position, id")?;
         let rows = stmt.query_map([], |row| {
             Ok(FolderRecord {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 position: row.get(2)?,
+                parent_id: row.get(3)?,
             })
         })?;
         Ok(rows.filter_map(std::result::Result::ok).collect())
+    }
+
+    /// Reparent a folder. `new_parent = None` makes it top-level.
+    ///
+    /// Refuses to create a cycle: a folder can't become its own ancestor.
+    /// We walk up from the proposed new parent; if we hit `id` along the
+    /// way the move would form a loop and we return a friendly error
+    /// instead of corrupting the tree.
+    pub fn set_folder_parent(&self, id: i64, new_parent: Option<i64>) -> Result<()> {
+        let conn = self.conn();
+        if let Some(parent) = new_parent {
+            if parent == id {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                    Some("a folder can't be its own parent".into()),
+                ));
+            }
+            // Walk ancestors of `parent`; if `id` appears, this would cycle.
+            let mut cur = Some(parent);
+            let mut guard = 0;
+            while let Some(c) = cur {
+                if c == id {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                        Some("that move would nest a folder inside its own descendant".into()),
+                    ));
+                }
+                // Defensive bound in case the table is already corrupt.
+                guard += 1;
+                if guard > 10_000 { break; }
+                cur = match conn.query_row(
+                    "SELECT parent_id FROM folders WHERE id = ?1",
+                    [c],
+                    |r| r.get::<_, Option<i64>>(0),
+                ) {
+                    Ok(p) => p,
+                    // Row gone (shouldn't happen mid-walk) → stop walking.
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => return Err(e),
+                };
+            }
+        }
+        conn.execute(
+            "UPDATE folders SET parent_id = ?1 WHERE id = ?2",
+            rusqlite::params![new_parent, id],
+        )?;
+        Ok(())
     }
 
     /// Set or clear a channel's folder assignment. `folder_id = None`
@@ -984,6 +1047,36 @@ mod restore_tests {
         db.set_note("video", "v1", "   ").unwrap();
         assert_eq!(db.get_note("video", "v1").unwrap(), None);
         assert_eq!(db.get_all_notes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn folder_nesting_and_cycle_guard() {
+        let dir = ScratchDir::new("folder-nest");
+        let db = Database::open(&dir.join("nest.db")).unwrap();
+
+        let a = db.create_folder("A").unwrap();
+        let b = db.create_folder("B").unwrap();
+        let c = db.create_folder("C").unwrap();
+
+        // Nest B under A, C under B.
+        db.set_folder_parent(b, Some(a)).unwrap();
+        db.set_folder_parent(c, Some(b)).unwrap();
+
+        let folders = db.list_folders().unwrap();
+        let by_id = |id: i64| folders.iter().find(|f| f.id == id).unwrap();
+        assert_eq!(by_id(a).parent_id, None);
+        assert_eq!(by_id(b).parent_id, Some(a));
+        assert_eq!(by_id(c).parent_id, Some(b));
+
+        // A folder can't be its own parent.
+        assert!(db.set_folder_parent(a, Some(a)).is_err());
+
+        // Can't nest A under C (C is A's descendant → cycle).
+        assert!(db.set_folder_parent(a, Some(c)).is_err());
+
+        // Moving back to top level works.
+        db.set_folder_parent(c, None).unwrap();
+        assert_eq!(db.list_folders().unwrap().iter().find(|f| f.id == c).unwrap().parent_id, None);
     }
 
     #[test]

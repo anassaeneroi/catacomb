@@ -1194,19 +1194,71 @@ impl App {
                     // so folders render above platform sections. Channels with
                     // a folder_id appear only in their folder; unfiled channels
                     // still get the per-platform grouping.
-                    enum SidebarItem { FolderHeader(String, usize), FolderManageBtn, PlatformHeader(Platform), Channel(usize) }
+                    // FolderHeader carries a `depth` for indentation so the
+                    // N-level nesting reads as a tree.
+                    enum SidebarItem { FolderHeader(String, usize, usize), FolderManageBtn, PlatformHeader(Platform), Channel(usize, usize) }
                     let mut items: Vec<SidebarItem> = Vec::new();
                     let has_any_folder_or_assignment = !self.folders.is_empty()
                         || self.library.iter().any(|c| c.folder_id.is_some());
                     if has_any_folder_or_assignment {
                         items.push(SidebarItem::FolderManageBtn);
-                        for f in &self.folders {
-                            let members: Vec<usize> = self.library.iter().enumerate()
-                                .filter(|(_, c)| c.folder_id == Some(f.id))
+                        // Recursively emit a folder, its member channels, then
+                        // its children. Count includes the whole subtree.
+                        let folders = self.folders.clone();
+                        let library = &self.library;
+                        let subtree_count = |fid: i64| -> usize {
+                            // Iterative DFS counting members of fid + descendants.
+                            let mut seen = std::collections::HashSet::new();
+                            let mut stack = vec![fid];
+                            let mut n = 0usize;
+                            while let Some(cur) = stack.pop() {
+                                if !seen.insert(cur) { continue; }
+                                n += library.iter().filter(|c| c.folder_id == Some(cur)).count();
+                                for f in &folders {
+                                    if f.parent_id == Some(cur) { stack.push(f.id); }
+                                }
+                            }
+                            n
+                        };
+                        // Walk the tree depth-first. `emit` is iterative to avoid
+                        // borrow-checker gymnastics with a recursive closure.
+                        let mut seen = std::collections::HashSet::new();
+                        // Stack holds (folder_index_into_folders, depth).
+                        let roots: Vec<usize> = folders.iter().enumerate()
+                            .filter(|(_, f)| f.parent_id.is_none())
+                            .map(|(i, _)| i)
+                            .collect();
+                        // Push roots in reverse so the first root pops first.
+                        let mut stack: Vec<(usize, usize)> =
+                            roots.into_iter().rev().map(|i| (i, 0usize)).collect();
+                        while let Some((fi, depth)) = stack.pop() {
+                            let f = &folders[fi];
+                            if !seen.insert(f.id) { continue; }
+                            items.push(SidebarItem::FolderHeader(f.name.clone(), subtree_count(f.id), depth));
+                            for (i, c) in library.iter().enumerate() {
+                                if c.folder_id == Some(f.id) {
+                                    items.push(SidebarItem::Channel(i, depth + 1));
+                                }
+                            }
+                            // Push children (reverse for stable order).
+                            let mut kids: Vec<usize> = folders.iter().enumerate()
+                                .filter(|(_, c)| c.parent_id == Some(f.id))
                                 .map(|(i, _)| i)
                                 .collect();
-                            items.push(SidebarItem::FolderHeader(f.name.clone(), members.len()));
-                            for i in members { items.push(SidebarItem::Channel(i)); }
+                            kids.reverse();
+                            for ki in kids { stack.push((ki, depth + 1)); }
+                        }
+                        // Orphans whose parent was deleted: render at root.
+                        for (fi, f) in folders.iter().enumerate() {
+                            if !seen.contains(&f.id) {
+                                items.push(SidebarItem::FolderHeader(f.name.clone(), subtree_count(f.id), 0));
+                                for (i, c) in library.iter().enumerate() {
+                                    if c.folder_id == Some(f.id) {
+                                        items.push(SidebarItem::Channel(i, 1));
+                                    }
+                                }
+                                let _ = fi;
+                            }
                         }
                     } else {
                         items.push(SidebarItem::FolderManageBtn);
@@ -1218,7 +1270,8 @@ impl App {
                             items.push(SidebarItem::PlatformHeader(ch.platform));
                             last_platform_marker = Some(ch.platform);
                         }
-                        items.push(SidebarItem::Channel(i));
+                        // Unfiled channels render at the flat (depth 0) indent.
+                        items.push(SidebarItem::Channel(i, 0));
                     }
 
                     for item in items {
@@ -1231,9 +1284,11 @@ impl App {
                                     }
                                 });
                             }
-                            SidebarItem::FolderHeader(name, count) => {
+                            SidebarItem::FolderHeader(name, count, depth) => {
+                                // Two spaces of base indent + 2 per nesting level.
+                                let indent = "  ".repeat(depth + 1);
                                 ui.label(
-                                    egui::RichText::new(format!("  {name} ({count})"))
+                                    egui::RichText::new(format!("{indent}📁 {name} ({count})"))
                                         .small()
                                         .weak(),
                                 );
@@ -1245,7 +1300,7 @@ impl App {
                                         .weak(),
                                 );
                             }
-                            SidebarItem::Channel(i) => {
+                            SidebarItem::Channel(i, _depth) => {
                         let (name, total, has_playlists, size_bytes, channel_url, platform) = {
                             let ch = &self.library[i];
                             // Prefer the stored `.source-url` over folder-name guessing so
@@ -1961,6 +2016,8 @@ impl App {
         let mut to_rename: Option<(i64, String)> = None;
         let mut to_delete: Option<(i64, String, usize)> = None;
         let mut to_check: Option<i64> = None;
+        // (folder id, new parent or None) collected during render, applied after.
+        let mut to_reparent: Option<(i64, Option<i64>)> = None;
         egui::Window::new("📁 Manage folders")
             .open(&mut open)
             .collapsible(false)
@@ -1971,6 +2028,20 @@ impl App {
                     ui.label(egui::RichText::new("No folders yet — create one below.").weak());
                 }
                 let folders = self.folders.clone();
+                // Precompute each folder's descendant set so the parent
+                // picker can exclude choices that would create a cycle.
+                let descendants = |fid: i64| -> std::collections::HashSet<i64> {
+                    let mut out = std::collections::HashSet::new();
+                    let mut stack = vec![fid];
+                    while let Some(cur) = stack.pop() {
+                        for f in &folders {
+                            if f.parent_id == Some(cur) && out.insert(f.id) {
+                                stack.push(f.id);
+                            }
+                        }
+                    }
+                    out
+                };
                 for f in &folders {
                     let member_count = self.library.iter()
                         .filter(|c| c.folder_id == Some(f.id))
@@ -1990,6 +2061,32 @@ impl App {
                                 to_check = Some(f.id);
                             }
                         });
+                    });
+                    // Parent picker for nesting. Banned = self + descendants.
+                    let banned = {
+                        let mut b = descendants(f.id);
+                        b.insert(f.id);
+                        b
+                    };
+                    let current_parent_name = f.parent_id
+                        .and_then(|pid| folders.iter().find(|o| o.id == pid))
+                        .map(|o| o.name.as_str())
+                        .unwrap_or("— top level —");
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("    ↳ parent:").small().weak());
+                        egui::ComboBox::from_id_salt(("folder_parent", f.id))
+                            .selected_text(current_parent_name)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(f.parent_id.is_none(), "— top level —").clicked() {
+                                    to_reparent = Some((f.id, None));
+                                }
+                                for o in &folders {
+                                    if banned.contains(&o.id) { continue; }
+                                    if ui.selectable_label(f.parent_id == Some(o.id), &o.name).clicked() {
+                                        to_reparent = Some((f.id, Some(o.id)));
+                                    }
+                                }
+                            });
                     });
                     ui.separator();
                 }
@@ -2013,6 +2110,15 @@ impl App {
                     self.folder_create_buffer.clear();
                     self.status = "Folder created".to_string();
                 }
+            }
+        }
+        if let Some((id, new_parent)) = to_reparent {
+            match self.db.set_folder_parent(id, new_parent) {
+                Ok(()) => {
+                    self.folders = self.db.list_folders().unwrap_or_default();
+                    self.status = "Folder moved".to_string();
+                }
+                Err(e) => self.status = format!("Move folder: {e}"),
             }
         }
         if let Some((id, old_name)) = to_rename {

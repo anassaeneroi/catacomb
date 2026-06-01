@@ -318,11 +318,14 @@ function renderSidebar(){
   // Render a single channel entry (collapsed or expanded with sub-actions).
   // Returned HTML is appended at the right point — used both in the
   // folder loop and in the per-platform Unfiled loop below.
-  const renderChannel=(i)=>{
+  // `pad` is the left padding in px for nesting under a folder; defaults
+  // to the flat 10px used by top-level (Unfiled / platform) channels.
+  const renderChannel=(i,pad)=>{
     const ch=library[i];
     const active=activeChannelIdx===i&&activePlaylistIdx===null&&!showContinue;
     const size=ch.size_bytes>0?' · '+fmtSize(ch.size_bytes):'';
-    let s=`<div class="ch-item${active?' active':''}" onclick="setView(${i},null)" title="${esc(ch.platform_label||'')}">${esc(ch.platform_icon||'')} ${esc(ch.name)} (${ch.total_videos}${size})</div>`;
+    const padStyle=pad!=null?`padding-left:${pad}px;`:'';
+    let s=`<div class="ch-item${active?' active':''}" style="${padStyle}" onclick="setView(${i},null)" title="${esc(ch.platform_label||'')}">${esc(ch.platform_icon||'')} ${esc(ch.name)} (${ch.total_videos}${size})</div>`;
     if(activeChannelIdx===i&&!showContinue){
       for(let pi=0;pi<ch.playlists.length;pi++){
         const pl=ch.playlists[pi];
@@ -342,25 +345,44 @@ function renderSidebar(){
   // grouping for their members; Unfiled channels keep the platform
   // sections below.
   const folders=Array.isArray(librarySnapshotFolders)?librarySnapshotFolders:[];
+  h+=`<div class="sidebar-label" style="margin-top:10px;display:flex;align-items:center;gap:6px">
+    📁 Folders
+    <button onclick="openFolderManager()" style="font-size:11px;padding:1px 6px;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:3px;cursor:pointer">${folders.length?'manage':'new'}</button>
+  </div>`;
   if(folders.length){
-    h+=`<div class="sidebar-label" style="margin-top:10px;display:flex;align-items:center;gap:6px">
-      📁 Folders
-      <button onclick="openFolderManager()" style="font-size:11px;padding:1px 6px;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:3px;cursor:pointer">manage</button>
-    </div>`;
-    for(const f of folders){
-      const members=[];
-      for(let i=0;i<library.length;i++){
-        if(library[i].folder_id===f.id)members.push(i);
-      }
-      const count=members.length;
-      h+=`<div class="sidebar-label" style="padding-left:8px;font-size:11px;color:var(--muted)">${esc(f.name)} (${count})</div>`;
-      for(const i of members)h+=renderChannel(i);
-    }
-  } else {
-    h+=`<div class="sidebar-label" style="margin-top:10px;display:flex;align-items:center;gap:6px">
-      📁 Folders
-      <button onclick="openFolderManager()" style="font-size:11px;padding:1px 6px;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:3px;cursor:pointer">new</button>
-    </div>`;
+    // Recursively render the folder tree. parent_id===null (or a missing
+    // parent) marks a top-level folder; children indent one step further.
+    // A `seen` set guards against a malformed cycle in the data turning
+    // this into infinite recursion.
+    const childrenOf=(pid)=>folders.filter(f=>(f.parent_id??null)===pid);
+    // Count members including all descendant folders, so a parent folder's
+    // tally reflects everything nested under it.
+    const directMembers=(fid)=>{
+      const out=[];
+      for(let i=0;i<library.length;i++)if(library[i].folder_id===fid)out.push(i);
+      return out;
+    };
+    const subtreeCount=(fid,seen)=>{
+      if(seen.has(fid))return 0; seen.add(fid);
+      let n=directMembers(fid).length;
+      for(const c of childrenOf(fid))n+=subtreeCount(c.id,seen);
+      return n;
+    };
+    const renderFolderTree=(f,depth,seen)=>{
+      if(seen.has(f.id))return; seen.add(f.id);
+      const pad=8+depth*12;
+      const total=subtreeCount(f.id,new Set());
+      h+=`<div class="sidebar-label" style="padding-left:${pad}px;font-size:11px;color:var(--muted)">${'└ '.repeat(0)}${esc(f.name)} (${total})</div>`;
+      // Direct member channels of this folder, indented under it.
+      for(const i of directMembers(f.id))h+=renderChannel(i,pad+6);
+      // Then nested child folders.
+      for(const c of childrenOf(f.id))renderFolderTree(c,depth+1,seen);
+    };
+    const seen=new Set();
+    for(const f of childrenOf(null))renderFolderTree(f,0,seen);
+    // Safety net: render any orphaned folder whose parent_id points at a
+    // now-deleted row (shouldn't happen with the FK cascade, but cheap).
+    for(const f of folders)if(!seen.has(f.id))renderFolderTree(f,0,seen);
   }
 
   // Channels not assigned to a folder still get platform grouping.
@@ -963,10 +985,25 @@ async function clearChannelOptions(platform,handle,btn){
 async function openFolderManager(){
   const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
   const folders=librarySnapshotFolders||[];
+  // Build the set of descendant ids for each folder so the parent
+  // dropdown can grey out choices that would create a cycle (you can't
+  // nest a folder inside itself or any of its own descendants).
+  const childrenOf=(pid)=>folders.filter(f=>(f.parent_id??null)===pid);
+  const descendantsOf=(fid)=>{
+    const out=new Set(); const stack=[fid];
+    while(stack.length){const cur=stack.pop();
+      for(const c of childrenOf(cur)){if(!out.has(c.id)){out.add(c.id);stack.push(c.id);}}}
+    return out;
+  };
   const rows=folders.map(f=>{
     const memberCount=library.filter(c=>c.folder_id===f.id).length;
-    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-      <span style="flex:1">📁 ${esc(f.name)} <span style="color:var(--muted);font-size:11px">(${memberCount} channel${memberCount===1?'':'s'})</span></span>
+    const banned=descendantsOf(f.id); banned.add(f.id);
+    const parentOpts=[`<option value=""${(f.parent_id==null)?' selected':''}>— top level —</option>`]
+      .concat(folders.filter(o=>!banned.has(o.id)).map(o=>
+        `<option value="${o.id}"${f.parent_id===o.id?' selected':''}>${esc(o.name)}</option>`)).join('');
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
+      <span style="flex:1;min-width:120px">📁 ${esc(f.name)} <span style="color:var(--muted);font-size:11px">(${memberCount} channel${memberCount===1?'':'s'})</span></span>
+      <select onchange="setFolderParent(${f.id},this.value)" title="Nest this folder under another" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 5px;font-size:11px;max-width:140px">${parentOpts}</select>
       ${memberCount>0?`<button onclick="checkFolder(${f.id},'${esc(f.name)}',this)" title="Check every channel in this folder for new videos">⬇ Check</button>`:''}
       <button onclick="renameFolderPrompt(${f.id},'${esc(f.name)}')">Rename</button>
       <button onclick="deleteFolderConfirm(${f.id},'${esc(f.name)}',${memberCount})" style="color:#f87171">Delete</button>
@@ -1008,6 +1045,18 @@ async function renameFolderPrompt(id,oldName){
     await loadLibrary();
     openFolderManager();
   }catch(e){setStatus('Error: '+e.message)}
+}
+async function setFolderParent(id,parentVal){
+  // Empty string from the dropdown means "top level" → null parent.
+  const parent_id=parentVal===''?null:parseInt(parentVal,10);
+  try{
+    const r=await api(`/api/folders/${id}/parent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parent_id})});
+    if(!r.ok)throw new Error(await r.text());
+    setStatus('Folder moved');
+    document.querySelector('.modal-bg')?.remove();
+    await loadLibrary();
+    openFolderManager();
+  }catch(e){setStatus('Error: '+e.message);await loadLibrary();}
 }
 async function checkFolder(id,name,btn){
   btn.disabled=true;
