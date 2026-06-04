@@ -961,6 +961,11 @@ async function openChannelOptions(idx){
       <label>YouTube player clients (blank = global)</label>
       <input type="text" id="opt-player-clients" value="${esc(opts.youtube_player_clients||'')}" placeholder="e.g. tv,mweb" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
     <div class="settings-hint" style="margin-bottom:4px">Per-channel <code>--extractor-args youtube:player_client</code> override. If this channel keeps hitting captchas, try <code>tv,mweb</code> (least bot-checked).</div>
+    <div class="settings-row"><label>Convert (blank = global)</label>
+      <select id="opt-convert" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px">
+        ${[['','Default (global)'],['off','Off'],['remux-mp4','Remux → mp4'],['h264-mp4','H.264 mp4'],['audio','Audio']].map(([v,l])=>`<option value="${v}"${(opts.convert_mode||'')===v?' selected':''}>${l}</option>`).join('')}
+      </select></div>
+    <div class="settings-hint" style="margin-bottom:4px">Post-download ffmpeg conversion for this channel. CRF / preset / audio-format come from the global Format-conversion setting.</div>
     <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:4px">
       <label>Extra yt-dlp args (one per line)</label>
       <textarea id="opt-extra" rows="3" placeholder="--no-mtime
@@ -995,6 +1000,7 @@ function readChannelOptionsForm(){
     subtitles_embed:triValue('opt-subs-embed'),
     subtitle_format:strOrNull('opt-subs-format'),
     youtube_player_clients:strOrNull('opt-player-clients'),
+    convert_mode:strOrNull('opt-convert'),
     extra_args:extra,
   };
 }
@@ -1508,6 +1514,38 @@ async function openSettings(){
       <div class="settings-hint" style="margin-bottom:4px">--convert-subs. srt is the most player/Plex-compatible.</div>
     </div>
     <hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">Format conversion (global defaults)</div>
+    <div class="settings-hint" style="margin-bottom:6px">Runs ffmpeg after each download. Individual channels can override the mode in their options. Requires ffmpeg on the server.</div>
+    <div class="settings-row">
+      <label for="cf-convert-mode">Mode</label>
+      <select id="cf-convert-mode" onchange="updateConvertRows()" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px">
+        <option value=""${!cur.convert_mode?' selected':''}>Off</option>
+        <option value="remux-mp4"${cur.convert_mode==='remux-mp4'?' selected':''}>Remux → mp4 (no re-encode)</option>
+        <option value="h264-mp4"${cur.convert_mode==='h264-mp4'?' selected':''}>Re-encode → H.264 mp4</option>
+        <option value="audio"${cur.convert_mode==='audio'?' selected':''}>Extract audio</option>
+      </select>
+    </div>
+    <div id="cf-convert-crf-row" class="settings-row" style="display:${cur.convert_mode==='h264-mp4'?'flex':'none'}">
+      <label for="cf-convert-crf">CRF (0–51, lower=better)</label>
+      <input type="number" id="cf-convert-crf" value="${cur.convert_crf||23}" min="0" max="51" style="width:70px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px">
+    </div>
+    <div id="cf-convert-preset-row" class="settings-row" style="display:${cur.convert_mode==='h264-mp4'?'flex':'none'}">
+      <label for="cf-convert-preset">x264 preset</label>
+      <select id="cf-convert-preset" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px">
+        ${['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow'].map(p=>`<option value="${p}"${(cur.convert_preset||'medium')===p?' selected':''}>${p}</option>`).join('')}
+      </select>
+    </div>
+    <div id="cf-convert-audio-row" class="settings-row" style="display:${cur.convert_mode==='audio'?'flex':'none'}">
+      <label for="cf-convert-audio">Audio format</label>
+      <select id="cf-convert-audio" style="background:var(--card);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px">
+        ${['mp3','m4a','opus','flac'].map(f=>`<option value="${f}"${(cur.convert_audio_format||'mp3')===f?' selected':''}>${f}</option>`).join('')}
+      </select>
+    </div>
+    <div id="cf-convert-keep-row" class="settings-row" style="display:${cur.convert_mode?'flex':'none'}">
+      <label for="cf-convert-keep">Keep original alongside converted</label>
+      <input type="checkbox" id="cf-convert-keep" ${cur.convert_keep_original?'checked':''}>
+    </div>
+    <hr style="border-color:var(--border);margin:12px 0">
     <div style="font-weight:700;margin-bottom:8px">Plex</div>
     <div class="settings-row" style="flex-direction:column;align-items:flex-start;gap:6px">
       <label>Library path</label>
@@ -1662,6 +1700,15 @@ async function runScheduler(btn){
   }catch(e){st.textContent='Error: '+e.message}
   finally{btn.disabled=false}
 }
+// Show only the convert sub-rows relevant to the selected mode.
+function updateConvertRows(){
+  const mode=document.getElementById('cf-convert-mode')?.value||'';
+  const show=(id,on)=>{const el=document.getElementById(id);if(el)el.style.display=on?'flex':'none'};
+  show('cf-convert-crf-row',mode==='h264-mp4');
+  show('cf-convert-preset-row',mode==='h264-mp4');
+  show('cf-convert-audio-row',mode==='audio');
+  show('cf-convert-keep-row',!!mode);
+}
 async function saveSettings(btn){
   const transcode=document.getElementById('cf-transcode').checked;
   const bindMode=document.getElementById('cf-bind')?.value;
@@ -1680,7 +1727,12 @@ async function saveSettings(btn){
   const subsLangs=document.getElementById('cf-subs-langs')?.value||'';
   const subsFormat=document.getElementById('cf-subs-format')?.value||'';
   const playerClients=document.getElementById('cf-player-clients')?.value||'';
-  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider,subtitles_enabled:subsEnabled,subtitles_auto:subsAuto,subtitles_embed:subsEmbed,subtitle_langs:subsLangs,subtitle_format:subsFormat,youtube_player_clients:playerClients};
+  const convMode=document.getElementById('cf-convert-mode')?.value||'';
+  const convCrf=parseInt(document.getElementById('cf-convert-crf')?.value||'23',10);
+  const convPreset=document.getElementById('cf-convert-preset')?.value||'';
+  const convAudio=document.getElementById('cf-convert-audio')?.value||'';
+  const convKeep=document.getElementById('cf-convert-keep')?.checked||false;
+  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider,subtitles_enabled:subsEnabled,subtitles_auto:subsAuto,subtitles_embed:subsEmbed,subtitle_langs:subsLangs,subtitle_format:subsFormat,youtube_player_clients:playerClients,convert_mode:convMode,convert_crf:convCrf,convert_preset:convPreset,convert_audio_format:convAudio,convert_keep_original:convKeep};
   if(bindMode)payload.bind_mode=bindMode;
   if(plexPath!==undefined)payload.plex_library_path=plexPath;
   if(sourceUrl!==undefined)payload.source_url=sourceUrl;

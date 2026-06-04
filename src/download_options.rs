@@ -92,6 +92,14 @@ pub struct DownloadOptions {
     #[serde(default)]
     pub youtube_player_clients: Option<String>,
 
+    /// Per-channel post-download conversion mode override. `None` defers
+    /// to the global `[convert]` config; `Some("off")` forces no
+    /// conversion for this channel even when the global default is on.
+    /// Other values: "remux-mp4" / "h264-mp4" / "audio". CRF / preset /
+    /// audio-format always come from the global config.
+    #[serde(default)]
+    pub convert_mode: Option<String>,
+
     /// Raw passthrough — every entry is appended as a separate argument to
     /// yt-dlp. Lets users access any flag we haven't exposed yet. Equivalent
     /// to Tartube's `extra_cmd_string`.

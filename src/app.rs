@@ -233,6 +233,9 @@ struct ChannelOptionsForm {
     subs_embed_idx: usize,
     subtitle_format: String,      // "" = global default
     youtube_player_clients: String, // "" = global default
+    // Per-channel convert override: 0=Default(global), 1=Off, 2=remux-mp4,
+    // 3=h264-mp4, 4=audio. Maps to Option<String> on save.
+    convert_idx: usize,
     extra_args: String,           // one per line
 }
 
@@ -243,6 +246,27 @@ fn tri_to_idx(v: Option<bool>) -> usize {
 /// Inverse of [`tri_to_idx`].
 fn idx_to_tri(i: usize) -> Option<bool> {
     match i { 1 => Some(true), 2 => Some(false), _ => None }
+}
+
+/// Per-channel convert-mode override ⇄ combo index.
+/// 0=Default (None, defer to global), 1=Off, 2=remux-mp4, 3=h264-mp4, 4=audio.
+fn convert_mode_to_idx(v: &Option<String>) -> usize {
+    match v.as_deref() {
+        Some("off") => 1,
+        Some("remux-mp4") => 2,
+        Some("h264-mp4") => 3,
+        Some("audio") => 4,
+        _ => 0,
+    }
+}
+fn idx_to_convert_mode(i: usize) -> Option<String> {
+    match i {
+        1 => Some("off".into()),
+        2 => Some("remux-mp4".into()),
+        3 => Some("h264-mp4".into()),
+        4 => Some("audio".into()),
+        _ => None,
+    }
 }
 
 impl App {
@@ -316,6 +340,7 @@ impl App {
         );
         downloader.subtitle_defaults = config.subtitles.clone();
         downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
+        downloader.convert_defaults = config.convert.clone();
         let config_bind = config.web.bind.clone();
         let password_set = db.get_setting("password_hash").ok().flatten().is_some();
         let plex_path_str = config.plex.library_path
@@ -477,6 +502,7 @@ impl App {
             subs_embed_idx: tri_to_idx(opts.subtitles_embed),
             subtitle_format: opts.subtitle_format.clone().unwrap_or_default(),
             youtube_player_clients: opts.youtube_player_clients.clone().unwrap_or_default(),
+            convert_idx: convert_mode_to_idx(&opts.convert_mode),
             extra_args: opts.extra_args.join("\n"),
         }
     }
@@ -514,6 +540,7 @@ impl App {
             subtitles_embed: idx_to_tri(f.subs_embed_idx),
             subtitle_format: trim_opt(&f.subtitle_format),
             youtube_player_clients: trim_opt(&f.youtube_player_clients),
+            convert_mode: idx_to_convert_mode(f.convert_idx),
             extra_args: f.extra_args.lines()
                 .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         }
@@ -2036,6 +2063,27 @@ impl App {
                 });
 
                 ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Convert");
+                    let label = match form.convert_idx {
+                        1 => "Off", 2 => "Remux → mp4", 3 => "H.264 mp4", 4 => "Audio",
+                        _ => "Default (global)",
+                    };
+                    egui::ComboBox::from_id_salt("ch_convert")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut form.convert_idx, 0, "Default (global)");
+                            ui.selectable_value(&mut form.convert_idx, 1, "Off");
+                            ui.selectable_value(&mut form.convert_idx, 2, "Remux → mp4");
+                            ui.selectable_value(&mut form.convert_idx, 3, "H.264 mp4");
+                            ui.selectable_value(&mut form.convert_idx, 4, "Audio");
+                        });
+                }).response.on_hover_text(
+                    "Post-download ffmpeg conversion for this channel. Default = use the \
+                     global Format-conversion setting. CRF / preset / audio-format come \
+                     from the global config.");
+
+                ui.add_space(6.0);
                 ui.label("Extra yt-dlp args (one per line):");
                 ui.add(
                     egui::TextEdit::multiline(&mut self.channel_options_form.extra_args)
@@ -2653,6 +2701,69 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.separator();
+                ui.heading("Format conversion (global defaults)");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Runs ffmpeg after each download. Individual channels can override \
+                         the mode in their Channel options. Requires ffmpeg on PATH.",
+                    ).small().weak(),
+                );
+                let cv = &mut self.config.convert;
+                ui.horizontal(|ui| {
+                    ui.label("Mode:");
+                    let mode_label = match cv.mode.as_str() {
+                        "remux-mp4" => "Remux → mp4 (no re-encode)",
+                        "h264-mp4" => "Re-encode → H.264 mp4",
+                        "audio" => "Extract audio",
+                        _ => "Off",
+                    };
+                    egui::ComboBox::from_id_salt("convert_mode")
+                        .selected_text(mode_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut cv.mode, String::new(), "Off");
+                            ui.selectable_value(&mut cv.mode, "remux-mp4".into(), "Remux → mp4 (no re-encode)");
+                            ui.selectable_value(&mut cv.mode, "h264-mp4".into(), "Re-encode → H.264 mp4");
+                            ui.selectable_value(&mut cv.mode, "audio".into(), "Extract audio");
+                        });
+                });
+                if cv.mode == "h264-mp4" {
+                    ui.horizontal(|ui| {
+                        ui.label("CRF (quality):");
+                        ui.add(egui::DragValue::new(&mut cv.crf).range(0..=51))
+                            .on_hover_text("0–51, lower = bigger/better. 23 is a good default.");
+                        if cv.crf == 0 { cv.crf = 23; }
+                        ui.label("Preset:");
+                        let preset_disp = if cv.preset.is_empty() { "medium" } else { cv.preset.as_str() };
+                        egui::ComboBox::from_id_salt("convert_preset")
+                            .selected_text(preset_disp)
+                            .show_ui(ui, |ui| {
+                                for p in ["ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow"] {
+                                    ui.selectable_value(&mut cv.preset, p.to_string(), p);
+                                }
+                            });
+                    });
+                }
+                if cv.mode == "audio" {
+                    ui.horizontal(|ui| {
+                        ui.label("Audio format:");
+                        let af = if cv.audio_format.is_empty() { "mp3" } else { cv.audio_format.as_str() };
+                        egui::ComboBox::from_id_salt("convert_audio_fmt")
+                            .selected_text(af)
+                            .show_ui(ui, |ui| {
+                                for f in ["mp3","m4a","opus","flac"] {
+                                    ui.selectable_value(&mut cv.audio_format, f.to_string(), f);
+                                }
+                            });
+                    });
+                }
+                if !cv.mode.is_empty() {
+                    ui.checkbox(&mut cv.keep_original, "Keep original file alongside the converted one")
+                        .on_hover_text("Renames the source to <name>.original.<ext>. When off, the original is deleted after a successful convert.");
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
                 ui.heading("Backup");
                 ui.add_space(4.0);
                 ui.label(
@@ -2844,6 +2955,7 @@ impl App {
                         self.downloader.use_pot_provider = self.config.backup.use_pot_provider;
                         self.downloader.subtitle_defaults = self.config.subtitles.clone();
                         self.downloader.youtube_player_clients = self.config.backup.youtube_player_clients.clone();
+                        self.downloader.convert_defaults = self.config.convert.clone();
                         if dir_changed {
                             self.channels_root = new_dir.clone();
                             self.library_root = new_dir

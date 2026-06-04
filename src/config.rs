@@ -22,6 +22,38 @@ pub struct Config {
     pub plex: PlexSection,
     #[serde(default)]
     pub subtitles: SubtitlesSection,
+    #[serde(default)]
+    pub convert: ConvertSection,
+}
+
+/// `[convert]` table — global post-download format-conversion defaults.
+/// A separate ffmpeg pass runs after the download completes. Per-channel
+/// [`crate::download_options::DownloadOptions`] can override `mode`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ConvertSection {
+    /// What to do after download. One of:
+    /// - `""` / `"off"`: nothing (keep the downloaded mkv as-is).
+    /// - `"remux-mp4"`: fast container change mkv→mp4, no re-encode.
+    /// - `"h264-mp4"`: re-encode video to H.264/AAC mp4 at [`Self::crf`].
+    /// - `"audio"`: extract audio to [`Self::audio_format`].
+    #[serde(default)]
+    pub mode: String,
+    /// CRF for `h264-mp4` (0–51; lower = bigger/better). 23 is a sane
+    /// default if left at 0.
+    #[serde(default)]
+    pub crf: u8,
+    /// x264 preset for `h264-mp4` (ultrafast…veryslow). Empty = "medium".
+    #[serde(default)]
+    pub preset: String,
+    /// Audio format for `audio` mode (mp3 / m4a / opus / flac). Empty =
+    /// "mp3".
+    #[serde(default)]
+    pub audio_format: String,
+    /// Keep the original downloaded file alongside the converted one
+    /// (renamed to `<stem>.original.<ext>`). When false, the original is
+    /// deleted after a successful convert.
+    #[serde(default)]
+    pub keep_original: bool,
 }
 
 /// `[subtitles]` table — global subtitle download defaults. Per-channel
@@ -230,6 +262,7 @@ impl Config {
             web: WebSection::default(),
             plex: PlexSection::default(),
             subtitles: SubtitlesSection::default(),
+            convert: ConvertSection::default(),
         }
     }
 }

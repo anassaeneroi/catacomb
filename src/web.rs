@@ -370,6 +370,17 @@ struct SettingsPayload {
     /// YouTube player clients (comma-separated). Empty = yt-dlp defaults.
     #[serde(default)]
     youtube_player_clients: String,
+    /// Global [convert] settings, round-tripped on GET + POST.
+    #[serde(default)]
+    convert_mode: String,
+    #[serde(default)]
+    convert_crf: u8,
+    #[serde(default)]
+    convert_preset: String,
+    #[serde(default)]
+    convert_audio_format: String,
+    #[serde(default)]
+    convert_keep_original: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1357,6 +1368,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let use_pot_provider = cfg.backup.use_pot_provider;
     let subs = cfg.subtitles.clone();
     let player_clients_out = cfg.backup.youtube_player_clients.clone();
+    let convert = cfg.convert.clone();
     drop(cfg);
 
     let scheduler_next_check_secs = if scheduler_enabled {
@@ -1394,6 +1406,11 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         subtitle_format: subs.format,
         subtitle_langs: subs.langs,
         youtube_player_clients: player_clients_out.clone(),
+        convert_mode: convert.mode.clone(),
+        convert_crf: convert.crf,
+        convert_preset: convert.preset.clone(),
+        convert_audio_format: convert.audio_format.clone(),
+        convert_keep_original: convert.keep_original,
     })
 }
 
@@ -1434,6 +1451,12 @@ async fn post_settings(
     cfg.subtitles.format = body.subtitle_format.trim().to_string();
     cfg.subtitles.langs = body.subtitle_langs.trim().to_string();
     cfg.backup.youtube_player_clients = body.youtube_player_clients.trim().to_string();
+    // Global format-conversion defaults.
+    cfg.convert.mode = body.convert_mode.trim().to_string();
+    cfg.convert.crf = body.convert_crf;
+    cfg.convert.preset = body.convert_preset.trim().to_string();
+    cfg.convert.audio_format = body.convert_audio_format.trim().to_string();
+    cfg.convert.keep_original = body.convert_keep_original;
 
     if let Err(e) = cfg.save(&state.config_path) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("save failed: {e}")).into_response();
@@ -1449,6 +1472,7 @@ async fn post_settings(
     let use_pot_provider = cfg.backup.use_pot_provider;
     let subs = cfg.subtitles.clone();
     let player_clients_out = cfg.backup.youtube_player_clients.clone();
+    let convert = cfg.convert.clone();
     drop(cfg);
 
     // Apply the new concurrency limit and binary choices to the live downloader.
@@ -1461,6 +1485,7 @@ async fn post_settings(
         dl.use_pot_provider = use_pot_provider;
         dl.subtitle_defaults = subs.clone();
         dl.youtube_player_clients = player_clients_out.clone();
+        dl.convert_defaults = convert.clone();
     }
 
     if let Some(new_pwd) = &body.new_download_password {
@@ -1516,6 +1541,11 @@ async fn post_settings(
         subtitle_format: subs.format,
         subtitle_langs: subs.langs,
         youtube_player_clients: player_clients_out.clone(),
+        convert_mode: convert.mode.clone(),
+        convert_crf: convert.crf,
+        convert_preset: convert.preset.clone(),
+        convert_audio_format: convert.audio_format.clone(),
+        convert_keep_original: convert.keep_original,
     }).into_response()
 }
 
@@ -2497,6 +2527,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     );
     downloader.subtitle_defaults = config.subtitles.clone();
     downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
+    downloader.convert_defaults = config.convert.clone();
     let music_root = downloader.music_root();
     let _ = std::fs::create_dir_all(&music_root);
     let transcode = AtomicBool::new(config.web.transcode);

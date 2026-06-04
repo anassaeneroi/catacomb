@@ -144,6 +144,13 @@ pub struct Job {
     /// Set once we've evaluated this job's failure for auto-retry, so the
     /// per-poll scan doesn't schedule the same failure repeatedly.
     retry_handled: bool,
+    /// Post-download conversion to run on this job's finished files.
+    /// `None` for jobs that don't convert (most jobs). Consumed once when
+    /// the job transitions to Done.
+    convert_on_finish: Option<ConvertSpec>,
+    /// Set once we've enqueued the convert pass for this finished job, so
+    /// the per-poll scan doesn't enqueue it twice.
+    convert_handled: bool,
     rx: Receiver<Msg>,
 }
 
@@ -156,6 +163,46 @@ struct RetrySpec {
     quality: DownloadQuality,
     live: bool,
     opts: Option<DownloadOptions>,
+}
+
+/// Resolved post-download conversion settings, attached to a download Job
+/// so the downloader knows what ffmpeg pass (if any) to run on each
+/// finished file. `mode` is one of remux-mp4 / h264-mp4 / audio; the
+/// other fields parameterise it.
+#[derive(Clone)]
+pub struct ConvertSpec {
+    pub mode: String,
+    pub crf: u8,
+    pub preset: String,
+    pub audio_format: String,
+    pub keep_original: bool,
+}
+
+impl ConvertSpec {
+    /// Build a [`ConvertSpec`] from the global `[convert]` config merged
+    /// with a per-channel `convert_mode` override. Returns `None` when the
+    /// effective mode is off/empty (no transcode pass).
+    fn resolve(
+        global: &crate::config::ConvertSection,
+        opts: Option<&DownloadOptions>,
+    ) -> Option<ConvertSpec> {
+        let mode = opts
+            .and_then(|o| o.convert_mode.as_deref())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(global.mode.as_str())
+            .trim()
+            .to_string();
+        if mode.is_empty() || mode == "off" {
+            return None;
+        }
+        Some(ConvertSpec {
+            mode,
+            crf: if global.crf == 0 { 23 } else { global.crf },
+            preset: if global.preset.is_empty() { "medium".into() } else { global.preset.clone() },
+            audio_format: if global.audio_format.is_empty() { "mp3".into() } else { global.audio_format.clone() },
+            keep_original: global.keep_original,
+        })
+    }
 }
 
 /// Max automatic re-queues per job for transient failures. One retry
@@ -204,6 +251,8 @@ struct PendingJob {
     retry_spec: Option<RetrySpec>,
     /// Attempt number this command represents (0 = first try).
     retry_count: u8,
+    /// Post-download convert spec for this job (None = no conversion).
+    convert_spec: Option<ConvertSpec>,
 }
 
 /// Manages all active, queued, and recently completed yt-dlp download jobs.
@@ -235,6 +284,9 @@ pub struct Downloader {
     /// yt-dlp defaults. Per-channel options can override. Set at
     /// construction + on settings save.
     pub youtube_player_clients: String,
+    /// Global `[convert]` config. Drives the post-download ffmpeg pass.
+    /// Per-channel options override the mode. Set at construction + save.
+    pub convert_defaults: crate::config::ConvertSection,
     /// Scheduled auto-retries: `(fire_at, spec, attempt_number)`. Populated
     /// when a job fails with a retryable class; drained in [`Self::poll`]
     /// once `fire_at` passes, re-issuing the download. Kept separate from
@@ -253,6 +305,9 @@ pub struct Downloader {
     /// 0 for a user-initiated download; >0 when [`Self::start_retry`] is
     /// re-issuing a failed one. Consumed by `enqueue`.
     retry_attempt_override: u8,
+    /// Stashed by [`Self::start`], consumed by the next `enqueue` so the
+    /// download job carries its convert spec. Like `pending_retry_spec`.
+    pending_convert_spec: Option<ConvertSpec>,
 }
 
 impl Downloader {
@@ -274,10 +329,12 @@ impl Downloader {
             pot_server: None,
             subtitle_defaults: crate::config::SubtitlesSection::default(),
             youtube_player_clients: String::new(),
+            convert_defaults: crate::config::ConvertSection::default(),
             retry_queue: Vec::new(),
             rate_limited_backoff: false,
             pending_retry_spec: None,
             retry_attempt_override: 0,
+            pending_convert_spec: None,
         }
     }
 
@@ -451,21 +508,22 @@ impl Downloader {
                 if running >= self.max_concurrent { break; }
             }
             let p = self.pending.pop_front().unwrap();
-            self.spawn_job(p.cmd, p.url, p.label, p.retry_spec, p.retry_count);
+            self.spawn_job(p.cmd, p.url, p.label, p.retry_spec, p.retry_count, p.convert_spec);
         }
     }
 
     /// Push a command into the pending queue (or start immediately if a slot is free).
     ///
-    /// Consumes `self.pending_retry_spec` (set by [`Self::start`]) so the
-    /// resulting job carries its retry spec, and `retry_attempt_override`
-    /// for the attempt number (0 on a first run, >0 from a retry). Other
-    /// callers (repair, music, updates) leave the spec `None`, making
-    /// those jobs non-retryable.
+    /// Consumes `self.pending_retry_spec` + `self.pending_convert_spec`
+    /// (set by [`Self::start`]) so the resulting job carries them, and
+    /// `retry_attempt_override` for the attempt number (0 on a first run,
+    /// >0 from a retry). Other callers (repair, music, updates) leave the
+    /// specs `None`, making those jobs non-retryable + non-converting.
     fn enqueue(&mut self, cmd: Command, url: String, label: String) {
         let retry_spec = self.pending_retry_spec.take();
         let retry_count = self.retry_attempt_override;
-        self.pending.push_back(PendingJob { cmd, url, label, retry_spec, retry_count });
+        let convert_spec = self.pending_convert_spec.take();
+        self.pending.push_back(PendingJob { cmd, url, label, retry_spec, retry_count, convert_spec });
         self.promote_queued();
     }
 
@@ -655,6 +713,16 @@ impl Downloader {
         // YouTube player-client selection (global default + per-channel
         // override). Lets the user route around a captcha-walled client.
         self.apply_player_client(&mut cmd, channel_options);
+        // Post-download conversion: resolve global [convert] + per-channel
+        // override. When active, ask yt-dlp to print each finished file's
+        // final path (after_move) so we can enqueue an ffmpeg pass on it.
+        let convert_spec = ConvertSpec::resolve(&self.convert_defaults, channel_options);
+        if convert_spec.is_some() {
+            // The CONVERT_PATH: prefix lets spawn_job's stdout reader
+            // recognise these lines without confusing them for progress.
+            cmd.arg("--print").arg("after_move:CONVERT_PATH:%(filepath)s");
+        }
+        self.pending_convert_spec = convert_spec;
         // Per-channel option overrides win when present — they're applied
         // last so a `--limit-rate` / `--match-filter` / passthrough arg from
         // the channel settings takes priority over the global defaults.
@@ -774,7 +842,7 @@ impl Downloader {
     }
 
     /// Spawn `cmd` on a background thread, streaming its output into a new [`Job`].
-    fn spawn_job(&mut self, mut cmd: Command, url: String, label: String, retry_spec: Option<RetrySpec>, retry_count: u8) {
+    fn spawn_job(&mut self, mut cmd: Command, url: String, label: String, retry_spec: Option<RetrySpec>, retry_count: u8, convert_on_finish: Option<ConvertSpec>) {
         // POT provider extractor-arg. yt-dlp lets us pass multiple
         // --extractor-args flags; this one points the bgutil plugin at
         // our local server. Only emitted when the user opted in *and*
@@ -879,6 +947,8 @@ impl Downloader {
             retry_spec,
             retry_count,
             retry_handled: false,
+            convert_on_finish,
+            convert_handled: false,
             rx,
         });
     }
@@ -914,6 +984,8 @@ impl Downloader {
             retry_spec: None,
             retry_count: 0,
             retry_handled: true, // never retry a synthetic preflight failure
+            convert_on_finish: None,
+            convert_handled: true,
             rx,
         });
     }
@@ -927,12 +999,40 @@ impl Downloader {
         }
         self.schedule_auto_retries();
         self.fire_due_retries();
+        self.schedule_conversions();
         // Re-check after draining: finished jobs free slots for queued ones.
         self.promote_queued();
         // Once everything's idle, clear the adaptive backoff so the next
         // fresh batch starts at normal speed.
         if !self.any_running() && self.pending.is_empty() && self.retry_queue.is_empty() {
             self.rate_limited_backoff = false;
+        }
+    }
+
+    /// Scan freshly-Done download jobs that have a convert spec; for each
+    /// `CONVERT_PATH:` line their yt-dlp run printed, enqueue an ffmpeg
+    /// transcode job. Marks the job handled so it only fires once.
+    fn schedule_conversions(&mut self) {
+        let mut to_convert: Vec<(std::path::PathBuf, ConvertSpec)> = Vec::new();
+        for job in &mut self.jobs {
+            if job.convert_handled || job.state != JobState::Done { continue; }
+            let Some(spec) = job.convert_on_finish.clone() else {
+                job.convert_handled = true;
+                continue;
+            };
+            job.convert_handled = true;
+            for line in &job.log {
+                // yt-dlp printed: "CONVERT_PATH:/abs/path/to/file.mkv"
+                if let Some(p) = line.strip_prefix("CONVERT_PATH:") {
+                    let path = std::path::PathBuf::from(p.trim());
+                    if path.is_file() {
+                        to_convert.push((path, spec.clone()));
+                    }
+                }
+            }
+        }
+        for (path, spec) in to_convert {
+            self.start_transcode(&path, &spec);
         }
     }
 
@@ -1009,6 +1109,159 @@ impl Downloader {
             spec.opts.as_ref(),
         );
         self.retry_attempt_override = 0;
+    }
+
+    /// Build + enqueue an ffmpeg transcode of `src` per `spec`. The
+    /// output lands next to the source; the source is renamed to
+    /// `<stem>.original.<ext>` (kept) or deleted, depending on
+    /// `spec.keep_original`. Runs as its own [`Job`] so the UI shows the
+    /// transcode as a distinct phase.
+    fn start_transcode(&mut self, src: &std::path::Path, spec: &ConvertSpec) {
+        let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let parent = src.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+        let src_ext = src.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+
+        // Target extension + ffmpeg codec args per mode.
+        let (out_ext, codec_args): (&str, Vec<String>) = match spec.mode.as_str() {
+            "remux-mp4" => ("mp4", vec![
+                // Stream-copy: no re-encode, just re-container.
+                "-c".into(), "copy".into(),
+                // Some MKV audio (opus in mkv) isn't valid in mp4; let
+                // ffmpeg fall back to aac only if copy fails would need a
+                // second pass — keep it simple: copy video, aac audio.
+                "-c:a".into(), "aac".into(),
+            ]),
+            "audio" => {
+                let af = spec.audio_format.as_str();
+                let mut a = vec!["-vn".into()]; // drop video
+                // Pick a reasonable codec per container.
+                match af {
+                    "mp3"  => { a.extend(["-c:a".into(), "libmp3lame".into(), "-q:a".into(), "2".into()]); }
+                    "m4a" | "aac" => { a.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "192k".into()]); }
+                    "opus" => { a.extend(["-c:a".into(), "libopus".into(), "-b:a".into(), "160k".into()]); }
+                    "flac" => { a.extend(["-c:a".into(), "flac".into()]); }
+                    _      => { a.extend(["-c:a".into(), "libmp3lame".into(), "-q:a".into(), "2".into()]); }
+                }
+                (if af == "aac" { "m4a" } else { af }, a)
+            }
+            // Default "h264-mp4": re-encode to H.264 + AAC at the CRF.
+            _ => ("mp4", vec![
+                "-c:v".into(), "libx264".into(),
+                "-crf".into(), spec.crf.to_string(),
+                "-preset".into(), spec.preset.clone(),
+                "-c:a".into(), "aac".into(),
+                "-b:a".into(), "192k".into(),
+                "-movflags".into(), "+faststart".into(),
+            ]),
+        };
+
+        let out_path = parent.join(format!("{stem}.{out_ext}"));
+        // If the source already has the target extension (e.g. remux-mp4
+        // on an mp4), write to a temp name then swap, so we don't clobber
+        // the input mid-encode.
+        let same_ext = src_ext.eq_ignore_ascii_case(out_ext);
+        let work_out = if same_ext {
+            parent.join(format!("{stem}.converting.{out_ext}"))
+        } else {
+            out_path.clone()
+        };
+
+        // Build the ffmpeg command. -y overwrites a stale partial output.
+        let mut cmd = Command::new("ffmpeg");
+        cmd.arg("-hide_banner").arg("-loglevel").arg("error").arg("-stats")
+            .arg("-y")
+            .arg("-i").arg(src);
+        for a in &codec_args { cmd.arg(a); }
+        cmd.arg(&work_out);
+
+        // Post-ffmpeg bookkeeping runs in the job thread via a wrapper
+        // shell so the rename/delete happens only on ffmpeg success. We
+        // encode it as a small bash script that runs ffmpeg then fixes up
+        // the files.
+        let label = format!("transcode → {out_ext}: {stem}");
+        let url = src.display().to_string();
+        self.enqueue_transcode(cmd, url, label, src.to_path_buf(), out_path, work_out, same_ext, spec.keep_original);
+    }
+
+    /// Enqueue a transcode job. We can't easily run post-ffmpeg file
+    /// bookkeeping (rename original / swap temp) inside the generic
+    /// spawn_job, so transcode jobs get their own lightweight runner
+    /// thread that runs ffmpeg then does the file moves on success.
+    fn enqueue_transcode(
+        &mut self,
+        mut cmd: Command,
+        url: String,
+        label: String,
+        src: PathBuf,
+        out_path: PathBuf,
+        work_out: PathBuf,
+        same_ext: bool,
+        keep_original: bool,
+    ) {
+        let (tx, rx) = channel();
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        thread::spawn(move || {
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Msg::Line(format!("could not launch ffmpeg: {e}")));
+                    let _ = tx.send(Msg::Finished(false));
+                    return;
+                }
+            };
+            if let Some(stderr) = child.stderr.take() {
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        let _ = tx.send(Msg::Line(format!("[ffmpeg] {line}")));
+                    }
+                });
+            }
+            let ok = matches!(child.wait(), Ok(s) if s.success());
+            if ok {
+                // File bookkeeping on success.
+                if same_ext {
+                    // src and out share an extension. Keep or drop the
+                    // original, then move the temp output into place.
+                    if keep_original {
+                        let orig = src.with_extension(format!("original.{}",
+                            src.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()));
+                        let _ = std::fs::rename(&src, &orig);
+                    } else {
+                        let _ = std::fs::remove_file(&src);
+                    }
+                    let _ = std::fs::rename(&work_out, &out_path);
+                } else {
+                    // Different extensions: output already at out_path.
+                    if keep_original {
+                        let orig = src.with_extension(format!("original.{}",
+                            src.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()));
+                        let _ = std::fs::rename(&src, &orig);
+                    } else {
+                        let _ = std::fs::remove_file(&src);
+                    }
+                }
+                let _ = tx.send(Msg::Line(format!("✓ wrote {}", out_path.display())));
+            } else {
+                // Clean up a partial temp output on failure.
+                if same_ext { let _ = std::fs::remove_file(&work_out); }
+            }
+            let _ = tx.send(Msg::Finished(ok));
+        });
+        self.jobs.push(Job {
+            url,
+            label,
+            state: JobState::Running,
+            progress: 0.0,
+            log: VecDeque::new(),
+            failure_class: None,
+            retry_spec: None,        // don't auto-retry transcodes
+            retry_count: 0,
+            retry_handled: true,
+            convert_on_finish: None, // a transcode doesn't itself convert
+            convert_handled: true,
+            rx,
+        });
     }
 
     pub fn any_running(&self) -> bool {
@@ -1192,6 +1445,42 @@ mod tests {
         let args2: Vec<String> = cmd2.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args2.windows(2).any(|w| w == ["--sleep-requests", "3"]));
         assert!(args2.windows(2).any(|w| w == ["--max-sleep-interval", "20"]));
+    }
+
+    // ── Convert resolver ─────────────────────────────────────────────────
+    use crate::config::ConvertSection;
+    use crate::download_options::DownloadOptions as DO;
+
+    #[test]
+    fn convert_off_when_global_empty_and_no_override() {
+        let g = ConvertSection::default(); // mode = ""
+        assert!(ConvertSpec::resolve(&g, None).is_none());
+    }
+
+    #[test]
+    fn convert_global_h264_defaults_filled() {
+        let g = ConvertSection { mode: "h264-mp4".into(), crf: 0, preset: String::new(),
+            audio_format: String::new(), keep_original: false };
+        let s = ConvertSpec::resolve(&g, None).unwrap();
+        assert_eq!(s.mode, "h264-mp4");
+        assert_eq!(s.crf, 23);           // 0 → default 23
+        assert_eq!(s.preset, "medium");  // empty → default
+    }
+
+    #[test]
+    fn convert_per_channel_off_overrides_global_on() {
+        let g = ConvertSection { mode: "h264-mp4".into(), ..Default::default() };
+        let opts = DO { convert_mode: Some("off".into()), ..Default::default() };
+        assert!(ConvertSpec::resolve(&g, Some(&opts)).is_none());
+    }
+
+    #[test]
+    fn convert_per_channel_mode_wins() {
+        let g = ConvertSection { mode: "h264-mp4".into(), ..Default::default() };
+        let opts = DO { convert_mode: Some("audio".into()), ..Default::default() };
+        let s = ConvertSpec::resolve(&g, Some(&opts)).unwrap();
+        assert_eq!(s.mode, "audio");
+        assert_eq!(s.audio_format, "mp3"); // empty global → default mp3
     }
 
     // ── Subtitle resolver ────────────────────────────────────────────────
