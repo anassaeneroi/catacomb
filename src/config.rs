@@ -161,13 +161,22 @@ pub struct UiSection {
     /// hidden window.
     #[serde(default)]
     pub minimize_to_tray: bool,
+    /// Global egui zoom factor — scales the *entire* desktop UI (fonts,
+    /// spacing, widgets), not just the card grid. 1.0 = native. Persisted
+    /// here so the chosen size survives restarts and is kept in sync with
+    /// the built-in Ctrl + / Ctrl - / Ctrl 0 keyboard zoom.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
 }
+
+fn default_ui_scale() -> f32 { 1.0 }
 
 impl Default for UiSection {
     fn default() -> Self {
         Self {
             theme: default_theme(),
             minimize_to_tray: false,
+            ui_scale: default_ui_scale(),
         }
     }
 }

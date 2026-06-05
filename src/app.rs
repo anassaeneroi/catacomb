@@ -138,6 +138,10 @@ pub struct App {
     plex_status: String,
     db: Database,
     card_density: f32,
+    /// When set, the global UI zoom changed and config should be saved at
+    /// this instant (debounced so a slider drag / key-repeat doesn't write
+    /// config.toml every frame). Synced from `ctx.zoom_factor()` in update().
+    scale_save_at: Option<Instant>,
     sort_mode: SortMode,
     watched: HashSet<String>,
     /// Per-video flag sets (bookmark/favourite/waiting/archive). Loaded from
@@ -283,6 +287,10 @@ impl App {
         };
 
         theme::apply(&cc.egui_ctx, &config.ui.theme);
+        // Restore the persisted global UI zoom. egui's built-in Ctrl +/-/0
+        // also drives zoom_factor; update() keeps config.ui.ui_scale synced
+        // and persists changes so the size survives restarts.
+        cc.egui_ctx.set_zoom_factor(config.ui.ui_scale.clamp(0.5, 3.0));
 
         let channels_root = config.backup.directory.clone();
         let settings_dir = channels_root.display().to_string();
@@ -433,6 +441,7 @@ impl App {
             plex_status: String::new(),
             db,
             card_density: 1.0,
+            scale_save_at: None,
             sort_mode: SortMode::Title,
             watched,
             flags,
@@ -2450,6 +2459,29 @@ impl App {
                             });
                         ui.end_row();
 
+                        ui.label("UI scale:");
+                        ui.horizontal(|ui| {
+                            // Drive zoom_factor directly; update() mirrors it
+                            // back into config.ui.ui_scale and persists it.
+                            let mut scale = ctx.zoom_factor();
+                            let resp = ui.add(
+                                egui::Slider::new(&mut scale, 0.5_f32..=3.0_f32)
+                                    .step_by(0.1)
+                                    .suffix("×"),
+                            );
+                            if resp.changed() {
+                                ctx.set_zoom_factor(scale);
+                            }
+                            if ui.button("Reset").on_hover_text("Back to 1.0× (Ctrl+0)").clicked() {
+                                ctx.set_zoom_factor(1.0);
+                            }
+                            ui.label(
+                                egui::RichText::new("scales the whole UI · also Ctrl + / Ctrl - / Ctrl 0")
+                                    .small().weak(),
+                            );
+                        });
+                        ui.end_row();
+
                         ui.label("Minimize to tray:");
                         ui.checkbox(&mut self.config.ui.minimize_to_tray, "hide window on close instead of quitting")
                             .on_hover_text("Requires a working StatusNotifier host (KDE native, GNOME with AppIndicator extension). Ctrl+Q always quits.");
@@ -3581,6 +3613,26 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── Global UI zoom sync + persistence ───────────────────────────
+        // egui's built-in Ctrl +/-/0 (and our Settings slider) mutate
+        // ctx.zoom_factor() directly. Mirror it into config and persist on
+        // a short debounce so the chosen scale survives restarts without
+        // writing config.toml on every frame of a slider drag / key repeat.
+        let zoom = ctx.zoom_factor();
+        if (zoom - self.config.ui.ui_scale).abs() > f32::EPSILON {
+            self.config.ui.ui_scale = zoom;
+            self.scale_save_at =
+                Some(Instant::now() + std::time::Duration::from_millis(500));
+            // Ensure the debounce fires even if the UI would otherwise idle.
+            ctx.request_repaint_after(std::time::Duration::from_millis(550));
+        }
+        if let Some(at) = self.scale_save_at {
+            if Instant::now() >= at {
+                let _ = self.config.save(&self.config_path);
+                self.scale_save_at = None;
+            }
+        }
+
         // ── System-tray event drain ─────────────────────────────────────
         // Tray menu activations arrive on a background-thread channel.
         // Drain them all each frame and translate into viewport commands.
