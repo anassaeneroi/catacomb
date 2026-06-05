@@ -571,19 +571,75 @@ function renderFilters(){
     return `<div class="filter-grp"><span class="filter-grp-label">${label}</span>${chips}</div>`;
   };
   const toggle=(label,key,title)=>`<button class="chip-toggle${filter[key]?' active':''}" title="${esc(title)}" onclick="toggleFilter('${key}')">${label}</button>`;
-  const anyActive=filter.watch!=='all'||filter.date!=='all'||filter.size!=='all'||filter.hasSubs||filter.hasChapters;
+  const anyActive=!filtersAreDefault(filter);
   const clear=anyActive?`<button class="chip-clear" onclick="clearFilters()">✕ Clear filters</button>`:'';
+  const save=anyActive?`<button class="chip-clear" onclick="saveCurrentFilterPreset()" title="Save these filters as a named preset">★ Save preset</button>`:'';
+  // Saved presets: click name to apply, ✕ to delete. Active preset (one
+  // whose filters match the current set) is highlighted.
+  const presets=filterPresets.length
+    ? `<div class="filter-grp"><span class="filter-grp-label">★ Presets</span>`
+      + filterPresets.map((p,i)=>
+          `<button class="chip${presetMatchesCurrent(p)?' active':''}" onclick="applyFilterPreset(${i})" title="Apply preset">`
+          + `${esc(p.name)}<span onclick="event.stopPropagation();deleteFilterPreset(${i})" style="margin-left:6px;opacity:.55;font-size:10px" title="Delete preset">✕</span>`
+          + `</button>`).join('')
+      + `</div>`
+    : '';
   el.innerHTML=
     grp('Watch','watch',[['all','All'],['unwatched','Unwatched'],['in-progress','In progress'],['watched','Watched']])+
     grp('Date','date',[['all','All'],['today','Today'],['week','Week'],['month','Month'],['year','Year'],['older','Older']])+
     grp('Size','size',[['all','All'],['small','< 100 MB'],['med','100 MB – 1 GB'],['large','> 1 GB']])+
     toggle('💬 Subs','hasSubs','Only videos with subtitle tracks')+
     toggle('🔖 Chapters','hasChapters','Only videos with chapter markers')+
-    clear;
+    presets+save+clear;
 }
 function setFilter(key,val){filter[key]=val;saveUiState();renderFilters();renderGrid()}
 function toggleFilter(key){filter[key]=!filter[key];saveUiState();renderFilters();renderGrid()}
-function clearFilters(){filter={watch:'all',date:'all',size:'all',hasSubs:false,hasChapters:false};saveUiState();renderFilters();renderGrid()}
+const DEFAULT_FILTER={watch:'all',date:'all',size:'all',hasSubs:false,hasChapters:false};
+function clearFilters(){filter={...DEFAULT_FILTER};saveUiState();renderFilters();renderGrid()}
+
+/* ── Named filter presets ───────────────────────────────────────── */
+// Saved chip-filter sets, persisted under their own localStorage key so
+// they outlive a clearFilters() and aren't tangled with view state.
+let filterPresets=[];
+function loadFilterPresets(){
+  try{filterPresets=JSON.parse(localStorage.getItem('filter-presets')||'[]')}catch{filterPresets=[]}
+  if(!Array.isArray(filterPresets))filterPresets=[];
+}
+function persistFilterPresets(){
+  try{localStorage.setItem('filter-presets',JSON.stringify(filterPresets))}catch{}
+}
+function filtersAreDefault(f){
+  return f.watch==='all'&&f.date==='all'&&f.size==='all'&&!f.hasSubs&&!f.hasChapters;
+}
+function presetMatchesCurrent(p){
+  const f=p.filter||{};
+  return f.watch===filter.watch&&f.date===filter.date&&f.size===filter.size
+    &&!!f.hasSubs===!!filter.hasSubs&&!!f.hasChapters===!!filter.hasChapters;
+}
+function saveCurrentFilterPreset(){
+  if(filtersAreDefault(filter)){setStatus('No active filters to save');return}
+  const name=(prompt('Name this filter preset:')||'').trim();
+  if(!name)return;
+  // Overwrite a same-named preset rather than duplicating.
+  filterPresets=filterPresets.filter(p=>p.name!==name);
+  filterPresets.push({name,filter:{...filter}});
+  persistFilterPresets();
+  renderFilters();
+  setStatus('Saved preset “'+name+'”');
+}
+// Index-based so preset names with quotes/apostrophes can't break the
+// inline onclick handlers; the array is re-rendered after every change so
+// indices always match what's on screen.
+function applyFilterPreset(i){
+  const p=filterPresets[i]; if(!p)return;
+  filter={...DEFAULT_FILTER,...p.filter};
+  saveUiState();renderFilters();renderGrid();
+}
+function deleteFilterPreset(i){
+  filterPresets.splice(i,1);
+  persistFilterPresets();
+  renderFilters();
+}
 function renderGrid(){
   renderFilters();
   if(showChannels){renderChannelGrid();return}
@@ -2202,6 +2258,7 @@ applyTheme(localStorage.getItem('theme')||'dark');
 // immediately. View selectors need the library array to be populated
 // before we can resolve `channel:<name>` back to an index — do that
 // after loadLibrary() resolves.
+loadFilterPresets();
 (async()=>{
   await Promise.all([loadLibrary(), loadNotes()]);
   restoreUiState();
