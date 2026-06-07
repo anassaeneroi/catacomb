@@ -5,17 +5,17 @@
 **Surpass [Tartube](https://github.com/axcore/tartube) in every dimension.**
 
 A structured analysis of Tartube's codebase, data model, operations, and
-configuration surface lives at [`docs/tartube-spec.md`](docs/tartube-spec.md).
-It enumerates the exact features we need to match — every Phase 1 item
-below traces back to a specific Tartube subsystem.
+configuration surface lives at [`docs/tartube-spec.md`](docs/tartube-spec.md);
+it's what the Phase 1 parity work traced back to.
 
 Tartube is the mature open-source yt-dlp GUI and the obvious benchmark for a
 project in this space. yt-offline has architectural advantages Tartube can't
 catch up on quickly (Rust + axum + a real web UI + bundled toolchain + a
-modern security model) but trails on feature breadth and years-of-edge-cases
-maturity. The plan below closes those gaps first, then pushes past.
+modern security model). **As of 2026-06 we're at feature parity** — every
+Tartube subsystem is matched or led; the remaining gap is years-of-edge-
+cases maturity. The plan below is now mostly "surpass" work.
 
-## Current state vs Tartube (2026-06-01)
+## Current state vs Tartube (2026-06-07)
 
 | Area | Us | Tartube | Verdict |
 | --- | --- | --- | --- |
@@ -37,47 +37,45 @@ maturity. The plan below closes those gaps first, then pushes past.
 | Per-channel custom download options | ✅ JSON-blob overrides | ✅ deep | Tied |
 | Subtitle controls (auto / embed / convert) | ✅ global + per-channel | ✅ | Tied |
 | Folder/group hierarchy | ✅ N-level nesting | ✅ N-level | Tied |
-| Filter UI (date / size / watched) | ✅ chip-style | ✅ rich + presets | Tartube leads (presets only) |
+| Filter UI (date / size / watched + presets) | ✅ chip-style + named presets | ✅ rich + presets | Tied |
+| Format conversion / re-encode | ✅ remux / H.264 / audio post-pass | ✅ ffmpeg pipeline | Tied |
 | Comments capture | ✅ `--write-comments` + viewer | ✅ raw JSON | We lead |
 | System tray | ✅ ksni (Linux SNI) | ✅ GTK | Tied |
 | Library backup + restore | ✅ DB snapshot + idempotent import | ✅ | Tied |
 | Per-channel notes / annotations | ✅ searchable | ✅ | Tied |
 | Error classification + suggested fixes | ✅ 9-class + hints | ✅ rescue recipes | Tied |
-| Crash log + disk-full preflight | ✅ | partial | We lead |
-| Format conversion / re-encode | ❌ remux only | ✅ ffmpeg pipeline | **Tartube leads** |
+| Stability hardening | ✅ crash log + disk-full preflight + hang watchdog + poison-recover locks | partial | We lead |
+| Desktop UI scale | ✅ global egui zoom, persisted | ✅ GTK native | Tied |
 | Maturity / edge cases | ~months | ~years | **Tartube leads** |
 
-Score: 16 ahead, 2 behind, 11 tied. The big remaining gap is **format
-conversion (1.7)**; everything else is polish or stretch.
+Score: 14 ahead, 1 behind, 13 tied. **Phase 1 (Tartube parity) is
+complete** — the only thing Tartube still leads on is years-of-edge-cases
+maturity, which is time, not a feature. Everything below is "surpass"
+territory plus test/doc investment.
 
-## Phase 1 — Remaining Tartube parity items
+## Phase 1 — COMPLETE
 
-### 1.7 Format conversion pipeline — the one real parity gap left
+All Tartube parity items shipped. For the record, the last to land:
 
-Post-download re-encode option: H.264/AAC mp4 at a configurable CRF, or
-audio extraction at a target bitrate. Useful for shrinking large 4K files.
+- **1.7 Format conversion** — post-download ffmpeg pass with three modes
+  (remux→mp4, re-encode→H.264/AAC at a CRF, audio extraction), global
+  `[convert]` config + per-channel override, keep-original toggle,
+  surfaced as a distinct transcode job.
+- **1.3+ Filter presets** — name a chip-filter set and re-apply it from
+  the filter row; persisted in localStorage.
 
-- New `post_process` config field per quality preset.
-- ffmpeg job runs after the download completes, replaces the source file
-  (or keeps both with an `.original.mkv` suffix).
-- Visible in the job log as a separate "transcoding" phase.
-
-### 1.3+ Filter presets (extension of completed 1.3)
-
-The chip filters ship, but Tartube also lets you *name* a filter set and
-restore it later. Small UI layer on top of what's already implemented.
-
-- "Save current filters as…" button next to the clear-filters link.
-- Presets stored in localStorage (web) / SQLite (desktop).
-- Dropdown chip to apply a saved preset.
+See **Recently shipped** for the full list.
 
 ## Phase 2 — Polish where Tartube is mature
 
 Things we win on architecturally but lose on real-world ruggedness.
 
+The two genuinely-open items are **2.1 integration tests** and **2.2 docs
+site** — both investment rather than features. 2.3 / 2.4 / 2.5 are done.
+
 ### 2.1 Integration test coverage
 
-91 unit tests are good for parsers/helpers/resolvers, but don't cover
+98 unit tests are good for parsers/helpers/resolvers, but don't cover
 end-to-end correctness. We need real-yt-dlp integration tests against a
 recorded fixture corpus.
 
@@ -108,14 +106,13 @@ surface new patterns.
 `POST /api/restore/db` + file pickers in both UIs do an idempotent merge
 (watched / positions / flags / folders / notes), schema-validated.
 
-### 2.5 Stability hardening — mostly DONE
+### 2.5 Stability hardening — DONE
 
-Done: crash.log panic hook, disk-full preflight (synthetic DiskFull job),
-auto-retry + adaptive throttle on transient failures. Remaining:
-
-- Replace remaining `.lock().unwrap()` with poisoning-aware accessors.
-- Hang watchdog: if a yt-dlp job stalls past `--socket-timeout * retries`,
-  kill and re-queue.
+crash.log panic hook · disk-full preflight (synthetic DiskFull job) ·
+auto-retry + adaptive throttle on transient failures · hang watchdog
+(SIGKILL a job silent for 5 min, classified retryable so it re-queues) ·
+`util::LockExt::lock_recover()` recovers poisoned `WebState` mutexes
+instead of cascading one handler's panic into a dead server.
 
 ## Phase 3 — Surpass
 
@@ -123,7 +120,11 @@ Once we're at parity, we push past Tartube on its own ground.
 
 ### 3.1 Cross-compile macOS + Windows binaries
 
-The current "later" roadmap item, blocked behind 1.8.
+The Linux packaging (1.8) is done; this is the natural next reach. Blocked
+on abstracting the Linux-only bits behind a per-OS backend — the `ksni`
+tray and the `rfd` xdg-portal file dialog have no Windows/macOS path yet.
+Once the tray is a trait with per-OS impls, the rest of the stack
+(eframe/wgpu, axum, rusqlite-bundled) already cross-compiles.
 
 ### 3.2 Android client
 
@@ -155,9 +156,14 @@ The comments capture (1.4) already ships a viewer. Surpass Tartube
 
 ### 3.7 Library-wide deduplication
 
-Right now `maintenance` finds duplicates by yt-dlp video ID. Surpass by
-fingerprinting media bytes (`ffmpeg`-derived perceptual hashes) so the
-same video re-uploaded under a different ID gets flagged.
+Right now `maintenance` finds duplicates only by yt-dlp video ID — it
+catches "you downloaded this exact video twice," but not the same content
+re-uploaded under a *different* ID (a reupload, a cross-platform mirror, a
+re-encode). Surpass by perceptual-hashing sampled frames (ffmpeg → dHash)
+and grouping videos whose fingerprints match within a Hamming threshold,
+even across IDs/resolutions/encodings. A new `video_fingerprint` cache
+table (keyed by path+mtime like `info_cache`) makes it a one-time cost per
+video; bucket by duration first to keep the comparison sub-quadratic.
 
 ### 3.8 Plugin / scripting hook
 
@@ -179,6 +185,15 @@ Probably never, or much later.
 
 Roughly reverse-chronological. Items that closed out a roadmap line.
 
+- **Hang watchdog + poison-recover locks** (2.5) — SIGKILL a yt-dlp/ffmpeg
+  job silent for 5 min (classified retryable so it re-queues); recover
+  poisoned `WebState` mutexes instead of cascading a panic into a dead
+  server.
+- **Filter presets** (1.3+) — save/apply/delete named chip-filter sets.
+- **Desktop UI scale** — global egui zoom (whole UI, not just cards),
+  Settings slider + Ctrl +/-/0, persisted.
+- **Format conversion** (1.7) — post-download ffmpeg remux / H.264 /
+  audio pass, global + per-channel, keep-original toggle.
 - **Anti-bot stack** — POT token provider (bgutil-pot, version-matched
   plugin), nightly yt-dlp for working curl_cffi impersonation, dropped
   the captcha-prone forced `player_client=web`, auto-retry + adaptive
@@ -222,11 +237,12 @@ Roughly reverse-chronological. Items that closed out a roadmap line.
 
 ## How to read this
 
-- **Phase 1** is the remaining parity work — four bounded items.
-- **Phase 2** is concurrent polish — pick up between Phase 1 items.
-- **Phase 3** is the year-1 ambition once we're at parity.
+- **Phase 1** (Tartube parity) is **complete** — kept above for the record.
+- **Phase 2** is down to test coverage (2.1) and a docs site (2.2).
+- **Phase 3** is the "surpass" work now that we're at parity.
 - **Phase 4** items might be valuable, but commit to nothing.
 
 Items inside a phase are loosely ordered by user-visible impact, not strict
-prerequisite. **1.8 (per-distro packaging)** is the biggest multiplier
-for new users; **1.5 (notes)** is the biggest workflow gap.
+prerequisite. With parity reached, the highest-leverage next moves are
+**3.1 (Windows/macOS binaries)** for reach and **3.7 (perceptual-hash
+dedup)** / **3.6 (comment-viewer)** for features Tartube can't match.
