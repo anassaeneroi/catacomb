@@ -196,6 +196,7 @@
     <option value="size-desc">Largest</option>
   </select>
   <span id="hdr-stats"></span>
+  <button onclick="openSearch()" title="Search titles + descriptions (f)">🔍</button>
   <button onclick="shufflePlay()" title="Play a random unwatched video">🎲</button>
   <button onclick="rescan()" title="Rescan library">⟳</button>
   <button id="dl-btn" onclick="openDownloads()" title="Downloads">⬇<span id="dl-badge">0</span></button>
@@ -1420,6 +1421,54 @@ function renderComments(){
   }
 }
 
+/* ── Full-text library search ───────────────────────────────────── */
+let ftsSeq=0;
+function openSearch(){
+  if(document.getElementById('fts-modal'))return;
+  const bg=document.createElement('div');bg.className='modal-bg';bg.id='fts-modal';
+  bg.onclick=e=>{if(e.target===bg)bg.remove()};
+  bg.innerHTML=`<div class="modal" style="max-width:720px;width:100%">
+    <div class="modal-hdr"><h2>🔍 Search library</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <input id="fts-input" type="search" placeholder="Search titles, channels, descriptions…" autocomplete="off"
+      style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:14px">
+    <div id="fts-status" style="font-size:11px;color:var(--muted);padding:6px 2px"></div>
+    <div id="fts-results" style="overflow-y:auto;max-height:64vh"></div>
+  </div>`;
+  document.body.appendChild(bg);
+  const input=document.getElementById('fts-input');
+  input.focus();
+  let timer=null;
+  input.oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>runFtsSearch(input.value.trim()),180)};
+}
+async function runFtsSearch(q){
+  const my=++ftsSeq;
+  const status=document.getElementById('fts-status');
+  const box=document.getElementById('fts-results');
+  if(!box)return;
+  if(!q){box.innerHTML='';if(status)status.textContent='';return}
+  if(status)status.textContent='Searching…';
+  try{
+    const r=await(await api('/api/search?limit=100&q='+encodeURIComponent(q))).json();
+    if(my!==ftsSeq)return; // a newer keystroke superseded this response
+    const res=r.results||[];
+    if(!res.length){box.innerHTML='<div style="color:var(--muted);padding:12px">No matches.</div>';if(status)status.textContent='0 results';return}
+    box.innerHTML=res.map(h=>`<div onclick="ftsOpen('${esc(h.video_id)}')" style="padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer">
+        <div style="font-size:13px">${esc(h.title)}</div>
+        <div style="font-size:11px;color:var(--muted)">${esc(h.channel)} · ${esc(h.platform)}</div>
+        ${h.snippet?`<div style="font-size:12px;color:var(--muted);margin-top:2px">${ftsSnippet(h.snippet)}</div>`:''}
+      </div>`).join('');
+    if(status)status.textContent=res.length+' result'+(res.length===1?'':'s');
+  }catch(e){box.innerHTML=`<div style="color:#f87171;padding:12px">Search failed: ${esc(e.message)}</div>`}
+}
+// FTS5 wraps matched terms in STX/ETX control chars; escape first, then mark.
+function ftsSnippet(s){return esc(s).replace(/\x02/g,'<mark>').replace(/\x03/g,'</mark>')}
+function ftsOpen(id){
+  document.getElementById('fts-modal')?.remove();
+  if(!findVideo(id)){setStatus('Video not in the loaded library — try Rescan');return}
+  selectVideo(id);
+  document.getElementById('details')?.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
 /* ── Select / Details ───────────────────────────────────────────── */
 function selectVideo(id){selectedId=selectedId===id?null:id;renderGrid();renderDetails()}
 function closeDetails(){selectedId=null;renderGrid();renderDetails()}
@@ -2253,6 +2302,10 @@ document.addEventListener('keydown',(e)=>{
       document.getElementById('search')?.focus();
       e.preventDefault();
       break;
+    case 'f':
+      openSearch();
+      e.preventDefault();
+      break;
     case 'r':
       rescan();
       e.preventDefault();
@@ -2275,7 +2328,8 @@ function showShortcutsHelp(){
   bg.innerHTML=`<div class="modal" style="max-width:380px">
     <div class="modal-hdr"><h2>Keyboard shortcuts</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
     <table><tbody>
-      ${row('/','Focus search')}
+      ${row('/','Focus filter box')}
+      ${row('f','Search titles + descriptions')}
       ${row('r','Rescan library')}
       ${row('d','Open downloads')}
       ${row('Esc','Close modal / cancel')}

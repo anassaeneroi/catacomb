@@ -318,3 +318,36 @@ fn backup_db_returns_sqlite() {
     assert_eq!(code, 200);
     assert!(body.starts_with("SQLite format 3"), "backup is a SQLite file");
 }
+
+#[test]
+fn full_text_search_indexes_titles_and_descriptions() {
+    if !have_curl() { eprintln!("skip: no curl"); return; }
+    let s = Server::start();
+
+    // Seed a real video on disk: <dir>/ch/channels/TestChan/<Title> [id].mkv
+    // plus a .description sidecar (the description word isn't in the title).
+    let chan = s.dir.join("ch/channels/TestChan");
+    std::fs::create_dir_all(&chan).unwrap();
+    std::fs::write(chan.join("Cooking Sourdough [vid123].mkv"), b"").unwrap();
+    std::fs::write(chan.join("Cooking Sourdough [vid123].description"),
+                   b"an artisan bread tutorial").unwrap();
+
+    // Rescan so the server picks up the new file and reindexes it.
+    let (code, _) = s.post("/api/rescan", "");
+    assert_eq!(code, 200);
+
+    // Title term hits.
+    let (code, body) = s.get("/api/search?q=sourdough");
+    assert_eq!(code, 200, "{body}");
+    assert!(body.contains("vid123"), "title search should hit: {body}");
+
+    // Prefix / type-ahead hits.
+    assert!(s.get("/api/search?q=sourd").1.contains("vid123"), "prefix search should hit");
+
+    // A word only in the description hits (proves the sidecar got indexed).
+    assert!(s.get("/api/search?q=artisan").1.contains("vid123"), "description search should hit");
+
+    // An unrelated query does not.
+    assert!(!s.get("/api/search?q=quantumchromodynamics").1.contains("vid123"),
+            "unrelated query must not hit");
+}

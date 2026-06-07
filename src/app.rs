@@ -158,6 +158,11 @@ pub struct App {
     // Bulk selection
     bulk_mode: bool,
     bulk_selected: HashSet<String>,
+    // Full-text search (floating results window)
+    search_query: String,
+    search_results: Vec<crate::database::SearchHit>,
+    show_search: bool,
+    search_focus: bool,
     // Scheduler
     last_scheduled_check: Option<Instant>,
     // Cards cache — recomputed only when inputs change
@@ -349,6 +354,9 @@ impl App {
         if let Ok(folder_map) = db.get_all_channel_assignments() {
             library::apply_channel_folders(&mut library, &folder_map);
         }
+        if let Err(e) = db.sync_search_index(&library::build_search_entries(&library)) {
+            eprintln!("search index sync failed: {e}");
+        }
         let folders = db.list_folders().unwrap_or_default();
         let watched = db.get_watched().unwrap_or_default();
         let flags = db.get_video_flags().unwrap_or_default();
@@ -475,6 +483,10 @@ impl App {
             mpv_rx: None,
             bulk_mode: false,
             bulk_selected: HashSet::new(),
+            search_query: String::new(),
+            search_results: Vec::new(),
+            show_search: false,
+            search_focus: false,
             last_scheduled_check: None,
             cards_cache: Vec::new(),
             cards_cache_key: None,
@@ -587,6 +599,9 @@ impl App {
         }
         if let Ok(folder_map) = self.db.get_all_channel_assignments() {
             library::apply_channel_folders(&mut new_lib, &folder_map);
+        }
+        if let Err(e) = self.db.sync_search_index(&library::build_search_entries(&new_lib)) {
+            eprintln!("search index sync failed: {e}");
         }
         self.folders = self.db.list_folders().unwrap_or_default();
         self.library = new_lib;
@@ -847,6 +862,78 @@ impl App {
         }
     }
 
+    /// Find a video by id anywhere in the library and play it. Used by the
+    /// full-text search results, where we only have the id.
+    fn play_by_id(&mut self, id: &str) {
+        let path = self.library.iter()
+            .flat_map(|c| c.videos.iter().chain(c.playlists.iter().flat_map(|p| p.videos.iter())))
+            .find(|v| v.id == id)
+            .and_then(|v| v.video_path.clone());
+        match path {
+            Some(p) => { self.selected_video = Some(id.to_string()); self.play_with_tracking(&p, id.to_string()); }
+            None => self.status = format!("'{id}' has no playable file on disk"),
+        }
+    }
+
+    /// Floating full-text search window. Mirrors the web UI's 🔍 search —
+    /// queries the same FTS index (`db.search_videos`) and plays a result on
+    /// click. Distinct from the top-bar `self.search` filter, which only
+    /// narrows the already-loaded grid by title/id.
+    fn search_window(&mut self, ctx: &egui::Context) {
+        if !self.show_search { return; }
+        let mut open = true;
+        let mut to_play: Option<String> = None;
+        egui::Window::new("🔎 Search library")
+            .open(&mut open)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.search_query)
+                        .hint_text("titles, channels, descriptions…")
+                        .desired_width(f32::INFINITY),
+                );
+                if std::mem::take(&mut self.search_focus) {
+                    resp.request_focus();
+                }
+                if resp.changed() {
+                    let q = self.search_query.trim();
+                    self.search_results =
+                        self.db.search_videos(q, 100).unwrap_or_default();
+                }
+                ui.separator();
+                if self.search_query.trim().is_empty() {
+                    ui.weak("Type to search every title, channel, and description in the library.");
+                } else if self.search_results.is_empty() {
+                    ui.weak("No matches.");
+                } else {
+                    ui.weak(format!("{} result(s)", self.search_results.len()));
+                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        for hit in &self.search_results {
+                            ui.add_space(4.0);
+                            let title = ui.add(
+                                egui::Label::new(egui::RichText::new(&hit.title).strong())
+                                    .sense(egui::Sense::click()),
+                            );
+                            if title.clicked() { to_play = Some(hit.video_id.clone()); }
+                            if title.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            ui.weak(format!("{} · {}", hit.channel, hit.platform));
+                            if !hit.snippet.is_empty() {
+                                // Strip the STX/ETX match markers egui can't style.
+                                let clean: String = hit.snippet
+                                    .chars().filter(|c| *c != '\u{2}' && *c != '\u{3}').collect();
+                                ui.label(egui::RichText::new(clean).small().weak());
+                            }
+                            ui.separator();
+                        }
+                    });
+                }
+            });
+        if !open { self.show_search = false; }
+        if let Some(id) = to_play { self.play_by_id(&id); }
+    }
+
     fn play_with_tracking(&mut self, path: &Path, video_id: String) {
         let cmd = self.config.player.command.clone();
         // Only enable IPC for genuine mpv invocations — substring matching
@@ -1092,6 +1179,13 @@ impl App {
                         .step_by(0.1),
                 );
                 ui.separator();
+                if ui.button("🔎 Search")
+                    .on_hover_text("Full-text search titles + descriptions across the whole library")
+                    .clicked()
+                {
+                    self.show_search = true;
+                    self.search_focus = true;
+                }
                 if ui.button("⟳ Rescan").clicked() {
                     self.rescan();
                 }
@@ -3846,6 +3940,7 @@ impl eframe::App for App {
         self.channel_options_window(ctx);
         self.folder_manager_window(ctx);
         self.move_to_folder_window(ctx);
+        self.search_window(ctx);
 
         match self.current_screen {
             Screen::Library => {

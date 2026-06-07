@@ -34,6 +34,46 @@ pub struct FolderRecord {
     pub parent_id: Option<i64>,
 }
 
+/// One video's searchable fields, fed to [`Database::sync_search_index`].
+/// `description_path` is read lazily — only when the video is new or its
+/// `mtime_unix` changed since the last index — so a routine rescan doesn't
+/// re-read every description sidecar.
+#[derive(Clone, Debug)]
+pub struct SearchEntry {
+    pub video_id: String,
+    pub mtime_unix: i64,
+    pub platform: String,
+    pub channel: String,
+    pub title: String,
+    pub description_path: Option<std::path::PathBuf>,
+}
+
+/// A full-text search result row from [`Database::search_videos`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchHit {
+    pub video_id: String,
+    pub platform: String,
+    pub channel: String,
+    pub title: String,
+    /// Description excerpt with the matched terms wrapped in `[`…`]`.
+    pub snippet: String,
+}
+
+/// Build a safe FTS5 MATCH expression from free-form user input: each
+/// whitespace token becomes a quoted prefix term, AND-ed together. Quoting
+/// neutralizes FTS5 operators in the input; the trailing `*` gives
+/// type-ahead prefix matching. Returns "" when nothing is searchable.
+fn fts_match_expr(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|t| t.replace('"', " "))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\"*"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// In-memory representation of the `video_flags` table. Each set holds the
 /// video IDs that have the named flag enabled — kept small (a few hundred
 /// to a few thousand entries in practice).
@@ -185,6 +225,24 @@ impl Database {
                 body        TEXT NOT NULL,
                 updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (target_kind, target_id)
+            );
+            -- Full-text search over the library. `video_search` is a standalone
+            -- FTS5 index (available in rusqlite's bundled SQLite); `search_meta`
+            -- tracks each indexed video's mtime so [`Database::sync_search_index`]
+            -- only re-reads a description sidecar when the video actually
+            -- changed. video_id/platform are UNINDEXED — stored for retrieval,
+            -- not matched.
+            CREATE VIRTUAL TABLE IF NOT EXISTS video_search USING fts5(
+                video_id UNINDEXED,
+                platform UNINDEXED,
+                channel,
+                title,
+                description,
+                tokenize = 'porter unicode61'
+            );
+            CREATE TABLE IF NOT EXISTS search_meta (
+                video_id   TEXT PRIMARY KEY,
+                mtime_unix INTEGER NOT NULL
             );",
         )?;
 
@@ -887,6 +945,94 @@ impl Database {
         let _ = conn.execute("DETACH DATABASE bk", []);
         result
     }
+
+    /// Refresh the full-text search index against the current library.
+    ///
+    /// `entries` is the full set of videos currently on disk. A video whose
+    /// `mtime_unix` already matches the index is skipped; new/changed videos
+    /// get their description sidecar re-read and reindexed; videos that
+    /// vanished from disk are dropped. Returns how many rows were
+    /// (re)indexed (0 means the index was already current). Runs in one
+    /// transaction so a crash mid-sync can't leave the index half-written.
+    pub fn sync_search_index(&self, entries: &[SearchEntry]) -> Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+
+        // What's already indexed: video_id -> mtime.
+        let mut existing: HashMap<String, i64> = HashMap::new();
+        {
+            let mut stmt = tx.prepare("SELECT video_id, mtime_unix FROM search_meta")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows { let (id, m) = row?; existing.insert(id, m); }
+        }
+
+        let mut seen: HashSet<&str> = HashSet::with_capacity(entries.len());
+        let mut changed = 0usize;
+        for e in entries {
+            seen.insert(e.video_id.as_str());
+            if existing.get(&e.video_id) == Some(&e.mtime_unix) {
+                continue; // unchanged — leave the indexed row in place
+            }
+            // Only new/changed videos pay the description-read cost.
+            let description = e.description_path.as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            tx.execute("DELETE FROM video_search WHERE video_id = ?1", [&e.video_id])?;
+            tx.execute(
+                "INSERT INTO video_search (video_id, platform, channel, title, description)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![e.video_id, e.platform, e.channel, e.title, description],
+            )?;
+            tx.execute(
+                "INSERT OR REPLACE INTO search_meta (video_id, mtime_unix) VALUES (?1, ?2)",
+                rusqlite::params![e.video_id, e.mtime_unix],
+            )?;
+            changed += 1;
+        }
+
+        // Evict videos that no longer exist on disk.
+        let stale: Vec<String> = existing.keys()
+            .filter(|id| !seen.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in &stale {
+            tx.execute("DELETE FROM video_search WHERE video_id = ?1", [id])?;
+            tx.execute("DELETE FROM search_meta WHERE video_id = ?1", [id])?;
+        }
+
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Full-text search the library, newest-relevance first. Returns up to
+    /// `limit` hits, each with a highlighted description snippet. An empty or
+    /// punctuation-only query yields no results rather than an error.
+    pub fn search_videos(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let match_expr = fts_match_expr(query);
+        if match_expr.is_empty() { return Ok(Vec::new()); }
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            // STX/ETX (\u{2}/\u{3}) delimit matched terms — control chars
+            // that won't collide with literal '[' / ']' in a description.
+            // The UI turns them into highlight markup.
+            "SELECT video_id, platform, channel, title,
+                    snippet(video_search, 4, char(2), char(3), '…', 12)
+             FROM video_search
+             WHERE video_search MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![match_expr, limit as i64], |r| {
+            Ok(SearchHit {
+                video_id: r.get(0)?,
+                platform: r.get(1)?,
+                channel: r.get(2)?,
+                title: r.get(3)?,
+                snippet: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
 }
 
 /// Per-table row counts that landed in the live DB during a restore.
@@ -901,6 +1047,65 @@ pub struct RestoreSummary {
     pub folders_added: u64,
     pub assignments_added: u64,
     pub notes_added: u64,
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn entry(id: &str, mtime: i64, channel: &str, title: &str) -> SearchEntry {
+        SearchEntry {
+            video_id: id.into(), mtime_unix: mtime,
+            platform: "channels".into(), channel: channel.into(),
+            title: title.into(), description_path: None,
+        }
+    }
+
+    #[test]
+    fn indexes_searches_and_evicts() {
+        let db = Database::open_in_memory().unwrap();
+        let entries = vec![
+            entry("a", 1, "Rustaceans", "Async Rust deep dive"),
+            entry("b", 1, "Cooking", "Sourdough bread from scratch"),
+        ];
+        assert_eq!(db.sync_search_index(&entries).unwrap(), 2);
+
+        // Title match.
+        let hits = db.search_videos("rust", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].video_id, "a");
+
+        // Prefix (type-ahead) match.
+        assert_eq!(db.search_videos("sourd", 10).unwrap().len(), 1);
+
+        // The channel field is searched too.
+        let hits = db.search_videos("cooking", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].video_id, "b");
+
+        // Multi-token is AND-ed.
+        assert_eq!(db.search_videos("async dive", 10).unwrap().len(), 1);
+        assert_eq!(db.search_videos("async sourdough", 10).unwrap().len(), 0);
+
+        // Re-syncing unchanged entries is a no-op.
+        assert_eq!(db.sync_search_index(&entries).unwrap(), 0);
+
+        // A changed mtime forces a reindex of just that row.
+        let changed = vec![
+            entry("a", 2, "Rustaceans", "Async Rust deep dive — updated"),
+            entry("b", 1, "Cooking", "Sourdough bread from scratch"),
+        ];
+        assert_eq!(db.sync_search_index(&changed).unwrap(), 1);
+        assert_eq!(db.search_videos("updated", 10).unwrap().len(), 1);
+
+        // Dropping "b" from disk evicts it from the index.
+        assert_eq!(db.sync_search_index(&changed[..1]).unwrap(), 0);
+        assert_eq!(db.search_videos("sourdough", 10).unwrap().len(), 0);
+
+        // Garbage / empty queries return nothing, not an error.
+        assert!(db.search_videos("", 10).unwrap().is_empty());
+        assert!(db.search_videos("   \"  ", 10).unwrap().is_empty());
+    }
 }
 
 #[cfg(test)]

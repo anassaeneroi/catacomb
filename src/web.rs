@@ -894,6 +894,16 @@ fn bump_library_version(state: &WebState) {
     state.library_version.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Bring the full-text search index in line with the current library. Cheap
+/// after the first build (only new/changed videos re-read a description), so
+/// it's fine to call inline after every (re)scan. Errors are logged, not
+/// fatal — search degrading is better than a scan failing.
+fn refresh_search_index(db: &Database, lib: &[library::Channel]) {
+    if let Err(e) = db.sync_search_index(&library::build_search_entries(lib)) {
+        eprintln!("search index sync failed: {e}");
+    }
+}
+
 /// Re-read the password setting from the DB and update the cache. Called
 /// after any change that could affect whether a password exists.
 fn refresh_password_cache(state: &WebState) {
@@ -1861,6 +1871,28 @@ async fn get_comments(
     (StatusCode::OK, Json(serde_json::json!({"comments": comments}))).into_response()
 }
 
+#[derive(serde::Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    q: String,
+    limit: Option<usize>,
+}
+
+/// `GET /api/search?q=…&limit=…` — full-text search over the library's
+/// titles, channel names, and descriptions. Returns ranked hits with a
+/// highlighted snippet. The index is kept current by [`refresh_search_index`]
+/// after each scan.
+async fn get_search(
+    State(state): State<Arc<WebState>>,
+    Query(params): Query<SearchQuery>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
+    match state.db.search_videos(&params.q, limit) {
+        Ok(results) => Json(serde_json::json!({ "results": results })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("search failed: {e}")).into_response(),
+    }
+}
+
 async fn get_metadata(
     State(state): State<Arc<WebState>>,
     Path(video_id): Path<String>,
@@ -1908,6 +1940,7 @@ async fn post_rescan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     if let Ok(w) = state.db.get_watched() {
         *state.watched.lock_recover() = w;
     }
+    refresh_search_index(&state.db, &new_lib);
     *state.library.lock_recover() = new_lib;
     bump_library_version(&state);
     (StatusCode::OK, "rescanned")
@@ -1958,6 +1991,7 @@ async fn post_maintenance_remove(
     if let Ok(folder_map) = state.db.get_all_channel_assignments() {
         library::apply_channel_folders(&mut new_lib, &folder_map);
     }
+    refresh_search_index(&state.db, &new_lib);
     *state.library.lock_recover() = new_lib;
     bump_library_version(&state);
     Json(serde_json::json!({ "removed": removed, "errors": errors }))
@@ -2533,6 +2567,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     }
     let watched = db.get_watched().unwrap_or_default();
     let positions = db.get_positions().unwrap_or_default();
+    refresh_search_index(&db, &library);
 
     let mut downloader = Downloader::new(
         channels_root.clone(),
@@ -2678,6 +2713,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/description/:id", get(get_description))
         .route("/api/chapters/:id", get(get_chapters))
         .route("/api/comments/:id", get(get_comments))
+        .route("/api/search", get(get_search))
         .route("/api/metadata/:id", get(get_metadata))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/transcode/:id", get(get_transcode))

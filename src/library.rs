@@ -684,3 +684,26 @@ fn track_from_path(path: &Path, folder_artist: &str) -> Option<Track> {
         file_size: std::fs::metadata(path).ok().map(|m| m.len()),
     })
 }
+
+/// Flatten a scanned library into [`crate::database::SearchEntry`] rows for
+/// the full-text index — every video in every channel and playlist, tagged
+/// with its platform + channel name and a pointer to its description sidecar.
+/// Shared by both front-ends so the index is built identically.
+pub fn build_search_entries(lib: &[Channel]) -> Vec<crate::database::SearchEntry> {
+    let mut out = Vec::new();
+    for ch in lib {
+        let platform = ch.platform.dir_name();
+        let playlist_videos = ch.playlists.iter().flat_map(|p| p.videos.iter());
+        for v in ch.videos.iter().chain(playlist_videos) {
+            out.push(crate::database::SearchEntry {
+                video_id: v.id.clone(),
+                mtime_unix: v.mtime_unix.map(|m| m as i64).unwrap_or(0),
+                platform: platform.to_string(),
+                channel: ch.name.clone(),
+                title: v.title.clone(),
+                description_path: v.description_path.clone(),
+            });
+        }
+    }
+    out
+}
