@@ -21,6 +21,7 @@ mod disk_space;
 mod download_options;
 mod downloader;
 mod error_class;
+mod feed;
 mod fingerprint;
 mod library;
 mod maintenance;

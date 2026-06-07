@@ -138,6 +138,11 @@ pub struct WebState {
     /// so `/api/maintenance/dedup/status` can be polled. `Arc` so the worker
     /// thread can hold a handle past the request that started it.
     pub dedup: std::sync::Arc<DedupState>,
+    /// Read-only capability token for the podcast/RSS feeds. Podcast clients
+    /// can't do the cookie login, so a tokenized feed URL (`?token=…`) grants
+    /// GET access to `/feed*` and the media mounts even when a password is
+    /// set. Persisted in the `feed_token` setting; stable until regenerated.
+    pub feed_token: String,
 }
 
 /// Live state for the background perceptual-dedup job (see
@@ -1079,6 +1084,16 @@ async fn auth_middleware(
     if is_authed(&state, req.headers()) {
         return next.run(req).await;
     }
+    // Podcast clients can't perform the cookie login, so a tokenized GET to a
+    // feed or the media mounts is allowed when the query carries the
+    // read-only feed token. Scoped to reads of feeds + media only — never
+    // `/api/*` mutations.
+    if req.method().as_str() == "GET"
+        && (path.starts_with("/feed") || path.starts_with("/files/") || path.starts_with("/music-files/"))
+        && req.uri().query().is_some_and(|q| query_has_token(q, &state.feed_token))
+    {
+        return next.run(req).await;
+    }
     if path == "/" {
         return (
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -1087,6 +1102,15 @@ async fn auth_middleware(
             .into_response();
     }
     (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+}
+
+/// True if the query string carries `token=<expected>` (the feed capability
+/// token). Empty `expected` never matches.
+fn query_has_token(query: &str, expected: &str) -> bool {
+    if expected.is_empty() { return false; }
+    query.split('&').any(|kv| {
+        kv.strip_prefix("token=").is_some_and(|v| v == expected)
+    })
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -2013,6 +2037,118 @@ struct RemoveRequest {
     paths: Vec<PathBuf>,
 }
 
+/// Newest-first cap on items in a feed — enough for any podcast client's
+/// back-catalogue without rendering a multi-thousand-item document.
+const FEED_LIMIT: usize = 300;
+
+/// Absolute origin (`scheme://host`) of the request, honoring a reverse
+/// proxy's `X-Forwarded-Proto`. Feed enclosure URLs must be absolute.
+fn request_base_url(headers: &HeaderMap) -> String {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("localhost");
+    let scheme = headers.get("x-forwarded-proto").and_then(|h| h.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("http");
+    format!("{scheme}://{host}")
+}
+
+/// Build podcast items from videos (newest first, capped). Each item's media +
+/// thumbnail get absolute, token-bearing `/files/` URLs so a podcast client
+/// can fetch them even behind a password.
+fn build_feed_items(
+    mut vids: Vec<&library::Video>, root: &StdPath, base: &str, token: &str, limit: usize,
+) -> Vec<crate::feed::FeedItem> {
+    vids.retain(|v| v.video_path.is_some());
+    vids.sort_by(|a, b| {
+        b.upload_date.as_deref().unwrap_or("").cmp(a.upload_date.as_deref().unwrap_or(""))
+            .then(b.mtime_unix.unwrap_or(0).cmp(&a.mtime_unix.unwrap_or(0)))
+    });
+    vids.truncate(limit);
+    let tok = if token.is_empty() { String::new() } else { format!("?token={token}") };
+    vids.into_iter().filter_map(|v| {
+        let vp = v.video_path.as_ref()?;
+        let rel = file_url(root, vp)?;
+        let image_url = v.thumb_path.as_ref()
+            .and_then(|t| file_url(root, t))
+            .map(|r| format!("{base}{r}{tok}"))
+            .unwrap_or_default();
+        // A short description excerpt (best-effort; the media is the point).
+        let description = v.description_path.as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.chars().take(800).collect::<String>())
+            .unwrap_or_default();
+        Some(crate::feed::FeedItem {
+            title: v.title.clone(),
+            description,
+            enclosure_url: format!("{base}{rel}{tok}"),
+            enclosure_len: v.file_size.unwrap_or(0),
+            enclosure_type: crate::feed::mime_for(vp).to_string(),
+            guid: v.id.clone(),
+            pub_date: crate::feed::pub_date(v.upload_date.as_deref(), v.mtime_unix),
+            duration: crate::feed::fmt_duration(v.duration_secs),
+            image_url,
+        })
+    }).collect()
+}
+
+fn feed_response(xml: String) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/rss+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        xml,
+    ).into_response()
+}
+
+/// `GET /feed.xml` — the whole library as one podcast feed, newest first.
+async fn get_feed_all(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    let base = request_base_url(&headers);
+    let lib = state.library.lock_recover();
+    let root = state.library_root.as_path();
+    let all: Vec<&library::Video> = lib.iter()
+        .flat_map(|c| c.videos.iter().chain(c.playlists.iter().flat_map(|p| p.videos.iter())))
+        .collect();
+    let items = build_feed_items(all, root, &base, &state.feed_token, FEED_LIMIT);
+    let feed = crate::feed::Feed {
+        title: "yt-offline — Library".into(),
+        description: "Your archived videos as a podcast feed.".into(),
+        link: format!("{base}/"),
+        items,
+    };
+    feed_response(crate::feed::render(&feed))
+}
+
+/// `GET /feed/:platform/:handle` — one channel's videos as a podcast feed.
+async fn get_feed_channel(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path((platform, handle)): Path<(String, String)>,
+) -> Response {
+    let base = request_base_url(&headers);
+    let lib = state.library.lock_recover();
+    let root = state.library_root.as_path();
+    let Some(ch) = lib.iter().find(|c| c.platform.dir_name() == platform && c.name == handle) else {
+        return (StatusCode::NOT_FOUND, "no such channel").into_response();
+    };
+    let vids: Vec<&library::Video> = ch.videos.iter()
+        .chain(ch.playlists.iter().flat_map(|p| p.videos.iter())).collect();
+    let items = build_feed_items(vids, root, &base, &state.feed_token, FEED_LIMIT);
+    let feed = crate::feed::Feed {
+        title: format!("yt-offline — {}", ch.name),
+        description: format!("Archived videos from {}.", ch.name),
+        link: format!("{base}/"),
+        items,
+    };
+    feed_response(crate::feed::render(&feed))
+}
+
+/// `GET /api/feed-info` — the read-only feed token, so the (authed) UI can
+/// build tokenized feed URLs to copy.
+async fn get_feed_info(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    Json(serde_json::json!({ "token": state.feed_token }))
+}
+
 /// `POST /api/maintenance/dedup/scan` — start (or no-op if already running)
 /// the background perceptual-dedup pass. Fingerprints any new/changed videos
 /// (cached by mtime), then groups by visual similarity. Returns immediately;
@@ -2727,6 +2863,13 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
 
     let password_required_initial = db.get_setting("password_hash").ok().flatten().is_some();
     let flags = db.get_video_flags().unwrap_or_default();
+    // Stable read-only feed token: load the stored one, or mint + persist a new
+    // one on first run so the same URL keeps working across restarts.
+    let feed_token = db.get_setting("feed_token").ok().flatten().unwrap_or_else(|| {
+        let t = generate_session_token();
+        let _ = db.set_setting("feed_token", Some(&t));
+        t
+    });
     // Capacity 16 is plenty — only a small number of browser tabs ever
     // subscribe and the broadcast is lossy by design (subscribers that lag
     // get a Lagged error and just resubscribe).
@@ -2751,6 +2894,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         login_attempts: Mutex::new(HashMap::new()),
         library_body_cache: Mutex::new(None),
         dedup: std::sync::Arc::new(DedupState::default()),
+        feed_token,
     });
 
     // Broadcast progress snapshots to WebSocket subscribers. Ticks fast
@@ -2854,6 +2998,9 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/chapters/:id", get(get_chapters))
         .route("/api/comments/:id", get(get_comments))
         .route("/api/search", get(get_search))
+        .route("/api/feed-info", get(get_feed_info))
+        .route("/feed.xml", get(get_feed_all))
+        .route("/feed/:platform/:handle", get(get_feed_channel))
         .route("/api/metadata/:id", get(get_metadata))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/transcode/:id", get(get_transcode))

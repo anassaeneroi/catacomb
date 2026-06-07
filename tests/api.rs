@@ -368,6 +368,67 @@ fn full_text_search_indexes_titles_and_descriptions() {
 }
 
 #[test]
+fn podcast_feed_serves_rss_with_enclosures() {
+    if !have_curl() { eprintln!("skip: no curl"); return; }
+    let s = Server::start();
+    let chan = s.dir.join("ch/channels/Demo");
+    std::fs::create_dir_all(&chan).unwrap();
+    std::fs::write(chan.join("Cool Talk [vidXYZ].mp4"), b"fakevideo").unwrap();
+    std::fs::write(chan.join("Cool Talk [vidXYZ].info.json"),
+                   br#"{"duration":125.0,"upload_date":"20240102"}"#).unwrap();
+    assert_eq!(s.post("/api/rescan", "").0, 200);
+
+    let (code, body) = s.get("/feed.xml");
+    assert_eq!(code, 200, "{body}");
+    assert!(body.contains("<rss"), "is RSS: {body}");
+    assert!(body.contains("<title>Cool Talk</title>"), "item title present: {body}");
+    assert!(body.contains("<enclosure"), "has an enclosure: {body}");
+    assert!(body.contains("/files/channels/Demo/Cool%20Talk%20%5BvidXYZ%5D.mp4"),
+            "enclosure points at the media file: {body}");
+    assert!(body.contains(r#"type="video/mp4""#), "correct MIME: {body}");
+    assert!(body.contains("Tue, 02 Jan 2024"), "pubDate from upload_date: {body}");
+    // The channel feed works too.
+    assert_eq!(s.get("/feed/channels/Demo").0, 200);
+    // Unknown channel → 404.
+    assert_eq!(s.get("/feed/channels/Nope").0, 404);
+}
+
+#[test]
+fn podcast_feed_token_gates_access_when_password_set() {
+    if !have_curl() { eprintln!("skip: no curl"); return; }
+    let s = Server::start();
+    let chan = s.dir.join("ch/channels/Demo");
+    std::fs::create_dir_all(&chan).unwrap();
+    std::fs::write(chan.join("Talk [vidT].mp4"), b"x").unwrap();
+    assert_eq!(s.post("/api/rescan", "").0, 200);
+
+    // Grab the feed token (UI is unauthenticated until a password is set).
+    let (_, info) = s.get("/api/feed-info");
+    let token = field(&info, "token").expect("feed token").to_string();
+    assert!(!token.is_empty());
+
+    // Set a password — now the UI + API require auth.
+    let (code, _) = s.post("/api/settings", &format!(
+        r#"{{"transcode":false,"scheduler_enabled":false,"scheduler_interval_hours":24,
+            "max_concurrent":3,"use_bundled_ytdlp":false,"use_pot_provider":false,
+            "subtitles_enabled":false,"subtitles_auto":false,"subtitles_embed":false,
+            "subtitle_langs":"","subtitle_format":"","youtube_player_clients":"",
+            "sponsorblock_mode":"mark","convert_mode":"","convert_crf":23,"convert_preset":"",
+            "convert_audio_format":"","convert_keep_original":false,
+            "new_download_password":"hunter2"}}"#));
+    assert_eq!(code, 200);
+
+    // Feed without the token is now rejected…
+    assert_eq!(s.get("/feed.xml").0, 401, "feed must be gated once a password is set");
+    // …but the tokenized URL still works (a podcast client can't log in).
+    assert_eq!(s.get(&format!("/feed.xml?token={token}")).0, 200);
+    // A wrong token is rejected.
+    assert_eq!(s.get("/feed.xml?token=bogus").0, 401);
+    // The media mount is reachable with the token too (so enclosures load).
+    assert_eq!(s.get(&format!("/files/channels/Demo/Talk%20%5BvidT%5D.mp4?token={token}")).0, 200);
+}
+
+#[test]
 fn perceptual_dedup_groups_reencodes() {
     if !have_curl() { eprintln!("skip: no curl"); return; }
     if !have_ffmpeg() { eprintln!("skip: no ffmpeg"); return; }
