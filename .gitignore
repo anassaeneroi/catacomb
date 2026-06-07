@@ -12,6 +12,9 @@
 /src/yt-offline/
 /yt-offline/
 
+# Rendered mdBook output (source lives in docs/src/)
+/docs/book/
+
 # Editor / OS cruft
 *.swp
 .DS_Store

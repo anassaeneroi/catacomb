@@ -192,7 +192,7 @@ fields are also editable in Settings.
 
 ```toml
 [backup]
-directory      = "/path/to/library/channels"   # YouTube root; siblings hold other platforms
+directory      = "/path/to/library"            # library root; every platform nests under it (channels/, tiktok/, …)
 max_concurrent = 3                              # parallel yt-dlp processes
 use_bundled_ytdlp = false                       # true = use the venv set up by the Install button
 

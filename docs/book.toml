@@ -1,0 +1,12 @@
+[book]
+title = "yt-offline"
+description = "Self-hosted archive for YouTube, TikTok, Twitch and more. Setup, usage, anti-bot, troubleshooting, and architecture."
+authors = ["InannaBeloved"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://codeberg.org/anassaeneroi/yt-offline"
+edit-url-template = "https://codeberg.org/anassaeneroi/yt-offline/_edit/main/docs/{path}"
