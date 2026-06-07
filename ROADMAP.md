@@ -70,28 +70,30 @@ See **Recently shipped** for the full list.
 
 Things we win on architecturally but lose on real-world ruggedness.
 
-The two genuinely-open items are **2.1 integration tests** and **2.2 docs
-site** — both investment rather than features. 2.3 / 2.4 / 2.5 are done.
+Every Phase 2 item is now done — 2.1 / 2.2 shipped alongside 2.3 / 2.4 /
+2.5.
 
-### 2.1 Integration test coverage
+### 2.1 Integration test coverage — DONE
 
-98 unit tests are good for parsers/helpers/resolvers, but don't cover
-end-to-end correctness. We need real-yt-dlp integration tests against a
-recorded fixture corpus.
+98 unit tests cover parsers/helpers/resolvers; `tests/api.rs` adds 7
+end-to-end tests that spawn the **real** `--web` binary against a scratch
+tempdir and drive the HTTP API with curl (index/library serving, ETag
+304, settings round-trip + persistence, folders CRUD + cycle guard, notes
+round-trip, channel-options round-trip + clear, DB backup). Each test
+gets its own server/port/tempdir, so they run in parallel.
+`.forgejo/workflows/test.yml` runs the full suite on every push. Stretch
+left: a recorded-fixture corpus for the download pipeline and a headless
+web-UI test.
 
-- Mock-server fixtures for yt-dlp's JSON output.
-- `cargo test --features integration` exercises the full download pipeline
-  against the mock.
-- Headless web-UI tests via `headless_chrome` or `playwright`.
+### 2.2 Documentation site — DONE
 
-### 2.2 Documentation site
-
-README is the only user-facing doc. Need a real docs site with:
-
-- Per-platform setup guide (deeper than current README sections).
-- Troubleshooting playbook for the top 10 yt-dlp errors.
-- Architecture page (for contributors).
-- Hosted via Codeberg Pages.
+An mdBook under `docs/` (eight pages: introduction, installation,
+first-run/config, downloading, anti-bot, troubleshooting, architecture,
+packaging), published to Codeberg Pages by
+`.forgejo/workflows/docs.yml`. The anti-bot and troubleshooting pages
+capture the cookies/curl_cffi/POT/player-client knowledge; the
+architecture page documents the two-front-ends/one-engine design for
+contributors.
 
 ### 2.3 Error recovery / structured logging — DONE
 
@@ -238,7 +240,8 @@ Roughly reverse-chronological. Items that closed out a roadmap line.
 ## How to read this
 
 - **Phase 1** (Tartube parity) is **complete** — kept above for the record.
-- **Phase 2** is down to test coverage (2.1) and a docs site (2.2).
+- **Phase 2** is complete: integration tests (2.1), docs site (2.2),
+  error recovery (2.3), restore (2.4), stability hardening (2.5).
 - **Phase 3** is the "surpass" work now that we're at parity.
 - **Phase 4** items might be valuable, but commit to nothing.
 
