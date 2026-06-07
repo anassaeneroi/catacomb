@@ -92,6 +92,12 @@ pub struct DownloadOptions {
     #[serde(default)]
     pub youtube_player_clients: Option<String>,
 
+    /// Per-channel SponsorBlock override: "off" / "mark" / "remove".
+    /// `None` defers to the global `backup.sponsorblock_mode`. Resolved in
+    /// the downloader.
+    #[serde(default)]
+    pub sponsorblock_mode: Option<String>,
+
     /// Per-channel post-download conversion mode override. `None` defers
     /// to the global `[convert]` config; `Some("off")` forces no
     /// conversion for this channel even when the global default is on.

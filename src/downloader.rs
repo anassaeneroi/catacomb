@@ -17,7 +17,7 @@
 //! | `--remux-video mkv` | Re-container to MKV (no re-encode) |
 //! | `--embed-metadata --embed-info-json --embed-chapters` | Embed rich metadata into the MKV |
 //! | `--xattrs` | Store metadata in filesystem extended attributes |
-//! | `--sponsorblock-mark all` | Mark (but don't remove) SponsorBlock segments |
+//! | `--sponsorblock-mark/-remove all` | SponsorBlock handling, per `sponsorblock_mode` (off/mark/remove; see [`Self::apply_sponsorblock`]) |
 //! | `--impersonate <target>` | Browser TLS fingerprint per source platform (see [`crate::platform::Platform::impersonate_target`]) |
 //! | `--break-on-existing` | Stop when the archive file records the video as already downloaded |
 //! | `--download-archive archive.txt` | Record downloaded IDs to avoid re-downloading |
@@ -314,6 +314,9 @@ pub struct Downloader {
     /// yt-dlp defaults. Per-channel options can override. Set at
     /// construction + on settings save.
     pub youtube_player_clients: String,
+    /// Global `backup.sponsorblock_mode` ("off" / "mark" / "remove").
+    /// Per-channel options can override. Set at construction + on save.
+    pub sponsorblock_mode: String,
     /// Global `[convert]` config. Drives the post-download ffmpeg pass.
     /// Per-channel options override the mode. Set at construction + save.
     pub convert_defaults: crate::config::ConvertSection,
@@ -359,6 +362,7 @@ impl Downloader {
             pot_server: None,
             subtitle_defaults: crate::config::SubtitlesSection::default(),
             youtube_player_clients: String::new(),
+            sponsorblock_mode: "mark".to_string(),
             convert_defaults: crate::config::ConvertSection::default(),
             retry_queue: Vec::new(),
             rate_limited_backoff: false,
@@ -389,6 +393,22 @@ impl Downloader {
         if clients.is_empty() { return; }
         cmd.arg("--extractor-args")
             .arg(format!("youtube:player_client={clients}"));
+    }
+
+    /// Apply SponsorBlock flags from the resolved mode (per-channel override
+    /// or global default). "mark" chapter-marks segments, "remove" cuts them,
+    /// anything else (incl. "off") omits the flags entirely.
+    fn apply_sponsorblock(&self, cmd: &mut Command, opts: Option<&DownloadOptions>) {
+        let mode = opts
+            .and_then(|o| o.sponsorblock_mode.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(self.sponsorblock_mode.as_str())
+            .trim();
+        match mode {
+            "mark" => { cmd.arg("--sponsorblock-mark").arg("all"); }
+            "remove" => { cmd.arg("--sponsorblock-remove").arg("all"); }
+            _ => {} // "off" or unknown → no SponsorBlock processing
+        }
     }
 
     fn apply_subtitle_flags(&self, cmd: &mut Command, opts: Option<&DownloadOptions>) {
@@ -714,8 +734,6 @@ impl Downloader {
             .arg("--embed-info-json")
             .arg("--embed-chapters")
             .arg("--xattrs")
-            .arg("--sponsorblock-mark")
-            .arg("all")
             .arg("--progress");
         if let Some(fmt) = quality.format_spec() {
             cmd.arg("-f").arg(fmt);
@@ -743,6 +761,8 @@ impl Downloader {
         // YouTube player-client selection (global default + per-channel
         // override). Lets the user route around a captcha-walled client.
         self.apply_player_client(&mut cmd, channel_options);
+        // SponsorBlock: global default + per-channel override (off/mark/remove).
+        self.apply_sponsorblock(&mut cmd, channel_options);
         // Post-download conversion: resolve global [convert] + per-channel
         // override. When active, ask yt-dlp to print each finished file's
         // final path (after_move) so we can enqueue an ffmpeg pass on it.

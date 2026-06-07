@@ -1017,6 +1017,10 @@ async function openChannelOptions(idx){
       <label>YouTube player clients (blank = global)</label>
       <input type="text" id="opt-player-clients" value="${esc(opts.youtube_player_clients||'')}" placeholder="e.g. tv,mweb" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px"></div>
     <div class="settings-hint" style="margin-bottom:4px">Per-channel <code>--extractor-args youtube:player_client</code> override. If this channel keeps hitting captchas, try <code>tv,mweb</code> (least bot-checked).</div>
+    <div class="settings-row"><label>SponsorBlock (blank = global)</label>
+      <select id="opt-sponsorblock" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px">
+        ${[['','Default (global)'],['off','Off'],['mark','Mark chapters'],['remove','Remove segments']].map(([v,l])=>`<option value="${v}"${(opts.sponsorblock_mode||'')===v?' selected':''}>${l}</option>`).join('')}
+      </select></div>
     <div class="settings-row"><label>Convert (blank = global)</label>
       <select id="opt-convert" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px">
         ${[['','Default (global)'],['off','Off'],['remux-mp4','Remux → mp4'],['h264-mp4','H.264 mp4'],['audio','Audio']].map(([v,l])=>`<option value="${v}"${(opts.convert_mode||'')===v?' selected':''}>${l}</option>`).join('')}
@@ -1056,6 +1060,7 @@ function readChannelOptionsForm(){
     subtitles_embed:triValue('opt-subs-embed'),
     subtitle_format:strOrNull('opt-subs-format'),
     youtube_player_clients:strOrNull('opt-player-clients'),
+    sponsorblock_mode:strOrNull('opt-sponsorblock'),
     convert_mode:strOrNull('opt-convert'),
     extra_args:extra,
   };
@@ -1308,45 +1313,111 @@ async function loadChapters(id){
 function jumpToChapter(s){const v=document.getElementById('player-video');if(v){v.currentTime=s;v.play()}}
 
 /* ── Comments viewer ───────────────────────────────────────────── */
+let cmt={vid:null,list:[],q:'',sort:'threaded',collapsed:new Set(),prevVisit:0};
 async function openComments(videoId){
   const bg=document.createElement('div');bg.className='modal-bg';
   bg.onclick=e=>{if(e.target===bg)bg.remove()};
-  bg.innerHTML=`<div class="modal" style="max-width:640px;width:100%">
+  bg.innerHTML=`<div class="modal" style="max-width:680px;width:100%">
     <div class="modal-hdr"><h2>💬 Comments</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
-    <div id="comments-body" style="overflow-y:auto;max-height:75vh"><em style="color:var(--muted)">Loading…</em></div>
+    <div style="display:flex;gap:6px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--border);flex-wrap:wrap">
+      <input id="cmt-search" placeholder="Search comments…" oninput="cmt.q=this.value;renderComments()"
+        style="flex:1;min-width:120px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+      <select id="cmt-sort" onchange="cmt.sort=this.value;renderComments()"
+        style="padding:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-size:12px">
+        <option value="threaded">Threaded</option>
+        <option value="top">Top</option>
+        <option value="new">Newest</option>
+        <option value="old">Oldest</option>
+      </select>
+      <button onclick="cmtCollapseAll(true)" title="Collapse all replies">⊟</button>
+      <button onclick="cmtCollapseAll(false)" title="Expand all replies">⊞</button>
+    </div>
+    <div id="cmt-status" style="font-size:11px;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--border)"></div>
+    <div id="comments-body" style="overflow-y:auto;max-height:68vh"><em style="color:var(--muted)">Loading…</em></div>
   </div>`;
   document.body.appendChild(bg);
+  cmt={vid:videoId,list:[],q:'',sort:'threaded',collapsed:new Set(),prevVisit:0};
   try{
     const r=await(await api('/api/comments/'+encodeURIComponent(videoId))).json();
-    renderComments(r.comments||[]);
+    cmt.list=r.comments||[];
+    // "New since last visit": remember when this video's comments were last
+    // opened (unix secs in localStorage) and flag comments posted after that.
+    const key='cmts:'+videoId;
+    cmt.prevVisit=parseInt(localStorage.getItem(key)||'0',10)||0;
+    localStorage.setItem(key,String(Math.floor(Date.now()/1000)));
+    renderComments();
   }catch(e){
-    document.getElementById('comments-body').innerHTML=`<div style="color:#f87171">Failed to load comments: ${esc(e.message)}</div>`;
+    const b=document.getElementById('comments-body');
+    if(b)b.innerHTML=`<div style="color:#f87171;padding:10px">Failed to load comments: ${esc(e.message)}</div>`;
   }
 }
-function renderComments(list){
+function cmtCollapseAll(collapse){
+  cmt.collapsed=new Set();
+  if(collapse)cmt.list.filter(c=>c.parent).forEach(c=>cmt.collapsed.add(c.parent));
+  renderComments();
+}
+function cmtToggle(id){
+  if(cmt.collapsed.has(id))cmt.collapsed.delete(id);else cmt.collapsed.add(id);
+  renderComments();
+}
+function cmtHl(s){
+  const e=esc(s||'');const q=cmt.q.trim();
+  if(!q)return e;
+  try{return e.replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','ig'),'<mark>$1</mark>')}catch{return e}
+}
+function renderComments(){
   const body=document.getElementById('comments-body');if(!body)return;
+  const status=document.getElementById('cmt-status');
+  const list=cmt.list;
   if(!list.length){
     body.innerHTML='<div style="color:var(--muted);padding:12px">No comments captured for this video. Enable "Fetch comments" in this channel\'s options + re-download.</div>';
+    if(status)status.textContent='';
     return;
   }
-  // Build a tree from parent ids. Top-level = parent missing / not in set.
+  // Build the reply tree (top-level = parent missing / not in set).
   const byId=new Map(list.map(c=>[c.id,{...c,children:[]}]));
   const roots=[];
   for(const c of byId.values()){
-    if(c.parent && byId.has(c.parent)) byId.get(c.parent).children.push(c);
+    if(c.parent&&byId.has(c.parent))byId.get(c.parent).children.push(c);
     else roots.push(c);
   }
+  const q=cmt.q.trim().toLowerCase();
+  const matches=c=>(c.text||'').toLowerCase().includes(q)||(c.author||'').toLowerCase().includes(q);
+  // While searching: keep matching comments plus their ancestor chain so a
+  // reply still shows in context. visit() returns true if the subtree matches.
+  const keep=new Set();
+  if(q){
+    const visit=c=>{let any=matches(c);for(const ch of c.children)any=visit(ch)||any;if(any)keep.add(c.id);return any};
+    roots.forEach(visit);
+  }
+  const cmp={top:(a,b)=>(b.likes||0)-(a.likes||0),
+             new:(a,b)=>(b.timestamp||0)-(a.timestamp||0),
+             old:(a,b)=>(a.timestamp||0)-(b.timestamp||0)}[cmt.sort]||null;
   const render=(c,depth)=>{
-    const indent=depth*16;
-    const author=c.author?`<strong>${esc(c.author)}</strong>`:'<em>unknown</em>';
+    if(q&&!keep.has(c.id))return'';
+    const indent=Math.min(depth,8)*14;
+    const isNew=cmt.prevVisit&&c.timestamp&&c.timestamp>cmt.prevVisit;
+    const collapsed=cmt.collapsed.has(c.id)&&!q;
+    const toggle=c.children.length?`<span onclick="cmtToggle('${c.id}')" style="cursor:pointer;user-select:none;color:var(--muted)">${collapsed?'▸':'▾'}${c.children.length}</span> `:'';
+    const author=c.author?`<strong>${cmtHl(c.author)}</strong>`:'<em>unknown</em>';
+    const op=c.is_uploader?' <span style="font-size:10px;background:#3b82f6;color:#fff;padding:0 4px;border-radius:3px">OP</span>':'';
     const meta=[c.time,c.likes!=null?`${c.likes} likes`:null].filter(Boolean).join(' · ');
-    const replies=c.children.length?c.children.map(r=>render(r,depth+1)).join(''):'';
-    return `<div style="padding:6px 10px 6px ${10+indent}px;border-bottom:1px solid var(--border);font-size:13px;line-height:1.4">
-      <div style="margin-bottom:2px">${author}${meta?` <span style="color:var(--muted);font-size:11px">· ${esc(meta)}</span>`:''}</div>
-      <div style="white-space:pre-wrap;word-wrap:break-word">${esc(c.text)}</div>
-    </div>${replies}`;
+    const newBadge=isNew?' <span style="font-size:10px;color:#34d399">● new</span>':'';
+    const childHtml=collapsed?'':c.children.map(r=>render(r,depth+1)).join('');
+    return `<div style="padding:6px 10px 6px ${10+indent}px;border-bottom:1px solid var(--border);font-size:13px;line-height:1.4;${isNew?'border-left:2px solid #34d399':''}">
+      <div style="margin-bottom:2px">${toggle}${author}${op}${meta?` <span style="color:var(--muted);font-size:11px">· ${esc(meta)}</span>`:''}${newBadge}</div>
+      <div style="white-space:pre-wrap;word-wrap:break-word">${cmtHl(c.text)}</div>
+    </div>${childHtml}`;
   };
-  body.innerHTML=`<div style="font-size:11px;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--border)">${list.length} comment${list.length===1?'':'s'}</div>`+roots.map(c=>render(c,0)).join('');
+  const ordered=cmp?roots.slice().sort(cmp):roots;
+  body.innerHTML=ordered.map(c=>render(c,0)).join('')||'<div style="color:var(--muted);padding:12px">No comments match your search.</div>';
+  if(status){
+    const newCount=cmt.prevVisit?list.filter(c=>c.timestamp&&c.timestamp>cmt.prevVisit).length:0;
+    const bits=[`${list.length} comment${list.length===1?'':'s'}`];
+    if(newCount)bits.push(`<span style="color:#34d399">${newCount} new since last visit</span>`);
+    if(q)bits.push('filtered');
+    status.innerHTML=bits.join(' · ');
+  }
 }
 
 /* ── Select / Details ───────────────────────────────────────────── */
@@ -1542,6 +1613,13 @@ async function openSettings(){
       <input type="text" id="cf-player-clients" value="${esc(cur.youtube_player_clients||'')}" placeholder="default" style="width:140px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px">
     </div>
     <div class="settings-hint" style="margin-bottom:6px">Comma-separated <code>--extractor-args youtube:player_client</code>. Blank = let yt-dlp pick (recommended). YouTube's bot-detection targets different clients over time; if you keep hitting captchas, try <code>tv,mweb</code> — currently the least-checked. Per-channel overrides live in each channel's options.</div>
+    <div class="settings-row" style="margin-top:8px">
+      <label for="cf-sponsorblock">SponsorBlock</label>
+      <select id="cf-sponsorblock" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px">
+        ${[['off','Off'],['mark','Mark chapters'],['remove','Remove segments']].map(([v,l])=>`<option value="${v}"${(cur.sponsorblock_mode||'mark')===v?' selected':''}>${l}</option>`).join('')}
+      </select>
+    </div>
+    <div class="settings-hint" style="margin-bottom:6px">Uses the community SponsorBlock database for sponsor / intro / self-promo segments. <b>Mark</b> adds skippable chapter markers; <b>Remove</b> cuts the segments out of the saved file. Per-channel overrides live in each channel's options.</div>
     <hr style="border-color:var(--border);margin:12px 0">
     <div style="font-weight:700;margin-bottom:8px">Subtitles (global defaults)</div>
     <div class="settings-hint" style="margin-bottom:6px">Applied to every download. Individual channels can override these in their Channel options dialog.</div>
@@ -1783,12 +1861,13 @@ async function saveSettings(btn){
   const subsLangs=document.getElementById('cf-subs-langs')?.value||'';
   const subsFormat=document.getElementById('cf-subs-format')?.value||'';
   const playerClients=document.getElementById('cf-player-clients')?.value||'';
+  const sponsorblock=document.getElementById('cf-sponsorblock')?.value||'mark';
   const convMode=document.getElementById('cf-convert-mode')?.value||'';
   const convCrf=parseInt(document.getElementById('cf-convert-crf')?.value||'23',10);
   const convPreset=document.getElementById('cf-convert-preset')?.value||'';
   const convAudio=document.getElementById('cf-convert-audio')?.value||'';
   const convKeep=document.getElementById('cf-convert-keep')?.checked||false;
-  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider,subtitles_enabled:subsEnabled,subtitles_auto:subsAuto,subtitles_embed:subsEmbed,subtitle_langs:subsLangs,subtitle_format:subsFormat,youtube_player_clients:playerClients,convert_mode:convMode,convert_crf:convCrf,convert_preset:convPreset,convert_audio_format:convAudio,convert_keep_original:convKeep};
+  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider,subtitles_enabled:subsEnabled,subtitles_auto:subsAuto,subtitles_embed:subsEmbed,subtitle_langs:subsLangs,subtitle_format:subsFormat,youtube_player_clients:playerClients,sponsorblock_mode:sponsorblock,convert_mode:convMode,convert_crf:convCrf,convert_preset:convPreset,convert_audio_format:convAudio,convert_keep_original:convKeep};
   if(bindMode)payload.bind_mode=bindMode;
   if(plexPath!==undefined)payload.plex_library_path=plexPath;
   if(sourceUrl!==undefined)payload.source_url=sourceUrl;

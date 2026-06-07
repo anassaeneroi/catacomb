@@ -371,6 +371,9 @@ struct SettingsPayload {
     /// YouTube player clients (comma-separated). Empty = yt-dlp defaults.
     #[serde(default)]
     youtube_player_clients: String,
+    /// SponsorBlock mode: "off" / "mark" / "remove".
+    #[serde(default)]
+    sponsorblock_mode: String,
     /// Global [convert] settings, round-tripped on GET + POST.
     #[serde(default)]
     convert_mode: String,
@@ -1369,6 +1372,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let use_pot_provider = cfg.backup.use_pot_provider;
     let subs = cfg.subtitles.clone();
     let player_clients_out = cfg.backup.youtube_player_clients.clone();
+    let sponsorblock_out = cfg.backup.sponsorblock_mode.clone();
     let convert = cfg.convert.clone();
     drop(cfg);
 
@@ -1407,6 +1411,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         subtitle_format: subs.format,
         subtitle_langs: subs.langs,
         youtube_player_clients: player_clients_out.clone(),
+        sponsorblock_mode: sponsorblock_out.clone(),
         convert_mode: convert.mode.clone(),
         convert_crf: convert.crf,
         convert_preset: convert.preset.clone(),
@@ -1452,6 +1457,7 @@ async fn post_settings(
     cfg.subtitles.format = body.subtitle_format.trim().to_string();
     cfg.subtitles.langs = body.subtitle_langs.trim().to_string();
     cfg.backup.youtube_player_clients = body.youtube_player_clients.trim().to_string();
+    cfg.backup.sponsorblock_mode = body.sponsorblock_mode.trim().to_string();
     // Global format-conversion defaults.
     cfg.convert.mode = body.convert_mode.trim().to_string();
     cfg.convert.crf = body.convert_crf;
@@ -1473,6 +1479,7 @@ async fn post_settings(
     let use_pot_provider = cfg.backup.use_pot_provider;
     let subs = cfg.subtitles.clone();
     let player_clients_out = cfg.backup.youtube_player_clients.clone();
+    let sponsorblock_out = cfg.backup.sponsorblock_mode.clone();
     let convert = cfg.convert.clone();
     drop(cfg);
 
@@ -1486,6 +1493,7 @@ async fn post_settings(
         dl.use_pot_provider = use_pot_provider;
         dl.subtitle_defaults = subs.clone();
         dl.youtube_player_clients = player_clients_out.clone();
+        dl.sponsorblock_mode = sponsorblock_out.clone();
         dl.convert_defaults = convert.clone();
     }
 
@@ -1542,6 +1550,7 @@ async fn post_settings(
         subtitle_format: subs.format,
         subtitle_langs: subs.langs,
         youtube_player_clients: player_clients_out.clone(),
+        sponsorblock_mode: sponsorblock_out.clone(),
         convert_mode: convert.mode.clone(),
         convert_crf: convert.crf,
         convert_preset: convert.preset.clone(),
@@ -1832,6 +1841,10 @@ async fn get_comments(
                 let time = c.get("_time_text").and_then(|v| v.as_str())
                     .or_else(|| c.get("time_text").and_then(|v| v.as_str()))
                     .map(String::from);
+                // Absolute post time (unix seconds) when yt-dlp captured it —
+                // drives "newest" sorting and the new-since-last-visit highlight.
+                let timestamp = c.get("timestamp").and_then(|v| v.as_i64());
+                let is_uploader = c.get("author_is_uploader").and_then(|v| v.as_bool());
                 Some(serde_json::json!({
                     "id": id,
                     "author": author,
@@ -1839,6 +1852,8 @@ async fn get_comments(
                     "likes": likes,
                     "parent": parent,
                     "time": time,
+                    "timestamp": timestamp,
+                    "is_uploader": is_uploader,
                 }))
             }).collect::<Vec<_>>()
         })
@@ -2528,6 +2543,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     );
     downloader.subtitle_defaults = config.subtitles.clone();
     downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
+    downloader.sponsorblock_mode = config.backup.sponsorblock_mode.clone();
     downloader.convert_defaults = config.convert.clone();
     let music_root = downloader.music_root();
     let _ = std::fs::create_dir_all(&music_root);

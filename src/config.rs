@@ -127,10 +127,18 @@ pub struct BackupSection {
     /// live in [`crate::download_options::DownloadOptions`].
     #[serde(default)]
     pub youtube_player_clients: String,
+    /// SponsorBlock handling for downloaded videos. `"mark"` (the default)
+    /// chapter-marks segments via `--sponsorblock-mark all` so a player can
+    /// skip them; `"remove"` cuts them from the file via
+    /// `--sponsorblock-remove all`; `"off"` disables it. Per-channel
+    /// overrides live in [`crate::download_options::DownloadOptions`].
+    #[serde(default = "default_sponsorblock_mode")]
+    pub sponsorblock_mode: String,
 }
 
 fn default_max_concurrent() -> usize { 3 }
 fn default_true() -> bool { true }
+fn default_sponsorblock_mode() -> String { "mark".to_string() }
 
 /// `[player]` table — external player and browser cookie source.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -264,6 +272,7 @@ impl Config {
                 use_bundled_ytdlp: false,
                 use_pot_provider: false,
                 youtube_player_clients: String::new(),
+                sponsorblock_mode: default_sponsorblock_mode(),
             },
             player: PlayerSection::default(),
             ui: UiSection::default(),

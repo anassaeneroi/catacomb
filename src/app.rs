@@ -240,6 +240,9 @@ struct ChannelOptionsForm {
     // Per-channel convert override: 0=Default(global), 1=Off, 2=remux-mp4,
     // 3=h264-mp4, 4=audio. Maps to Option<String> on save.
     convert_idx: usize,
+    // Per-channel SponsorBlock override: 0=Default(global), 1=Off, 2=mark,
+    // 3=remove. Maps to Option<String> on save.
+    sponsorblock_idx: usize,
     extra_args: String,           // one per line
 }
 
@@ -269,6 +272,25 @@ fn idx_to_convert_mode(i: usize) -> Option<String> {
         2 => Some("remux-mp4".into()),
         3 => Some("h264-mp4".into()),
         4 => Some("audio".into()),
+        _ => None,
+    }
+}
+
+/// Per-channel SponsorBlock override ⇄ combo index.
+/// 0=Default (None, defer to global), 1=Off, 2=mark, 3=remove.
+fn sponsorblock_to_idx(v: &Option<String>) -> usize {
+    match v.as_deref() {
+        Some("off") => 1,
+        Some("mark") => 2,
+        Some("remove") => 3,
+        _ => 0,
+    }
+}
+fn idx_to_sponsorblock(i: usize) -> Option<String> {
+    match i {
+        1 => Some("off".into()),
+        2 => Some("mark".into()),
+        3 => Some("remove".into()),
         _ => None,
     }
 }
@@ -348,6 +370,7 @@ impl App {
         );
         downloader.subtitle_defaults = config.subtitles.clone();
         downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
+        downloader.sponsorblock_mode = config.backup.sponsorblock_mode.clone();
         downloader.convert_defaults = config.convert.clone();
         let config_bind = config.web.bind.clone();
         let password_set = db.get_setting("password_hash").ok().flatten().is_some();
@@ -512,6 +535,7 @@ impl App {
             subtitle_format: opts.subtitle_format.clone().unwrap_or_default(),
             youtube_player_clients: opts.youtube_player_clients.clone().unwrap_or_default(),
             convert_idx: convert_mode_to_idx(&opts.convert_mode),
+            sponsorblock_idx: sponsorblock_to_idx(&opts.sponsorblock_mode),
             extra_args: opts.extra_args.join("\n"),
         }
     }
@@ -550,6 +574,7 @@ impl App {
             subtitle_format: trim_opt(&f.subtitle_format),
             youtube_player_clients: trim_opt(&f.youtube_player_clients),
             convert_mode: idx_to_convert_mode(f.convert_idx),
+            sponsorblock_mode: idx_to_sponsorblock(f.sponsorblock_idx),
             extra_args: f.extra_args.lines()
                 .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         }
@@ -2093,6 +2118,25 @@ impl App {
                      from the global config.");
 
                 ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("SponsorBlock");
+                    let label = match form.sponsorblock_idx {
+                        1 => "Off", 2 => "Mark chapters", 3 => "Remove segments",
+                        _ => "Default (global)",
+                    };
+                    egui::ComboBox::from_id_salt("ch_sponsorblock")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut form.sponsorblock_idx, 0, "Default (global)");
+                            ui.selectable_value(&mut form.sponsorblock_idx, 1, "Off");
+                            ui.selectable_value(&mut form.sponsorblock_idx, 2, "Mark chapters");
+                            ui.selectable_value(&mut form.sponsorblock_idx, 3, "Remove segments");
+                        });
+                }).response.on_hover_text(
+                    "SponsorBlock handling for this channel. Default = use the global \
+                     setting. Mark = chapter-mark segments; Remove = cut them from the file.");
+
+                ui.add_space(6.0);
                 ui.label("Extra yt-dlp args (one per line):");
                 ui.add(
                     egui::TextEdit::multiline(&mut self.channel_options_form.extra_args)
@@ -2579,6 +2623,25 @@ impl App {
                              Per-channel overrides live in each channel's options.");
                         ui.end_row();
 
+                        ui.label("SponsorBlock:");
+                        egui::ComboBox::from_id_salt("global_sponsorblock")
+                            .selected_text(match self.config.backup.sponsorblock_mode.as_str() {
+                                "off" => "Off",
+                                "remove" => "Remove segments",
+                                _ => "Mark chapters",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.config.backup.sponsorblock_mode, "off".to_string(), "Off");
+                                ui.selectable_value(&mut self.config.backup.sponsorblock_mode, "mark".to_string(), "Mark chapters");
+                                ui.selectable_value(&mut self.config.backup.sponsorblock_mode, "remove".to_string(), "Remove segments");
+                            })
+                            .response.on_hover_text(
+                                "SponsorBlock uses the community database for sponsor / intro / \
+                                 self-promo segments. Mark = add skippable chapter markers; \
+                                 Remove = cut the segments from the saved file. Per-channel \
+                                 overrides live in each channel's options.");
+                        ui.end_row();
+
                         ui.label("Web UI port:");
                         ui.add(
                             egui::DragValue::new(&mut self.config.web.port)
@@ -2987,6 +3050,7 @@ impl App {
                         self.downloader.use_pot_provider = self.config.backup.use_pot_provider;
                         self.downloader.subtitle_defaults = self.config.subtitles.clone();
                         self.downloader.youtube_player_clients = self.config.backup.youtube_player_clients.clone();
+                        self.downloader.sponsorblock_mode = self.config.backup.sponsorblock_mode.clone();
                         self.downloader.convert_defaults = self.config.convert.clone();
                         if dir_changed {
                             self.channels_root = new_dir.clone();
