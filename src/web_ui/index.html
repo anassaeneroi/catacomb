@@ -2162,7 +2162,86 @@ function renderMaintenance(r){
       </div>`;
     }
   }
+  h+=`<h3 style="font-size:13px;margin:16px 0 8px">Similar content (perceptual)</h3>
+    <div class="settings-hint" style="margin-bottom:8px">Finds the same video re-uploaded under a different ID — mirrors, re-encodes, resolution changes — by comparing sampled frames. The first scan fingerprints your library (a few minutes); after that it's cached, so re-scans are quick.</div>
+    <div id="dedup-area"></div>`;
   body.innerHTML=h;
+  initDedupArea();
+}
+
+/* ── Perceptual dedup (similar content) ─────────────────────────── */
+let dedupTimer=null;
+async function initDedupArea(){
+  if(dedupTimer){clearInterval(dedupTimer);dedupTimer=null}
+  try{
+    const s=await(await api('/api/maintenance/dedup/status')).json();
+    if(s.running){renderDedupProgress(s);startDedupPoll();}
+    else if(s.groups){renderSimilarGroups(s.groups);}
+    else dedupIdle(s.error);
+  }catch(e){const a=document.getElementById('dedup-area');if(a)a.innerHTML=`<div style="color:#f87171;font-size:12px">${esc(e.message)}</div>`}
+}
+function dedupIdle(err){
+  const a=document.getElementById('dedup-area');if(!a)return;
+  a.innerHTML=`${err?`<div style="color:#f87171;font-size:12px;margin-bottom:6px">Last scan error: ${esc(err)}</div>`:''}
+    <button class="primary" onclick="startDedup(this)">🔍 Scan for similar content</button>`;
+}
+async function startDedup(btn){
+  if(btn)btn.disabled=true;
+  try{await api('/api/maintenance/dedup/scan',{method:'POST'});startDedupPoll();}
+  catch(e){setStatus('Error: '+e.message);if(btn)btn.disabled=false}
+}
+function startDedupPoll(){
+  if(dedupTimer)clearInterval(dedupTimer);
+  dedupTimer=setInterval(async()=>{
+    if(!document.getElementById('dedup-area')){clearInterval(dedupTimer);dedupTimer=null;return} // modal closed
+    let s;try{s=await(await api('/api/maintenance/dedup/status')).json()}catch{return}
+    if(s.running){renderDedupProgress(s);return}
+    clearInterval(dedupTimer);dedupTimer=null;
+    if(s.error)dedupIdle(s.error); else renderSimilarGroups(s.groups||[]);
+  },800);
+}
+function renderDedupProgress(s){
+  const a=document.getElementById('dedup-area');if(!a)return;
+  const pct=s.total?Math.round(100*s.done/s.total):0;
+  a.innerHTML=`<div style="font-size:12px;color:var(--muted);margin-bottom:6px">Fingerprinting ${s.done} / ${s.total||'…'} new videos…</div>
+    <div style="height:6px;background:var(--bg);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--accent);transition:width .3s"></div></div>`;
+}
+function renderSimilarGroups(groups){
+  const a=document.getElementById('dedup-area');if(!a)return;
+  let h=`<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+    <span style="font-size:12px;color:var(--muted)">${groups.length} similar group${groups.length===1?'':'s'}</span>
+    <button onclick="startDedup(this)">⟳ Re-scan</button></div>`;
+  if(!groups.length){h+='<div style="color:var(--muted);font-size:12px">No visually-similar duplicates found across different IDs. 🎉</div>';a.innerHTML=h;return}
+  groups.forEach((g,gi)=>{
+    h+=`<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px">
+      <div style="font-weight:600;font-size:12px;margin-bottom:6px">Group ${gi+1} — ${g.videos.length} copies</div>`;
+    g.videos.forEach(v=>{
+      const tag=v.recommended_keep?'<span style="color:#4ade80">keep</span>':'<span style="color:#f87171">remove</span>';
+      const size=v.file_size?fmtSize(v.file_size):'no video';
+      h+=`<label style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
+        <input type="checkbox" class="sim-chk" data-files='${esc(JSON.stringify(v.files))}' ${v.recommended_keep?'':'checked'}>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.location)}">${esc(v.title)} <span style="color:var(--muted)">· ${esc(v.channel)} · ${size} · [${esc(v.video_id)}]</span></span>
+        ${tag}
+      </label>`;
+    });
+    h+=`</div>`;
+  });
+  h+=`<button class="primary" onclick="removeSimilar(this)">🗑 Remove checked copies</button>`;
+  a.innerHTML=h;
+}
+async function removeSimilar(btn){
+  const chks=[...document.querySelectorAll('.sim-chk:checked')];
+  let paths=[];
+  for(const c of chks){try{paths=paths.concat(JSON.parse(c.dataset.files))}catch{}}
+  if(!paths.length){setStatus('Nothing selected.');return}
+  if(!confirm(`Delete ${paths.length} file(s) across the checked copies? This cannot be undone.`))return;
+  btn.disabled=true;
+  try{
+    const r=await(await api('/api/maintenance/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths})})).json();
+    setStatus(`Removed ${r.removed} file(s)`+(r.errors&&r.errors.length?`, ${r.errors.length} error(s)`:''));
+    await loadLibrary();
+    startDedup(); // re-scan (fingerprints cached) so deleted copies drop out
+  }catch(e){setStatus('Error: '+e.message);btn.disabled=false}
 }
 
 async function removeDuplicates(btn){

@@ -25,6 +25,13 @@ fn have_curl() -> bool {
         .status().map(|s| s.success()).unwrap_or(false)
 }
 
+/// True if `ffmpeg` is usable — the perceptual-dedup test needs it to both
+/// generate fixtures and fingerprint them; it skips otherwise.
+fn have_ffmpeg() -> bool {
+    Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false)
+}
+
 /// A running `yt-offline --web` child against a scratch dir. Killed and
 /// its dir removed on drop.
 struct Server {
@@ -350,4 +357,44 @@ fn full_text_search_indexes_titles_and_descriptions() {
     // An unrelated query does not.
     assert!(!s.get("/api/search?q=quantumchromodynamics").1.contains("vid123"),
             "unrelated query must not hit");
+}
+
+#[test]
+fn perceptual_dedup_groups_reencodes() {
+    if !have_curl() { eprintln!("skip: no curl"); return; }
+    if !have_ffmpeg() { eprintln!("skip: no ffmpeg"); return; }
+    let s = Server::start();
+    let chan = s.dir.join("ch/channels/Demo");
+    std::fs::create_dir_all(&chan).unwrap();
+
+    let gen = |args: &[&str]| {
+        let ok = Command::new("ffmpeg").arg("-nostdin").arg("-y").arg("-loglevel").arg("error")
+            .args(args).status().map(|st| st.success()).unwrap_or(false);
+        assert!(ok, "ffmpeg gen failed: {args:?}");
+    };
+    let orig = chan.join("orig [aaa].mp4");
+    let reenc = chan.join("reenc [bbb].mp4");
+    let diff = chan.join("diff [ccc].mp4");
+    gen(&["-f","lavfi","-i","testsrc=duration=20:size=640x480:rate=10", orig.to_str().unwrap()]);
+    gen(&["-i", orig.to_str().unwrap(), "-vf","scale=320:240","-r","15","-c:v","libx264","-crf","38", reenc.to_str().unwrap()]);
+    gen(&["-f","lavfi","-i","testsrc2=duration=20:size=640x480:rate=10", diff.to_str().unwrap()]);
+    for stem in ["orig [aaa]", "reenc [bbb]", "diff [ccc]"] {
+        std::fs::write(chan.join(format!("{stem}.info.json")), r#"{"duration":20.0}"#).unwrap();
+    }
+
+    assert_eq!(s.post("/api/rescan", "").0, 200);
+    assert_eq!(s.post("/api/maintenance/dedup/scan", "").0, 200);
+
+    // Poll until the background job finishes (fingerprinting 3 short clips).
+    let mut body = String::new();
+    for _ in 0..160 {
+        let (_, b) = s.get("/api/maintenance/dedup/status");
+        if field(&b, "running") == Some("false") { body = b; break; }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(field(&body, "running") == Some("false"), "dedup job never finished: {body}");
+    // orig + its re-encode group together; the unrelated clip stays out.
+    assert!(body.contains("aaa"), "group should contain orig: {body}");
+    assert!(body.contains("bbb"), "group should contain the re-encode: {body}");
+    assert!(!body.contains("ccc"), "unrelated video must not be grouped: {body}");
 }

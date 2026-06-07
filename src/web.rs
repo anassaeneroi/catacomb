@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path as StdPath, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -133,6 +133,43 @@ pub struct WebState {
     /// re-serializing. The Arc lets concurrent responses share one
     /// allocation. Cleared / replaced lazily on the next miss.
     pub library_body_cache: Mutex<Option<(u64, std::sync::Arc<String>)>>,
+    /// Background perceptual-dedup job state. The expensive fingerprint pass
+    /// runs on its own thread; this carries live progress + the last result
+    /// so `/api/maintenance/dedup/status` can be polled. `Arc` so the worker
+    /// thread can hold a handle past the request that started it.
+    pub dedup: std::sync::Arc<DedupState>,
+}
+
+/// Live state for the background perceptual-dedup job (see
+/// [`post_dedup_scan`]). One job runs at a time, guarded by `running`.
+#[derive(Default)]
+pub struct DedupState {
+    running: AtomicBool,
+    done: AtomicUsize,
+    total: AtomicUsize,
+    result: Mutex<Option<Vec<SimilarGroup>>>,
+    error: Mutex<Option<String>>,
+}
+
+/// One video in a perceptual-similarity group, with everything the review UI
+/// needs to show it and (optionally) delete its files.
+#[derive(serde::Serialize, Clone)]
+pub struct SimilarVideo {
+    video_id: String,
+    title: String,
+    channel: String,
+    location: String,
+    file_size: Option<u64>,
+    /// Absolute paths of the video + its sidecars, for the delete action.
+    files: Vec<String>,
+    /// The copy the UI recommends keeping (largest file in the group).
+    recommended_keep: bool,
+}
+
+/// A cluster of videos that share visual content across different IDs.
+#[derive(serde::Serialize, Clone)]
+pub struct SimilarGroup {
+    videos: Vec<SimilarVideo>,
 }
 
 /// Failed-login tracking entry. After [`LOGIN_LOCKOUT_AFTER`] failures from
@@ -1976,6 +2013,132 @@ struct RemoveRequest {
     paths: Vec<PathBuf>,
 }
 
+/// `POST /api/maintenance/dedup/scan` — start (or no-op if already running)
+/// the background perceptual-dedup pass. Fingerprints any new/changed videos
+/// (cached by mtime), then groups by visual similarity. Returns immediately;
+/// poll `/api/maintenance/dedup/status` for progress + results.
+async fn post_dedup_scan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    if state.dedup.running.swap(true, Ordering::SeqCst) {
+        return Json(serde_json::json!({ "started": false, "running": true }));
+    }
+    state.dedup.done.store(0, Ordering::Relaxed);
+    state.dedup.total.store(0, Ordering::Relaxed);
+    *state.dedup.error.lock_recover() = None;
+
+    // Snapshot what the worker needs from the library (cheap clones of paths +
+    // display strings) so it doesn't hold the lock during the ffmpeg pass.
+    let (inputs, by_path, valid_paths) = {
+        let lib = state.library.lock_recover();
+        let root = state.library_root.clone();
+        let mut inputs: Vec<crate::fingerprint::FpInput> = Vec::new();
+        let mut by_path: HashMap<String, SimilarVideo> = HashMap::new();
+        let mut valid_paths: HashSet<String> = HashSet::new();
+        for ch in lib.iter() {
+            let channel = ch.name.clone();
+            let videos = ch.videos.iter().chain(ch.playlists.iter().flat_map(|p| p.videos.iter()));
+            for v in videos {
+                let Some(vp) = &v.video_path else { continue }; // need a real file
+                let path_str = vp.display().to_string();
+                valid_paths.insert(path_str.clone());
+                inputs.push(crate::fingerprint::FpInput {
+                    path: vp.clone(),
+                    mtime_unix: v.mtime_unix.map(|m| m as i64).unwrap_or(0),
+                    video_id: v.id.clone(),
+                    duration_secs: v.duration_secs.unwrap_or(0.0),
+                });
+                let mut files = vec![path_str.clone()];
+                for p in [v.thumb_path.as_ref(), v.info_path.as_ref(), v.description_path.as_ref()]
+                    .into_iter().flatten() { files.push(p.display().to_string()); }
+                for s in &v.subtitles { files.push(s.path.display().to_string()); }
+                let location = vp.parent()
+                    .map(|d| d.strip_prefix(&root).unwrap_or(d).display().to_string())
+                    .unwrap_or_default();
+                by_path.insert(path_str, SimilarVideo {
+                    video_id: v.id.clone(), title: v.title.clone(), channel: channel.clone(),
+                    location, file_size: v.file_size, files, recommended_keep: false,
+                });
+            }
+        }
+        (inputs, by_path, valid_paths)
+    };
+
+    let db = state.db.clone();
+    let dedup = state.dedup.clone();
+    std::thread::spawn(move || run_dedup(db, dedup, inputs, by_path, valid_paths));
+    Json(serde_json::json!({ "started": true }))
+}
+
+/// `GET /api/maintenance/dedup/status` — progress + results of the dedup job.
+async fn get_dedup_status(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let d = &state.dedup;
+    Json(serde_json::json!({
+        "running": d.running.load(Ordering::Relaxed),
+        "done":    d.done.load(Ordering::Relaxed),
+        "total":   d.total.load(Ordering::Relaxed),
+        "groups":  d.result.lock_recover().clone(),
+        "error":   d.error.lock_recover().clone(),
+    }))
+}
+
+/// Worker body for the dedup job: mtime-gate, fingerprint the missing videos
+/// in parallel, prune vanished entries, then group by visual similarity and
+/// stash the result. Always clears `running` on exit.
+fn run_dedup(
+    db: Database,
+    dedup: std::sync::Arc<DedupState>,
+    inputs: Vec<crate::fingerprint::FpInput>,
+    by_path: HashMap<String, SimilarVideo>,
+    valid_paths: HashSet<String>,
+) {
+    use crate::fingerprint;
+    let outcome: Result<Vec<SimilarGroup>, String> = (|| {
+        let known = db.fingerprint_mtimes().map_err(|e| e.to_string())?;
+        let todo: Vec<fingerprint::FpInput> = inputs
+            .into_iter()
+            .filter(|i| known.get(&i.path.display().to_string()) != Some(&i.mtime_unix))
+            .collect();
+        dedup.total.store(todo.len(), Ordering::Relaxed);
+
+        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let computed = fingerprint::compute_batch(todo, workers, &dedup.done);
+        for c in &computed {
+            let _ = db.upsert_fingerprint(
+                &c.input.path.display().to_string(), c.input.mtime_unix,
+                &c.input.video_id, c.input.duration_secs, &c.hashes,
+            );
+        }
+        let _ = db.prune_fingerprints(&valid_paths);
+
+        let stored = db.load_fingerprints().map_err(|e| e.to_string())?;
+        let records: Vec<fingerprint::FpRecord> = stored.iter().map(|s| fingerprint::FpRecord {
+            video_id: s.video_id.clone(), duration_secs: s.duration_secs, hashes: s.hashes.clone(),
+        }).collect();
+        let groups_idx = fingerprint::group_similar(
+            &records, fingerprint::DEFAULT_DUR_TOL,
+            fingerprint::DEFAULT_MAX_HAM, fingerprint::DEFAULT_MIN_MATCH,
+        );
+
+        let mut groups = Vec::new();
+        for g in groups_idx {
+            let mut vids: Vec<SimilarVideo> =
+                g.iter().filter_map(|&i| by_path.get(&stored[i].path).cloned()).collect();
+            if vids.len() < 2 { continue; } // stale paths dropped out
+            // Recommend keeping the largest file (best quality) in each group.
+            let keep = vids.iter().enumerate()
+                .max_by_key(|(_, v)| v.file_size.unwrap_or(0)).map(|(i, _)| i);
+            for (i, v) in vids.iter_mut().enumerate() { v.recommended_keep = Some(i) == keep; }
+            groups.push(SimilarGroup { videos: vids });
+        }
+        Ok(groups)
+    })();
+
+    match outcome {
+        Ok(groups) => *dedup.result.lock_recover() = Some(groups),
+        Err(e) => *dedup.error.lock_recover() = Some(e),
+    }
+    dedup.running.store(false, Ordering::SeqCst);
+}
+
 /// `POST /api/maintenance/remove` — delete the listed duplicate files.
 /// Paths outside the library root are refused.
 async fn post_maintenance_remove(
@@ -2611,6 +2774,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         progress_tx,
         login_attempts: Mutex::new(HashMap::new()),
         library_body_cache: Mutex::new(None),
+        dedup: std::sync::Arc::new(DedupState::default()),
     });
 
     // Broadcast progress snapshots to WebSocket subscribers. Ticks fast
@@ -2721,6 +2885,8 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/plex/generate", post(post_plex_generate))
         .route("/api/maintenance/scan", get(get_maintenance_scan))
         .route("/api/maintenance/remove", post(post_maintenance_remove))
+        .route("/api/maintenance/dedup/scan", post(post_dedup_scan))
+        .route("/api/maintenance/dedup/status", get(get_dedup_status))
         .route("/api/maintenance/repair/:id", post(post_maintenance_repair))
         .route("/api/cookies", get(get_cookies).post(post_cookies).delete(delete_cookies))
         .route("/api/scheduler/run", post(post_scheduler_run))
