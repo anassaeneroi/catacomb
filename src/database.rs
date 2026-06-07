@@ -59,6 +59,15 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// One video's stored perceptual fingerprint, loaded for dedup grouping.
+#[derive(Clone, Debug)]
+pub struct StoredFingerprint {
+    pub path: String,
+    pub video_id: String,
+    pub duration_secs: f64,
+    pub hashes: Vec<u64>,
+}
+
 /// Build a safe FTS5 MATCH expression from free-form user input: each
 /// whitespace token becomes a quoted prefix term, AND-ed together. Quoting
 /// neutralizes FTS5 operators in the input; the trailing `*` gives
@@ -243,6 +252,17 @@ impl Database {
             CREATE TABLE IF NOT EXISTS search_meta (
                 video_id   TEXT PRIMARY KEY,
                 mtime_unix INTEGER NOT NULL
+            );
+            -- Perceptual fingerprints for content-aware dedup (see
+            -- [`crate::fingerprint`]). Keyed by file path + mtime like
+            -- info_cache, so each video is hashed once and reused. `hashes`
+            -- is a comma-separated list of decimal u64 frame dHashes.
+            CREATE TABLE IF NOT EXISTS video_fingerprint (
+                path          TEXT PRIMARY KEY,
+                mtime_unix    INTEGER NOT NULL,
+                video_id      TEXT NOT NULL,
+                duration_secs REAL,
+                hashes        TEXT NOT NULL
             );",
         )?;
 
@@ -1033,6 +1053,74 @@ impl Database {
         })?;
         rows.collect()
     }
+
+    /// `path -> mtime` for every fingerprinted video, so a caller can skip
+    /// re-hashing files that haven't changed.
+    pub fn fingerprint_mtimes(&self) -> Result<HashMap<String, i64>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT path, mtime_unix FROM video_fingerprint")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut map = HashMap::new();
+        for row in rows { let (p, m) = row?; map.insert(p, m); }
+        Ok(map)
+    }
+
+    /// Store (or replace) one video's perceptual fingerprint. `hashes` is
+    /// serialized as a comma-separated decimal list.
+    pub fn upsert_fingerprint(
+        &self, path: &str, mtime_unix: i64, video_id: &str,
+        duration_secs: f64, hashes: &[u64],
+    ) -> Result<()> {
+        let blob = hashes.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(",");
+        self.conn().execute(
+            "INSERT OR REPLACE INTO video_fingerprint
+                (path, mtime_unix, video_id, duration_secs, hashes)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![path, mtime_unix, video_id, duration_secs, blob],
+        )?;
+        Ok(())
+    }
+
+    /// Load every stored fingerprint for grouping. Rows with unparsable or
+    /// empty hash lists are skipped (a failed fingerprint shouldn't poison the
+    /// scan).
+    pub fn load_fingerprints(&self) -> Result<Vec<StoredFingerprint>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT path, video_id, duration_secs, hashes FROM video_fingerprint")?;
+        let rows = stmt.query_map([], |r| {
+            let hashes: String = r.get(3)?;
+            let hashes = hashes.split(',').filter_map(|s| s.parse::<u64>().ok()).collect::<Vec<_>>();
+            Ok(StoredFingerprint {
+                path: r.get(0)?,
+                video_id: r.get(1)?,
+                duration_secs: r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                hashes,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows { let f = row?; if !f.hashes.is_empty() { out.push(f); } }
+        Ok(out)
+    }
+
+    /// Drop fingerprints whose file path is no longer in `valid_paths`.
+    /// Returns the number evicted.
+    pub fn prune_fingerprints(&self, valid_paths: &HashSet<String>) -> Result<usize> {
+        let conn = self.conn();
+        let existing: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT path FROM video_fingerprint")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        let mut n = 0;
+        for p in existing {
+            if !valid_paths.contains(&p) {
+                conn.execute("DELETE FROM video_fingerprint WHERE path = ?1", [&p])?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
 }
 
 /// Per-table row counts that landed in the live DB during a restore.
@@ -1105,6 +1193,37 @@ mod search_tests {
         // Garbage / empty queries return nothing, not an error.
         assert!(db.search_videos("", 10).unwrap().is_empty());
         assert!(db.search_videos("   \"  ", 10).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_db_tests {
+    use super::*;
+
+    #[test]
+    fn store_load_replace_prune() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_fingerprint("/a.mkv", 10, "vid-a", 120.0, &[1, 2, 3]).unwrap();
+        db.upsert_fingerprint("/b.mkv", 20, "vid-b", 121.0, &[4, 5, 6]).unwrap();
+
+        let m = db.fingerprint_mtimes().unwrap();
+        assert_eq!(m.get("/a.mkv"), Some(&10));
+        assert_eq!(m.len(), 2);
+
+        let fps = db.load_fingerprints().unwrap();
+        assert_eq!(fps.len(), 2);
+        let a = fps.iter().find(|f| f.video_id == "vid-a").unwrap();
+        assert_eq!(a.hashes, vec![1, 2, 3]);
+        assert_eq!(a.duration_secs, 120.0);
+
+        // Re-upsert replaces (same path PK) and updates the mtime.
+        db.upsert_fingerprint("/a.mkv", 11, "vid-a", 120.0, &[9]).unwrap();
+        assert_eq!(db.fingerprint_mtimes().unwrap().get("/a.mkv"), Some(&11));
+
+        // Prune drops anything not in the keep set.
+        let keep: HashSet<String> = ["/a.mkv".to_string()].into_iter().collect();
+        assert_eq!(db.prune_fingerprints(&keep).unwrap(), 1);
+        assert_eq!(db.load_fingerprints().unwrap().len(), 1);
     }
 }
 
