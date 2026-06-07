@@ -14,8 +14,9 @@ Twitch/etc. AGPL-3.0. North-star goal and feature-parity tracking live in
 
 ```bash
 cargo build --release           # the binary (release profile is opt-level=3 + thin LTO, ~1-2 min)
-cargo test --release            # all unit tests (fast; no network)
+cargo test --release            # unit tests + tests/api.rs integration tests (no network)
 cargo test --release <name>     # single test by substring, e.g. `cargo test --release subs_disabled`
+cargo test --release real_ffmpeg -- --ignored   # opt-in: real-ffmpeg fingerprint accuracy/speed check
 ./target/release/yt-offline           # desktop GUI mode (default)
 ./target/release/yt-offline --web 8080  # headless web server on a port
 
@@ -34,6 +35,11 @@ scratch dir with a minimal `config.toml` (`[backup]\ndirectory = "..."`) and run
 `--web <port>` from inside it. `/api/*` endpoints require auth when a password is
 set in the target library's DB.
 
+`tests/api.rs` automates exactly this: it spawns the real `--web` binary against a
+throwaway dir and drives the HTTP API with `curl` (skipping if curl is absent; the
+dedup test also needs ffmpeg and skips without it). That's the place to add
+end-to-end coverage of a new endpoint.
+
 ## Architecture
 
 ### Two front-ends, one engine
@@ -48,12 +54,15 @@ add download behavior, it goes in `Downloader` and is automatically available to
 both UIs.
 
 `poll()` also drives the cross-cutting job machinery: **auto-retry** of transient
-failures (rate-limit/network) with cooldown + adaptive throttle, and the
-**post-download ffmpeg transcode** pass. These work by capturing specs onto the
-`Job` at `start()` time (`RetrySpec`, `ConvertSpec`) and acting on them when the
-job transitions state — the `pending_*_spec` fields on `Downloader` are stashed
-by `start()` and consumed by `enqueue()`/`spawn_job()` so the four non-download
-enqueue paths (repair/music/yt-dlp-update/pot-update) stay untouched.
+failures (rate-limit/network) with cooldown + adaptive throttle, the
+**post-download ffmpeg transcode** pass, and the **hang watchdog** (a job whose
+`last_activity` is silent past `HANG_TIMEOUT` is SIGKILLed and re-queued —
+classified `NetworkError` so the existing retry path re-issues it). The first two
+work by capturing specs onto the `Job` at `start()` time (`RetrySpec`,
+`ConvertSpec`) and acting on them when the job transitions state — the
+`pending_*_spec` fields on `Downloader` are stashed by `start()` and consumed by
+`enqueue()`/`spawn_job()` so the four non-download enqueue paths
+(repair/music/yt-dlp-update/pot-update) stay untouched.
 
 ### Settings flow (the easy thing to get wrong)
 
@@ -67,7 +76,8 @@ silently half-works:
 5. Seed the `Downloader` field at construction **and** on settings-save, in **both** `app.rs` and `web.rs`.
 
 Grep an existing setting end-to-end before adding one — `subtitle_defaults`,
-`youtube_player_clients`, and `convert_defaults` are complete worked examples.
+`youtube_player_clients`, `sponsorblock_mode`, and `convert_defaults` are
+complete worked examples.
 
 ### Filesystem layout invariant
 
@@ -85,16 +95,30 @@ re-parsing unchanged `info.json` sidecars.
 `Clone` — the pool is an `Arc`, so the parallel scanner takes its own handle).
 Schema lives in `init_schema()`; new columns are added via idempotent
 `ALTER TABLE … ADD COLUMN` that swallows the duplicate-column error (no migration
-framework). The web UI holds library/notes snapshots in memory and mutating
-endpoints mirror DB writes onto those caches + `bump_library_version()` (the
-ETag) so `/api/library` stays consistent without a rescan.
+framework). **Exception:** FTS5 virtual tables have no `ADD COLUMN`, so the
+`video_search` index is migrated by dropping + recreating it and clearing
+`search_meta` to force a one-time reindex (it's a derived cache — safe to rebuild;
+see the `transcript`-column migration). The web UI holds library/notes snapshots
+in memory and mutating endpoints mirror DB writes onto those caches +
+`bump_library_version()` (the ETag) so `/api/library` stays consistent without a
+rescan.
+
+Three `(path|video_id, mtime)`-keyed caches let expensive work happen once and be
+skipped on unchanged files: `info_cache` (parsed `info.json` fields),
+`search_meta` + the `video_search` FTS5 index (full-text title/channel/
+description/**transcript**), and `video_fingerprint` (perceptual dHashes). Each
+has a `sync_*`/rebuild helper that diffs the current library against stored mtimes,
+processes only the new/changed rows, and prunes vanished ones.
 
 ### Web UI is one embedded file
 
 `web_ui/index.html` is the entire SPA (HTML+CSS+JS), `include_str!`-baked into
 the binary at compile time — editing it requires a rebuild to take effect. It's
 served with `Cache-Control: no-store` so binary upgrades don't strand stale tabs.
-Progress streams over `/ws/progress` (WebSocket) with HTTP-poll fallback.
+Progress streams over `/ws/progress` (WebSocket) with HTTP-poll fallback. The JS
+isn't unit-testable, so syntax-check it after edits by extracting the inline
+`<script>` and running `node --check` (a syntax error there silently breaks the
+whole SPA — a `cargo build` won't catch it since the HTML is just a string).
 
 ### Bundled toolchain & anti-bot
 
@@ -107,6 +131,26 @@ silently produces no tokens — see the module doc). `error_class.rs` pattern-
 matches yt-dlp stderr into actionable classes (the captcha "Video unavailable"
 wall is classified RateLimited, not NotFound — order matters in `classify()`).
 
+### Search & perceptual dedup
+
+`Database::sync_search_index` feeds the `video_search` FTS5 index from
+`library::build_search_entries`; it's refreshed after every scan (construction,
+rescan, maintenance-remove) in both UIs and reads each video's description +
+first subtitle (via `vtt::parse`) only when the mtime changed. `search_videos`
+returns ranked hits with a `snippet(…, -1, …)` excerpt (column -1 = best-matching
+column).
+
+`fingerprint.rs` is the content-aware dedup engine: ffmpeg keyframe-seek samples
+6 frames/video → 9×8 grayscale → 64-bit dHash; `group_similar` clusters by
+Hamming distance but only within a duration-tolerance window (sorted sliding
+window + union-find) to stay near-linear. `rebuild_and_group` is the shared
+pipeline (mtime-gate → parallel `compute_batch` → upsert → prune → group) both
+UIs call. Because that pass is slow, it runs as a **background job**: web keeps a
+`DedupState` (atomics for progress + `Mutex` for the result) polled via
+`/api/maintenance/dedup/status`; desktop spawns a thread and delivers the result
+over an `mpsc` channel. `vtt.rs` is a small shared WebVTT/SRT cue parser used by
+both the transcript indexer and the transcript viewers.
+
 ## Conventions
 
 - **Never commit** `cookies.txt` (live session creds), `config.toml` (user-
@@ -116,7 +160,8 @@ wall is classified RateLimited, not NotFound — order matters in `classify()`).
   (`redact_sensitive` in `downloader.rs`) — it leaks `$HOME`.
 - `app.rs` and `web.rs` are large (~3–4k lines) because each owns a full UI; new
   desktop code goes in `app.rs`, web handlers in `web.rs`, shared logic in the
-  focused modules (`downloader`, `database`, `library`, `platform`, …).
+  focused modules (`downloader`, `database`, `library`, `platform`, `fingerprint`,
+  `vtt`, …).
 - Tray (`ksni`) and file dialogs (`rfd` xdg-portal) are Linux-only/no-GTK by
   design; keep that posture (it's why packaging avoids a GTK dep). Windows/macOS
   are not yet first-class — the tray would need a per-OS backend.
