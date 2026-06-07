@@ -2090,47 +2090,23 @@ fn run_dedup(
     by_path: HashMap<String, SimilarVideo>,
     valid_paths: HashSet<String>,
 ) {
-    use crate::fingerprint;
-    let outcome: Result<Vec<SimilarGroup>, String> = (|| {
-        let known = db.fingerprint_mtimes().map_err(|e| e.to_string())?;
-        let todo: Vec<fingerprint::FpInput> = inputs
-            .into_iter()
-            .filter(|i| known.get(&i.path.display().to_string()) != Some(&i.mtime_unix))
-            .collect();
-        dedup.total.store(todo.len(), Ordering::Relaxed);
-
-        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let computed = fingerprint::compute_batch(todo, workers, &dedup.done);
-        for c in &computed {
-            let _ = db.upsert_fingerprint(
-                &c.input.path.display().to_string(), c.input.mtime_unix,
-                &c.input.video_id, c.input.duration_secs, &c.hashes,
-            );
-        }
-        let _ = db.prune_fingerprints(&valid_paths);
-
-        let stored = db.load_fingerprints().map_err(|e| e.to_string())?;
-        let records: Vec<fingerprint::FpRecord> = stored.iter().map(|s| fingerprint::FpRecord {
-            video_id: s.video_id.clone(), duration_secs: s.duration_secs, hashes: s.hashes.clone(),
-        }).collect();
-        let groups_idx = fingerprint::group_similar(
-            &records, fingerprint::DEFAULT_DUR_TOL,
-            fingerprint::DEFAULT_MAX_HAM, fingerprint::DEFAULT_MIN_MATCH,
-        );
-
-        let mut groups = Vec::new();
-        for g in groups_idx {
-            let mut vids: Vec<SimilarVideo> =
-                g.iter().filter_map(|&i| by_path.get(&stored[i].path).cloned()).collect();
-            if vids.len() < 2 { continue; } // stale paths dropped out
-            // Recommend keeping the largest file (best quality) in each group.
-            let keep = vids.iter().enumerate()
-                .max_by_key(|(_, v)| v.file_size.unwrap_or(0)).map(|(i, _)| i);
-            for (i, v) in vids.iter_mut().enumerate() { v.recommended_keep = Some(i) == keep; }
-            groups.push(SimilarGroup { videos: vids });
-        }
-        Ok(groups)
-    })();
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let outcome: Result<Vec<SimilarGroup>, String> =
+        crate::fingerprint::rebuild_and_group(&db, inputs, &valid_paths, workers, &dedup.done, &dedup.total)
+            .map(|path_groups| {
+                let mut groups = Vec::new();
+                for paths in path_groups {
+                    let mut vids: Vec<SimilarVideo> =
+                        paths.iter().filter_map(|p| by_path.get(p).cloned()).collect();
+                    if vids.len() < 2 { continue; } // stale paths dropped out
+                    // Recommend keeping the largest file (best quality).
+                    let keep = vids.iter().enumerate()
+                        .max_by_key(|(_, v)| v.file_size.unwrap_or(0)).map(|(i, _)| i);
+                    for (i, v) in vids.iter_mut().enumerate() { v.recommended_keep = Some(i) == keep; }
+                    groups.push(SimilarGroup { videos: vids });
+                }
+                groups
+            });
 
     match outcome {
         Ok(groups) => *dedup.result.lock_recover() = Some(groups),

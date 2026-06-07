@@ -265,6 +265,49 @@ pub const DEFAULT_DUR_TOL: f64 = 3.0;
 pub const DEFAULT_MAX_HAM: u32 = 8;
 pub const DEFAULT_MIN_MATCH: usize = 3;
 
+/// The whole dedup pipeline, shared by both front-ends: mtime-gate `inputs`
+/// against what's stored, fingerprint the new/changed ones in parallel
+/// (bumping `progress`, after first storing the count in `total`), upsert,
+/// prune anything not in `valid_paths`, then group by visual similarity.
+/// Returns groups (≥2) of **file paths**; each UI maps those to its own
+/// display rows. Errors are DB errors stringified.
+pub fn rebuild_and_group(
+    db: &crate::database::Database,
+    inputs: Vec<FpInput>,
+    valid_paths: &std::collections::HashSet<String>,
+    workers: usize,
+    progress: &std::sync::atomic::AtomicUsize,
+    total: &std::sync::atomic::AtomicUsize,
+) -> Result<Vec<Vec<String>>, String> {
+    use std::sync::atomic::Ordering;
+    let known = db.fingerprint_mtimes().map_err(|e| e.to_string())?;
+    let todo: Vec<FpInput> = inputs
+        .into_iter()
+        .filter(|i| known.get(&i.path.display().to_string()) != Some(&i.mtime_unix))
+        .collect();
+    total.store(todo.len(), Ordering::Relaxed);
+
+    let computed = compute_batch(todo, workers, progress);
+    for c in &computed {
+        let _ = db.upsert_fingerprint(
+            &c.input.path.display().to_string(), c.input.mtime_unix,
+            &c.input.video_id, c.input.duration_secs, &c.hashes,
+        );
+    }
+    let _ = db.prune_fingerprints(valid_paths);
+
+    let stored = db.load_fingerprints().map_err(|e| e.to_string())?;
+    let records: Vec<FpRecord> = stored.iter().map(|s| FpRecord {
+        video_id: s.video_id.clone(), duration_secs: s.duration_secs, hashes: s.hashes.clone(),
+    }).collect();
+    let groups_idx =
+        group_similar(&records, DEFAULT_DUR_TOL, DEFAULT_MAX_HAM, DEFAULT_MIN_MATCH);
+    Ok(groups_idx
+        .into_iter()
+        .map(|g| g.into_iter().map(|i| stored[i].path.clone()).collect())
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
