@@ -29,6 +29,7 @@ mod pot_provider;
 mod stats;
 mod theme;
 mod tray;
+mod util;
 mod web;
 mod ytdlp_bin;
 

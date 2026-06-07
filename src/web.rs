@@ -43,6 +43,7 @@ use tower_http::services::ServeDir;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::SaltString;
 
+use crate::util::LockExt;
 use crate::config::Config;
 use crate::database::Database;
 use crate::downloader::{DownloadQuality, Downloader, JobState};
@@ -868,7 +869,7 @@ fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
 /// `sessions` map doesn't grow without bound for users who never log out.
 fn is_authed(state: &WebState, headers: &HeaderMap) -> bool {
     let Some(token) = session_token_from_headers(headers) else { return false };
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock_recover();
     let now = std::time::Instant::now();
     // Lazy prune: drop anything older than the TTL.
     sessions.retain(|_, issued| now.duration_since(*issued) < SESSION_TTL);
@@ -933,7 +934,7 @@ async fn post_login(
     let now = std::time::Instant::now();
     // Check lockout first.
     {
-        let mut attempts = state.login_attempts.lock().unwrap();
+        let mut attempts = state.login_attempts.lock_recover();
         // GC entries whose lockout has elapsed.
         attempts.retain(|_, a| a.until.map_or(true, |u| u > now));
         if let Some(a) = attempts.get(&ip) {
@@ -951,7 +952,7 @@ async fn post_login(
         return (StatusCode::OK, "no password set").into_response();
     };
     if !verify_password(&body.password, &hash) {
-        let mut attempts = state.login_attempts.lock().unwrap();
+        let mut attempts = state.login_attempts.lock_recover();
         let entry = attempts.entry(ip).or_insert(LoginAttempt { failures: 0, until: None });
         entry.failures += 1;
         if entry.failures >= LOGIN_LOCKOUT_AFTER {
@@ -961,10 +962,10 @@ async fn post_login(
         return (StatusCode::UNAUTHORIZED, "invalid password").into_response();
     }
     // Success: reset the failure counter for this IP.
-    state.login_attempts.lock().unwrap().remove(&ip);
+    state.login_attempts.lock_recover().remove(&ip);
 
     let token = generate_session_token();
-    state.sessions.lock().unwrap().insert(token.clone(), now);
+    state.sessions.lock_recover().insert(token.clone(), now);
     let cookie = session_cookie(&token, &headers, SESSION_TTL.as_secs());
     ([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response()
 }
@@ -975,7 +976,7 @@ async fn post_logout(
     headers: HeaderMap,
 ) -> Response {
     if let Some(token) = session_token_from_headers(&headers) {
-        state.sessions.lock().unwrap().remove(&token);
+        state.sessions.lock_recover().remove(&token);
     }
     let cookie = session_cookie("", &headers, 0);
     ([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response()
@@ -1079,7 +1080,7 @@ async fn get_library(
     // reliably). Serializing a multi-MB library JSON for every reload
     // burns measurable CPU on large installations.
     {
-        let cache = state.library_body_cache.lock().unwrap();
+        let cache = state.library_body_cache.lock_recover();
         if let Some((cached_ver, body)) = cache.as_ref() {
             if *cached_ver == version {
                 let body = body.clone();
@@ -1105,7 +1106,7 @@ async fn get_library(
     let body = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
     if post_version == version {
         let body_arc = std::sync::Arc::new(body.clone());
-        *state.library_body_cache.lock().unwrap() = Some((version, body_arc));
+        *state.library_body_cache.lock_recover() = Some((version, body_arc));
     }
     (
         [
@@ -1118,10 +1119,10 @@ async fn get_library(
 }
 
 async fn build_library_payload(state: &Arc<WebState>) -> LibraryResponse {
-    let lib = state.library.lock().unwrap();
-    let watched = state.watched.lock().unwrap();
-    let positions = state.positions.lock().unwrap();
-    let flags = state.flags.lock().unwrap();
+    let lib = state.library.lock_recover();
+    let watched = state.watched.lock_recover();
+    let positions = state.positions.lock_recover();
+    let flags = state.flags.lock_recover();
     // file_url() now resolves relative to library_root (= parent of
     // channels_root) so non-YouTube platforms are reachable at
     // `/files/<platform>/<creator>/<video>`.
@@ -1208,7 +1209,7 @@ async fn build_library_payload(state: &Arc<WebState>) -> LibraryResponse {
 
 async fn get_music(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let music_root = {
-        let dl = state.downloader.lock().unwrap();
+        let dl = state.downloader.lock_recover();
         dl.music_root()
     };
     let tracks = library::scan_music(&music_root);
@@ -1262,7 +1263,7 @@ async fn ws_progress_handler(
     // Initial snapshot so the UI shows the current state immediately
     // (without waiting up to 5s for the next idle broadcast tick).
     let initial = {
-        let mut dl = state.downloader.lock().unwrap();
+        let mut dl = state.downloader.lock_recover();
         dl.poll();
         let queued = dl.pending_snapshots().into_iter()
             .map(|(label, url)| QueuedSnapshot { label, url })
@@ -1298,7 +1299,7 @@ async fn ws_progress_handler(
 }
 
 async fn get_progress(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    let mut dl = state.downloader.lock().unwrap();
+    let mut dl = state.downloader.lock_recover();
     dl.poll();
     let queued = dl.pending_snapshots().into_iter()
         .map(|(label, url)| QueuedSnapshot { label, url })
@@ -1317,7 +1318,7 @@ async fn post_download(
     if url.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty URL").into_response();
     }
-    let mut dl = state.downloader.lock().unwrap();
+    let mut dl = state.downloader.lock_recover();
     if body.quality == "music" {
         dl.start_music(url);
     } else {
@@ -1342,7 +1343,7 @@ async fn post_watched(
     Path(video_id): Path<String>,
 ) -> impl IntoResponse {
     let db = &state.db;
-    let mut watched = state.watched.lock().unwrap();
+    let mut watched = state.watched.lock_recover();
     let now_watched = !watched.contains(&video_id);
     if let Err(e) = db.set_watched(&video_id, now_watched) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
@@ -1354,7 +1355,7 @@ async fn post_watched(
 }
 
 async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    let cfg = state.config.lock().unwrap();
+    let cfg = state.config.lock_recover();
     let source_url = cfg.web.source_url.clone();
     let port = cfg.web.port;
     let current_bind = cfg.web.bind.clone();
@@ -1372,7 +1373,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     drop(cfg);
 
     let scheduler_next_check_secs = if scheduler_enabled {
-        let last = *state.last_scheduled_check.lock().unwrap();
+        let last = *state.last_scheduled_check.lock_recover();
         let interval_secs = scheduler_interval_hours as u64 * 3600;
         Some(match last {
             None => 0,
@@ -1419,7 +1420,7 @@ async fn post_settings(
     Json(body): Json<SettingsPayload>,
 ) -> impl IntoResponse {
     state.transcode.store(body.transcode, Ordering::Relaxed);
-    let mut cfg = state.config.lock().unwrap();
+    let mut cfg = state.config.lock_recover();
     cfg.web.transcode = body.transcode;
 
     if let Some(new_mode) = &body.bind_mode {
@@ -1477,7 +1478,7 @@ async fn post_settings(
 
     // Apply the new concurrency limit and binary choices to the live downloader.
     {
-        let mut dl = state.downloader.lock().unwrap();
+        let mut dl = state.downloader.lock_recover();
         if body.max_concurrent > 0 {
             dl.max_concurrent = body.max_concurrent;
         }
@@ -1501,15 +1502,15 @@ async fn post_settings(
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}")).into_response();
         }
         // Password changed: drop all existing sessions so they must re-authenticate.
-        state.sessions.lock().unwrap().clear();
+        state.sessions.lock_recover().clear();
         refresh_password_cache(&state);
     }
 
-    let plex_library_path = state.config.lock().unwrap().plex.library_path.as_deref()
+    let plex_library_path = state.config.lock_recover().plex.library_path.as_deref()
         .map(|p| p.display().to_string());
     let download_password_required = state.password_required_cache.load(Ordering::Relaxed);
     let scheduler_next_check_secs = if scheduler_enabled {
-        let last = *state.last_scheduled_check.lock().unwrap();
+        let last = *state.last_scheduled_check.lock_recover();
         let interval_secs = scheduler_interval_hours as u64 * 3600;
         Some(match last {
             None => 0,
@@ -1579,7 +1580,7 @@ async fn get_transcode(
     Path(id): Path<String>,
 ) -> Response {
     let path = {
-        let lib = state.library.lock().unwrap();
+        let lib = state.library.lock_recover();
         find_video_path(&lib, &id)
     };
     let Some(path) = path else {
@@ -1656,7 +1657,7 @@ async fn post_resume(
     // "Continue watching" set). Plain position updates fire every few seconds
     // during playback — invalidating the cache on each would defeat the
     // ETag optimisation.
-    let mut positions = state.positions.lock().unwrap();
+    let mut positions = state.positions.lock_recover();
     let was_resumable = positions.get(&video_id).copied().is_some_and(|p| p > 3.0);
     let db = &state.db;
     if body.position > 3.0 {
@@ -1685,7 +1686,7 @@ async fn get_preview(
     if url.is_empty() {
         return (StatusCode::BAD_REQUEST, "no url").into_response();
     }
-    let use_bundled = state.config.lock().unwrap().backup.use_bundled_ytdlp;
+    let use_bundled = state.config.lock_recover().backup.use_bundled_ytdlp;
     if use_bundled {
         crate::ytdlp_bin::ensure_bundled_executable();
     }
@@ -1706,7 +1707,7 @@ async fn get_preview(
         .arg("--no-warnings");
     // Mirror Downloader::apply_cookie_flags so the preview honors the same
     // cookies precedence (file > browser fallback).
-    let browser = state.config.lock().unwrap().player.browser.clone();
+    let browser = state.config.lock_recover().player.browser.clone();
     if std::path::Path::new("cookies.txt").exists() {
         cmd.arg("--cookies").arg("cookies.txt");
     } else if !browser.is_empty() && browser != "none" {
@@ -1751,7 +1752,7 @@ async fn get_preview(
 }
 
 async fn post_clear_jobs(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    state.downloader.lock().unwrap().clear_finished();
+    state.downloader.lock_recover().clear_finished();
     (StatusCode::OK, "cleared")
 }
 
@@ -1759,7 +1760,7 @@ async fn post_remove_job(
     State(state): State<Arc<WebState>>,
     Path(idx): Path<usize>,
 ) -> impl IntoResponse {
-    state.downloader.lock().unwrap().remove_job(idx);
+    state.downloader.lock_recover().remove_job(idx);
     (StatusCode::OK, "removed")
 }
 
@@ -1768,7 +1769,7 @@ async fn get_chapters(
     Path(video_id): Path<String>,
 ) -> impl IntoResponse {
     let info_path = {
-        let lib = state.library.lock().unwrap();
+        let lib = state.library.lock_recover();
         find_video_info_path(&lib, &video_id)
     };
     let Some(info_path) = info_path else {
@@ -1807,7 +1808,7 @@ async fn get_comments(
     Path(video_id): Path<String>,
 ) -> impl IntoResponse {
     let info_path = {
-        let lib = state.library.lock().unwrap();
+        let lib = state.library.lock_recover();
         find_video_info_path(&lib, &video_id)
     };
     let Some(info_path) = info_path else {
@@ -1850,7 +1851,7 @@ async fn get_metadata(
     Path(video_id): Path<String>,
 ) -> impl IntoResponse {
     let info_path = {
-        let lib = state.library.lock().unwrap();
+        let lib = state.library.lock_recover();
         find_video_info_path(&lib, &video_id)
     };
     let Some(info_path) = info_path else {
@@ -1870,7 +1871,7 @@ async fn get_description(
     State(state): State<Arc<WebState>>,
     Path(video_id): Path<String>,
 ) -> impl IntoResponse {
-    let lib = state.library.lock().unwrap();
+    let lib = state.library.lock_recover();
     if let Some((v, _)) = library::find_video(&lib, &video_id) {
         let text = v.description_path.as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
@@ -1890,9 +1891,9 @@ async fn post_rescan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     }
     // Refresh watched from DB after rescan
     if let Ok(w) = state.db.get_watched() {
-        *state.watched.lock().unwrap() = w;
+        *state.watched.lock_recover() = w;
     }
-    *state.library.lock().unwrap() = new_lib;
+    *state.library.lock_recover() = new_lib;
     bump_library_version(&state);
     (StatusCode::OK, "rescanned")
 }
@@ -1900,13 +1901,13 @@ async fn post_rescan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
 /// `POST /api/plex/generate` — generate (or refresh) the Plex symlink tree.
 async fn post_plex_generate(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let plex_root = {
-        let cfg = state.config.lock().unwrap();
+        let cfg = state.config.lock_recover();
         cfg.plex.library_path.clone()
     };
     let Some(plex_root) = plex_root else {
         return (StatusCode::BAD_REQUEST, "no plex.library_path configured").into_response();
     };
-    let lib = state.library.lock().unwrap();
+    let lib = state.library.lock_recover();
     let result = crate::plex::generate(&lib, &plex_root);
     drop(lib);
     Json(serde_json::json!({
@@ -1917,7 +1918,7 @@ async fn post_plex_generate(State(state): State<Arc<WebState>>) -> impl IntoResp
 
 /// `GET /api/maintenance/scan` — report duplicate videos and missing assets.
 async fn get_maintenance_scan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    let lib = state.library.lock().unwrap();
+    let lib = state.library.lock_recover();
     let report = maintenance::scan(&state.library_root, &lib);
     Json(report)
 }
@@ -1942,7 +1943,7 @@ async fn post_maintenance_remove(
     if let Ok(folder_map) = state.db.get_all_channel_assignments() {
         library::apply_channel_folders(&mut new_lib, &folder_map);
     }
-    *state.library.lock().unwrap() = new_lib;
+    *state.library.lock_recover() = new_lib;
     bump_library_version(&state);
     Json(serde_json::json!({ "removed": removed, "errors": errors }))
 }
@@ -1953,13 +1954,13 @@ async fn post_maintenance_repair(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let target = {
-        let lib = state.library.lock().unwrap();
+        let lib = state.library.lock_recover();
         maintenance::locate(&lib, &id)
     };
     let Some((dir, stem)) = target else {
         return (StatusCode::NOT_FOUND, "video not found in library").into_response();
     };
-    state.downloader.lock().unwrap().repair(&id, &dir, &stem);
+    state.downloader.lock_recover().repair(&id, &dir, &stem);
     (StatusCode::ACCEPTED, "repair queued").into_response()
 }
 
@@ -2047,7 +2048,7 @@ async fn delete_folder(
     match state.db.delete_folder(id) {
         Ok(()) => {
             // Mirror onto the live library snapshot.
-            let mut lib = state.library.lock().unwrap();
+            let mut lib = state.library.lock_recover();
             for ch in lib.iter_mut() {
                 if ch.folder_id == Some(id) {
                     ch.folder_id = None;
@@ -2143,13 +2144,13 @@ async fn post_restore_db(
     // Refresh in-memory caches so the next /api/library reflects the new
     // watched / position / flag rows without waiting for an app restart.
     if let Ok(w) = state.db.get_watched() {
-        *state.watched.lock().unwrap() = w;
+        *state.watched.lock_recover() = w;
     }
     if let Ok(p) = state.db.get_positions() {
-        *state.positions.lock().unwrap() = p;
+        *state.positions.lock_recover() = p;
     }
     if let Ok(f) = state.db.get_video_flags() {
-        *state.flags.lock().unwrap() = f;
+        *state.flags.lock_recover() = f;
     }
     // Bump the library version so cached /api/library responses revalidate.
     bump_library_version(&state);
@@ -2168,11 +2169,11 @@ async fn post_check_folder(
     State(state): State<Arc<WebState>>,
     Path(folder_id): Path<i64>,
 ) -> impl IntoResponse {
-    if state.downloader.lock().unwrap().any_running() {
+    if state.downloader.lock_recover().any_running() {
         return (StatusCode::CONFLICT, "downloads already running").into_response();
     }
     let scheduled: Vec<(String, crate::download_options::DownloadOptions)> =
-        state.library.lock().unwrap()
+        state.library.lock_recover()
             .iter()
             .filter(|ch| ch.folder_id == Some(folder_id))
             .map(|ch| (crate::downloader::recheck_url(ch), ch.download_options.clone()))
@@ -2181,7 +2182,7 @@ async fn post_check_folder(
         return (StatusCode::OK, "no channels in folder").into_response();
     }
     let count = scheduled.len();
-    let mut dl = state.downloader.lock().unwrap();
+    let mut dl = state.downloader.lock_recover();
     for (url, opts) in scheduled {
         let info = classify_url(&url);
         let quality = opts.quality.unwrap_or(DownloadQuality::Best);
@@ -2201,7 +2202,7 @@ async fn post_assign_folder(
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response();
     }
     {
-        let mut lib = state.library.lock().unwrap();
+        let mut lib = state.library.lock_recover();
         for ch in lib.iter_mut() {
             if ch.platform.dir_name() == platform && ch.name == handle {
                 ch.folder_id = body.folder_id;
@@ -2238,7 +2239,7 @@ async fn post_video_flag(
     // Mirror into the in-memory bundle so the next GET /api/library reflects
     // the change without waiting for a rescan.
     {
-        let mut bundle = state.flags.lock().unwrap();
+        let mut bundle = state.flags.lock_recover();
         let target = match set_ref {
             "bookmark" => &mut bundle.bookmark,
             "favourite" => &mut bundle.favourite,
@@ -2318,7 +2319,7 @@ async fn post_channel_options(
     // Push the new options onto the live library snapshot so a re-check
     // triggered before the next rescan still sees them.
     {
-        let mut lib = state.library.lock().unwrap();
+        let mut lib = state.library.lock_recover();
         for ch in lib.iter_mut() {
             if ch.platform.dir_name() == platform && ch.name == handle {
                 ch.download_options = body.clone();
@@ -2340,7 +2341,7 @@ async fn delete_channel_options(
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response();
     }
     {
-        let mut lib = state.library.lock().unwrap();
+        let mut lib = state.library.lock_recover();
         for ch in lib.iter_mut() {
             if ch.platform.dir_name() == platform && ch.name == handle {
                 ch.download_options = Default::default();
@@ -2353,13 +2354,13 @@ async fn delete_channel_options(
 }
 
 async fn post_scheduler_run(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    if state.downloader.lock().unwrap().any_running() {
+    if state.downloader.lock_recover().any_running() {
         return (StatusCode::CONFLICT, "downloads already running").into_response();
     }
     // Snapshot (url, options) pairs so we can iterate without holding the
     // library lock through start().
     let scheduled: Vec<(String, crate::download_options::DownloadOptions)> =
-        state.library.lock().unwrap()
+        state.library.lock_recover()
             .iter()
             .map(|ch| (crate::downloader::recheck_url(ch), ch.download_options.clone()))
             .collect();
@@ -2367,22 +2368,22 @@ async fn post_scheduler_run(State(state): State<Arc<WebState>>) -> impl IntoResp
         return (StatusCode::OK, "no channels to check").into_response();
     }
     let count = scheduled.len();
-    let mut dl = state.downloader.lock().unwrap();
+    let mut dl = state.downloader.lock_recover();
     for (url, opts) in scheduled {
         let info = classify_url(&url);
         let quality = opts.quality.unwrap_or(DownloadQuality::Best);
         dl.start(url, &info, true, quality, false, Some(&opts));
     }
-    *state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
+    *state.last_scheduled_check.lock_recover() = Some(std::time::Instant::now());
     (StatusCode::ACCEPTED, format!("started {count} channel checks")).into_response()
 }
 
 /// `GET /api/stats` — aggregate library statistics (totals, top channels,
 /// per-year upload histogram, per-week download activity).
 async fn get_stats(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    let lib = state.library.lock().unwrap();
-    let watched = state.watched.lock().unwrap();
-    let positions = state.positions.lock().unwrap();
+    let lib = state.library.lock_recover();
+    let watched = state.watched.lock_recover();
+    let positions = state.positions.lock_recover();
     let report = crate::stats::build(&lib, &watched, &positions, crate::stats::now_unix());
     Json(report)
 }
@@ -2390,7 +2391,7 @@ async fn get_stats(State(state): State<Arc<WebState>>) -> impl IntoResponse {
 /// `POST /api/ytdlp/update` — download (or update) the bundled yt-dlp + deno
 /// binaries. Streams output through a regular [`Job`] entry.
 async fn post_ytdlp_update(State(state): State<Arc<WebState>>) -> impl IntoResponse {
-    state.downloader.lock().unwrap().start_ytdlp_update();
+    state.downloader.lock_recover().start_ytdlp_update();
     (StatusCode::ACCEPTED, "started bundled yt-dlp update").into_response()
 }
 
@@ -2405,7 +2406,7 @@ async fn post_pot_update(State(state): State<Arc<WebState>>) -> impl IntoRespons
             "install the bundled yt-dlp first — the POT plugin gets pip-installed into its venv",
         ).into_response();
     }
-    state.downloader.lock().unwrap().start_pot_provider_update();
+    state.downloader.lock_recover().start_pot_provider_update();
     (StatusCode::ACCEPTED, "started POT provider install").into_response()
 }
 
@@ -2570,7 +2571,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         loop {
             // Pick interval based on whether there's anything to report on.
             let interval_ms = {
-                let dl = progress_state.downloader.lock().unwrap();
+                let dl = progress_state.downloader.lock_recover();
                 if dl.any_running() || dl.pending_count() > 0 { 500 } else { 5_000 }
             };
             tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
@@ -2581,7 +2582,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
             // Drive the same poll() that /api/progress does so the snapshot
             // includes the latest stdout/stderr lines.
             let snapshot = {
-                let mut dl = progress_state.downloader.lock().unwrap();
+                let mut dl = progress_state.downloader.lock_recover();
                 dl.poll();
                 let queued = dl.pending_snapshots().into_iter()
                     .map(|(label, url)| QueuedSnapshot { label, url })
@@ -2605,33 +2606,33 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         loop {
             tick.tick().await;
             let (enabled, interval_hours) = {
-                let cfg = sched_state.config.lock().unwrap();
+                let cfg = sched_state.config.lock_recover();
                 (cfg.scheduler.enabled, cfg.scheduler.interval_hours)
             };
             if !enabled { continue; }
-            if sched_state.downloader.lock().unwrap().any_running() { continue; }
+            if sched_state.downloader.lock_recover().any_running() { continue; }
             // Clamp interval defensively. A manually edited config.toml with 0
             // (or accidentally tiny value) would otherwise trigger every tick.
             let safe_hours = interval_hours.max(1);
             let interval_dur = std::time::Duration::from_secs(safe_hours as u64 * 3600);
             let due = {
-                let last = *sched_state.last_scheduled_check.lock().unwrap();
+                let last = *sched_state.last_scheduled_check.lock_recover();
                 last.map_or(true, |t| t.elapsed() >= interval_dur)
             };
             if !due { continue; }
             let scheduled: Vec<(String, crate::download_options::DownloadOptions)> =
-                sched_state.library.lock().unwrap()
+                sched_state.library.lock_recover()
                     .iter()
                     .map(|ch| (crate::downloader::recheck_url(ch), ch.download_options.clone()))
                     .collect();
             if scheduled.is_empty() { continue; }
-            let mut dl = sched_state.downloader.lock().unwrap();
+            let mut dl = sched_state.downloader.lock_recover();
             for (url, opts) in scheduled {
                 let info = classify_url(&url);
                 let quality = opts.quality.unwrap_or(DownloadQuality::Best);
                 dl.start(url, &info, true, quality, false, Some(&opts));
             }
-            *sched_state.last_scheduled_check.lock().unwrap() = Some(std::time::Instant::now());
+            *sched_state.last_scheduled_check.lock_recover() = Some(std::time::Instant::now());
         }
     });
 
