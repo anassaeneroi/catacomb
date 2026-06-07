@@ -100,7 +100,7 @@ pub fn recheck_url(ch: &crate::library::Channel) -> String {
 
 
 /// Lifecycle state of a download job.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JobState {
     Running,
     Done,
@@ -151,6 +151,17 @@ pub struct Job {
     /// Set once we've enqueued the convert pass for this finished job, so
     /// the per-poll scan doesn't enqueue it twice.
     convert_handled: bool,
+    /// OS pid of the child process, captured at spawn. Lets the hang
+    /// watchdog SIGKILL a stalled process (Unix). `None` for synthetic
+    /// jobs (preflight failures) that have no process.
+    child_pid: Option<u32>,
+    /// Last time this job produced any output/progress. The watchdog kills
+    /// a Running job whose `last_activity` is older than [`HANG_TIMEOUT`].
+    last_activity: std::time::Instant,
+    /// True when the watchdog killed this job (vs. a genuine yt-dlp exit).
+    /// On the resulting failure we force a retryable class so auto-retry
+    /// re-queues it — a hang is transient, worth one more try.
+    watchdog_killed: bool,
     rx: Receiver<Msg>,
 }
 
@@ -214,17 +225,30 @@ const MAX_AUTO_RETRIES: u8 = 2;
 /// rate-limit window pass; short enough that the user isn't left waiting.
 const AUTO_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// A Running job that produces no output/progress for this long is
+/// considered hung and gets SIGKILLed by the watchdog. Chosen well above
+/// any legitimate quiet gap: yt-dlp prints a progress line per chunk
+/// while downloading, polls every 30 s under `--wait-for-video`, and our
+/// longest configured sleep (retry-sleep cap / adaptive throttle) is
+/// ~30 s — so 5 minutes of total silence means a real stall (a stuck TLS
+/// handshake or unresponsive server), not slow-but-alive progress.
+const HANG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 impl Job {
     fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Line(line) => {
+                    self.last_activity = std::time::Instant::now();
                     self.log.push_back(line);
                     while self.log.len() > JOB_LOG_CAP {
                         self.log.pop_front();
                     }
                 }
-                Msg::Progress(p) => self.progress = p,
+                Msg::Progress(p) => {
+                    self.last_activity = std::time::Instant::now();
+                    self.progress = p;
+                }
                 Msg::Finished(ok) => {
                     self.state = if ok { JobState::Done } else { JobState::Failed };
                     // Classify only on the failure transition so the
@@ -232,9 +256,15 @@ impl Job {
                     // long-finished job. The log is already in `self.log`
                     // by this point since we drained Line messages above.
                     if !ok && self.failure_class.is_none() {
-                        self.failure_class = Some(crate::error_class::classify(
-                            self.log.iter().map(|s| s.as_str()),
-                        ));
+                        self.failure_class = Some(if self.watchdog_killed {
+                            // A watchdog kill leaves no telltale error line, so
+                            // classify() would return Other (non-retryable).
+                            // Force NetworkError: a hang is transient and the
+                            // auto-retry path should give it another go.
+                            crate::error_class::ErrorClass::NetworkError
+                        } else {
+                            crate::error_class::classify(self.log.iter().map(|s| s.as_str()))
+                        });
                     }
                 }
             }
@@ -880,16 +910,23 @@ impl Downloader {
             .display()
             .to_string();
 
-        thread::spawn(move || {
-            let mut child = match cmd.spawn() {
-                Ok(child) => child,
-                Err(err) => {
-                    let _ = tx.send(Msg::Line(format!("could not launch yt-dlp: {err}")));
-                    let _ = tx.send(Msg::Finished(false));
-                    return;
-                }
-            };
+        // Spawn the child *before* the reader thread so we can capture its
+        // pid for the hang watchdog (the thread then owns the Child and
+        // does the blocking wait()). On spawn failure, push a synthetic
+        // failed job and bail.
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                self.push_synthetic_failure(
+                    url, label, crate::error_class::ErrorClass::Other,
+                    format!("could not launch yt-dlp: {err}"),
+                );
+                return;
+            }
+        };
+        let child_pid = Some(child.id());
 
+        thread::spawn(move || {
             if let Some(stderr) = child.stderr.take() {
                 let tx = tx.clone();
                 let cookies_abs = cookies_abs.clone();
@@ -949,6 +986,9 @@ impl Downloader {
             retry_handled: false,
             convert_on_finish,
             convert_handled: false,
+            child_pid,
+            last_activity: std::time::Instant::now(),
+            watchdog_killed: false,
             rx,
         });
     }
@@ -986,6 +1026,9 @@ impl Downloader {
             retry_handled: true, // never retry a synthetic preflight failure
             convert_on_finish: None,
             convert_handled: true,
+            child_pid: None,     // no process to watchdog
+            last_activity: std::time::Instant::now(),
+            watchdog_killed: false,
             rx,
         });
     }
@@ -997,6 +1040,7 @@ impl Downloader {
         for job in &mut self.jobs {
             job.drain();
         }
+        self.check_watchdog();
         self.schedule_auto_retries();
         self.fire_due_retries();
         self.schedule_conversions();
@@ -1006,6 +1050,28 @@ impl Downloader {
         // fresh batch starts at normal speed.
         if !self.any_running() && self.pending.is_empty() && self.retry_queue.is_empty() {
             self.rate_limited_backoff = false;
+        }
+    }
+
+    /// Hang watchdog: SIGKILL any Running job that has produced no output
+    /// or progress for [`HANG_TIMEOUT`]. Marks it `watchdog_killed` so the
+    /// resulting failure is classified retryable (see [`Job::drain`]) and
+    /// the auto-retry path gives it another go. The reader thread's
+    /// `child.wait()` returns once the process dies, sending `Finished`
+    /// normally — we don't reap here, just deliver the kill signal.
+    fn check_watchdog(&mut self) {
+        let now = std::time::Instant::now();
+        for job in &mut self.jobs {
+            if job.state != JobState::Running || job.watchdog_killed { continue; }
+            let Some(pid) = job.child_pid else { continue };
+            if now.duration_since(job.last_activity) < HANG_TIMEOUT { continue; }
+            kill_pid(pid);
+            job.watchdog_killed = true;
+            job.last_activity = now; // don't re-kill before wait() returns
+            job.log.push_back(format!(
+                "⏱ watchdog: no output for {}s — killed (will auto-retry)",
+                HANG_TIMEOUT.as_secs(),
+            ));
         }
     }
 
@@ -1200,15 +1266,20 @@ impl Downloader {
     ) {
         let (tx, rx) = channel();
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Spawn before the thread so the watchdog gets a pid (ffmpeg can
+        // also hang on a bad input). On spawn failure, surface it.
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.push_synthetic_failure(
+                    url, label, crate::error_class::ErrorClass::CodecMissing,
+                    format!("could not launch ffmpeg: {e}"),
+                );
+                return;
+            }
+        };
+        let child_pid = Some(child.id());
         thread::spawn(move || {
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(Msg::Line(format!("could not launch ffmpeg: {e}")));
-                    let _ = tx.send(Msg::Finished(false));
-                    return;
-                }
-            };
             if let Some(stderr) = child.stderr.take() {
                 let tx = tx.clone();
                 thread::spawn(move || {
@@ -1260,6 +1331,9 @@ impl Downloader {
             retry_handled: true,
             convert_on_finish: None, // a transcode doesn't itself convert
             convert_handled: true,
+            child_pid,
+            last_activity: std::time::Instant::now(),
+            watchdog_killed: false,
             rx,
         });
     }
@@ -1354,6 +1428,20 @@ fn redact_sensitive(line: &str, cookies_abs: &str) -> String {
     }
     line.replace(cookies_abs, "cookies.txt")
 }
+
+/// SIGKILL a child process by pid (used by the hang watchdog). The reader
+/// thread's `child.wait()` reaps it; we only deliver the signal here.
+#[cfg(unix)]
+fn kill_pid(pid: u32) {
+    // SAFETY: libc::kill with a valid pid + signal is sound; an invalid
+    // pid just returns ESRCH which we ignore.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+}
+
+/// Non-Unix fallback: no portable pid-kill, so the watchdog can flag the
+/// stall but can't force-terminate. (Windows isn't a first-class target.)
+#[cfg(not(unix))]
+fn kill_pid(_pid: u32) {}
 
 /// Parse a yt-dlp `[download]  42.7% …` line into a `[0.0, 1.0]` fraction.
 fn parse_progress(line: &str) -> Option<f32> {
@@ -1481,6 +1569,48 @@ mod tests {
         let s = ConvertSpec::resolve(&g, Some(&opts)).unwrap();
         assert_eq!(s.mode, "audio");
         assert_eq!(s.audio_format, "mp3"); // empty global → default mp3
+    }
+
+    // ── Hang watchdog ────────────────────────────────────────────────────
+    #[test]
+    fn watchdog_killed_job_fails_retryable() {
+        // A job the watchdog killed leaves no error line; drain() must
+        // force a retryable class so auto-retry re-queues it (a hang is
+        // transient), rather than classify() returning Other (terminal).
+        let (tx, rx) = channel();
+        let mut job = Job {
+            url: "u".into(), label: "l".into(), state: JobState::Running,
+            progress: 0.0, log: VecDeque::new(), failure_class: None,
+            retry_spec: None, retry_count: 0, retry_handled: false,
+            convert_on_finish: None, convert_handled: false,
+            child_pid: Some(999_999),
+            last_activity: std::time::Instant::now(),
+            watchdog_killed: true,
+            rx,
+        };
+        tx.send(Msg::Finished(false)).unwrap();
+        job.drain();
+        assert_eq!(job.state, JobState::Failed);
+        assert_eq!(job.failure_class, Some(crate::error_class::ErrorClass::NetworkError));
+        assert!(Downloader::is_retryable(job.failure_class.unwrap()));
+    }
+
+    #[test]
+    fn normal_failure_still_classified_from_log() {
+        // Without watchdog_killed, drain() classifies from the log as before.
+        let (tx, rx) = channel();
+        let mut job = Job {
+            url: "u".into(), label: "l".into(), state: JobState::Running,
+            progress: 0.0, log: VecDeque::new(), failure_class: None,
+            retry_spec: None, retry_count: 0, retry_handled: false,
+            convert_on_finish: None, convert_handled: false,
+            child_pid: Some(1), last_activity: std::time::Instant::now(),
+            watchdog_killed: false, rx,
+        };
+        tx.send(Msg::Line("ERROR: Video unavailable. This video has been removed".into())).unwrap();
+        tx.send(Msg::Finished(false)).unwrap();
+        job.drain();
+        assert_eq!(job.failure_class, Some(crate::error_class::ErrorClass::NotFound));
     }
 
     // ── Subtitle resolver ────────────────────────────────────────────────
