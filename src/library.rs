@@ -702,6 +702,7 @@ pub fn build_search_entries(lib: &[Channel]) -> Vec<crate::database::SearchEntry
                 channel: ch.name.clone(),
                 title: v.title.clone(),
                 description_path: v.description_path.clone(),
+                subtitle_path: v.subtitles.first().map(|s| s.path.clone()),
             });
         }
     }

@@ -205,7 +205,7 @@
     <option value="size-desc">Largest</option>
   </select>
   <span id="hdr-stats"></span>
-  <button onclick="openSearch()" title="Search titles + descriptions (f)">🔍</button>
+  <button onclick="openSearch()" title="Search titles, descriptions & transcripts (f)">🔍</button>
   <button onclick="shufflePlay()" title="Play a random unwatched video">🎲</button>
   <button onclick="rescan()" title="Rescan library">⟳</button>
   <button id="dl-btn" onclick="openDownloads()" title="Downloads">⬇<span id="dl-badge">0</span></button>
@@ -1516,7 +1516,7 @@ function openSearch(){
   bg.onclick=e=>{if(e.target===bg)bg.remove()};
   bg.innerHTML=`<div class="modal" style="max-width:720px;width:100%">
     <div class="modal-hdr"><h2>🔍 Search library</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
-    <input id="fts-input" type="search" placeholder="Search titles, channels, descriptions…" autocomplete="off"
+    <input id="fts-input" type="search" placeholder="Search titles, channels, descriptions, transcripts…" autocomplete="off"
       style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:14px">
     <div id="fts-status" style="font-size:11px;color:var(--muted);padding:6px 2px"></div>
     <div id="fts-results" style="overflow-y:auto;max-height:64vh"></div>
@@ -2495,7 +2495,7 @@ function showShortcutsHelp(){
     <div class="modal-hdr"><h2>Keyboard shortcuts</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
     <table><tbody>
       ${row('/','Focus filter box')}
-      ${row('f','Search titles + descriptions')}
+      ${row('f','Search titles, descriptions & transcripts')}
       ${row('r','Rescan library')}
       ${row('d','Open downloads')}
       ${row('Esc','Close modal / cancel')}

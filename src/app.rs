@@ -994,7 +994,7 @@ impl App {
             .show(ctx, |ui| {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.search_query)
-                        .hint_text("titles, channels, descriptions…")
+                        .hint_text("titles, channels, descriptions, transcripts…")
                         .desired_width(f32::INFINITY),
                 );
                 if std::mem::take(&mut self.search_focus) {
@@ -1007,7 +1007,7 @@ impl App {
                 }
                 ui.separator();
                 if self.search_query.trim().is_empty() {
-                    ui.weak("Type to search every title, channel, and description in the library.");
+                    ui.weak("Type to search every title, channel, description, and transcript in the library.");
                 } else if self.search_results.is_empty() {
                     ui.weak("No matches.");
                 } else {
@@ -1377,7 +1377,7 @@ impl App {
                 );
                 ui.separator();
                 if ui.button("🔎 Search")
-                    .on_hover_text("Full-text search titles + descriptions across the whole library")
+                    .on_hover_text("Full-text search titles, descriptions + transcripts across the whole library")
                     .clicked()
                 {
                     self.show_search = true;

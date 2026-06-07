@@ -46,6 +46,9 @@ pub struct SearchEntry {
     pub channel: String,
     pub title: String,
     pub description_path: Option<std::path::PathBuf>,
+    /// First subtitle file, if any. Its parsed text is indexed so search
+    /// matches spoken words. Read lazily, only for new/changed videos.
+    pub subtitle_path: Option<std::path::PathBuf>,
 }
 
 /// A full-text search result row from [`Database::search_videos`].
@@ -66,6 +69,20 @@ pub struct StoredFingerprint {
     pub video_id: String,
     pub duration_secs: f64,
     pub hashes: Vec<u64>,
+}
+
+/// Flatten a subtitle file's cues into one searchable text blob, capped so a
+/// very long video can't bloat the index unboundedly. Uses the shared
+/// VTT/SRT parser, so styling tags and duplicate rolling lines are stripped.
+fn transcript_text(vtt: &str) -> String {
+    const CAP: usize = 256 * 1024;
+    let mut out = String::new();
+    for cue in crate::vtt::parse(vtt) {
+        if out.len() + cue.text.len() + 1 > CAP { break; }
+        if !out.is_empty() { out.push(' '); }
+        out.push_str(&cue.text);
+    }
+    out
 }
 
 /// Build a safe FTS5 MATCH expression from free-form user input: each
@@ -238,15 +255,17 @@ impl Database {
             -- Full-text search over the library. `video_search` is a standalone
             -- FTS5 index (available in rusqlite's bundled SQLite); `search_meta`
             -- tracks each indexed video's mtime so [`Database::sync_search_index`]
-            -- only re-reads a description sidecar when the video actually
-            -- changed. video_id/platform are UNINDEXED — stored for retrieval,
-            -- not matched.
+            -- only re-reads a video's sidecars when it actually changed.
+            -- video_id/platform are UNINDEXED — stored for retrieval, not
+            -- matched. `transcript` holds the video's subtitle text so search
+            -- matches spoken words too.
             CREATE VIRTUAL TABLE IF NOT EXISTS video_search USING fts5(
                 video_id UNINDEXED,
                 platform UNINDEXED,
                 channel,
                 title,
                 description,
+                transcript,
                 tokenize = 'porter unicode61'
             );
             CREATE TABLE IF NOT EXISTS search_meta (
@@ -277,6 +296,28 @@ impl Database {
             Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
                 if msg.contains("duplicate column") => {}
             Err(e) => return Err(e),
+        }
+
+        // ── Migration: video_search.transcript column ────────────────────
+        // FTS5 has no ADD COLUMN, so when the index predates the transcript
+        // column we recreate the table and clear search_meta to force a
+        // one-time reindex (which pulls in subtitle text). The index is a
+        // derived cache, so dropping it loses nothing permanent.
+        let has_transcript = {
+            let mut stmt = conn.prepare("PRAGMA table_info(video_search)")?;
+            let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            let mut found = false;
+            for c in cols { if c? == "transcript" { found = true; } }
+            found
+        };
+        if !has_transcript {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS video_search;
+                 CREATE VIRTUAL TABLE video_search USING fts5(
+                     video_id UNINDEXED, platform UNINDEXED, channel, title,
+                     description, transcript, tokenize = 'porter unicode61');
+                 DELETE FROM search_meta;",
+            )?;
         }
         Ok(())
     }
@@ -993,15 +1034,19 @@ impl Database {
             if existing.get(&e.video_id) == Some(&e.mtime_unix) {
                 continue; // unchanged — leave the indexed row in place
             }
-            // Only new/changed videos pay the description-read cost.
+            // Only new/changed videos pay the file-read cost.
             let description = e.description_path.as_ref()
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .unwrap_or_default();
+            let transcript = e.subtitle_path.as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|vtt| transcript_text(&vtt))
+                .unwrap_or_default();
             tx.execute("DELETE FROM video_search WHERE video_id = ?1", [&e.video_id])?;
             tx.execute(
-                "INSERT INTO video_search (video_id, platform, channel, title, description)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![e.video_id, e.platform, e.channel, e.title, description],
+                "INSERT INTO video_search (video_id, platform, channel, title, description, transcript)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![e.video_id, e.platform, e.channel, e.title, description, transcript],
             )?;
             tx.execute(
                 "INSERT OR REPLACE INTO search_meta (video_id, mtime_unix) VALUES (?1, ?2)",
@@ -1033,10 +1078,12 @@ impl Database {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             // STX/ETX (\u{2}/\u{3}) delimit matched terms — control chars
-            // that won't collide with literal '[' / ']' in a description.
-            // The UI turns them into highlight markup.
+            // that won't collide with literal '[' / ']' in the text. Column
+            // -1 lets FTS5 pull the snippet from whichever column matched
+            // (description or transcript). The UI turns the markers into
+            // highlight markup.
             "SELECT video_id, platform, channel, title,
-                    snippet(video_search, 4, char(2), char(3), '…', 12)
+                    snippet(video_search, -1, char(2), char(3), '…', 12)
              FROM video_search
              WHERE video_search MATCH ?1
              ORDER BY rank
@@ -1145,7 +1192,7 @@ mod search_tests {
         SearchEntry {
             video_id: id.into(), mtime_unix: mtime,
             platform: "channels".into(), channel: channel.into(),
-            title: title.into(), description_path: None,
+            title: title.into(), description_path: None, subtitle_path: None,
         }
     }
 
@@ -1193,6 +1240,64 @@ mod search_tests {
         // Garbage / empty queries return nothing, not an error.
         assert!(db.search_videos("", 10).unwrap().is_empty());
         assert!(db.search_videos("   \"  ", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrates_pre_transcript_index() {
+        // Seed a file DB with the OLD 5-column FTS table (no transcript) and a
+        // stale search_meta row, then open it — init_schema must recreate the
+        // table with a transcript column and clear search_meta.
+        let path = std::env::temp_dir().join(format!("ytoff-mig-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE video_search USING fts5(
+                    video_id UNINDEXED, platform UNINDEXED, channel, title, description,
+                    tokenize='porter unicode61');
+                 CREATE TABLE search_meta(video_id TEXT PRIMARY KEY, mtime_unix INTEGER NOT NULL);
+                 INSERT INTO search_meta VALUES('stale', 1);",
+            ).unwrap();
+        }
+        let db = Database::open(&path).unwrap(); // runs the migration
+
+        // If the table were still 5-column, the 6-column INSERT in
+        // sync_search_index would error — so a transcript hit proves migration.
+        let dir = std::env::temp_dir().join(format!("ytoff-mig-vtt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vtt = dir.join("s.vtt");
+        std::fs::write(&vtt, "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nmagnificent aardvark\n").unwrap();
+        let e = SearchEntry {
+            video_id: "v".into(), mtime_unix: 5, platform: "channels".into(),
+            channel: "c".into(), title: "t".into(), description_path: None,
+            subtitle_path: Some(vtt),
+        };
+        db.sync_search_index(&[e]).unwrap();
+        assert_eq!(db.search_videos("aardvark", 10).unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn indexes_transcript_text() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("ytoff-tr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vtt = dir.join("a.en.vtt");
+        std::fs::write(&vtt, "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nthe quick brown fox\n").unwrap();
+        let e = SearchEntry {
+            video_id: "a".into(), mtime_unix: 1, platform: "channels".into(),
+            channel: "Chan".into(), title: "Unrelated Title".into(),
+            description_path: None, subtitle_path: Some(vtt),
+        };
+        assert_eq!(db.sync_search_index(&[e]).unwrap(), 1);
+        // A word only spoken in the transcript still matches.
+        assert_eq!(db.search_videos("brown", 10).unwrap().len(), 1);
+        assert_eq!(db.search_videos("fox", 10).unwrap()[0].video_id, "a");
+        // A word in nothing misses.
+        assert!(db.search_videos("zebra", 10).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -66,7 +66,9 @@ impl Server {
     }
 
     fn wait_ready(&self) {
-        for _ in 0..150 {
+        // Generous budget: the ffmpeg-heavy dedup test can spike CPU and delay
+        // a sibling server's startup, so don't flake under parallel load.
+        for _ in 0..400 {
             if let Some((code, _)) = curl(&self.req_args("/", "GET"), None) {
                 if code != 0 { return; } // 0 = connection refused (not up yet)
             }
@@ -338,6 +340,9 @@ fn full_text_search_indexes_titles_and_descriptions() {
     std::fs::write(chan.join("Cooking Sourdough [vid123].mkv"), b"").unwrap();
     std::fs::write(chan.join("Cooking Sourdough [vid123].description"),
                    b"an artisan bread tutorial").unwrap();
+    // A subtitle sidecar whose spoken words appear nowhere in the title/desc.
+    std::fs::write(chan.join("Cooking Sourdough [vid123].en.vtt"),
+                   b"WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nwhisk the poolish gently\n").unwrap();
 
     // Rescan so the server picks up the new file and reindexes it.
     let (code, _) = s.post("/api/rescan", "");
@@ -353,6 +358,9 @@ fn full_text_search_indexes_titles_and_descriptions() {
 
     // A word only in the description hits (proves the sidecar got indexed).
     assert!(s.get("/api/search?q=artisan").1.contains("vid123"), "description search should hit");
+
+    // A word only spoken in the transcript hits (proves the .vtt got indexed).
+    assert!(s.get("/api/search?q=poolish").1.contains("vid123"), "transcript search should hit");
 
     // An unrelated query does not.
     assert!(!s.get("/api/search?q=quantumchromodynamics").1.contains("vid123"),
