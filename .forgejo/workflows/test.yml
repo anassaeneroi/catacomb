@@ -1,0 +1,40 @@
+# Build + test on every push / PR. The release workflow only fires on
+# tags, so this is the everyday safety net: it compiles the binary and
+# runs the full suite, including the tests/api.rs integration tests that
+# spawn the real `--web` server and drive its HTTP API.
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: docker
+    container:
+      image: rust:1.85-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        # libxcb headers are needed to *link* the eframe/winit GUI even
+        # though the integration tests only run the headless --web server.
+        # curl is what the integration tests use as their HTTP client.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev curl ca-certificates
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Test (unit + integration)
+        run: cargo test --locked
