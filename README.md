@@ -9,6 +9,9 @@ the source video has been taken down.
 
 Built on [yt-dlp](https://github.com/yt-dlp/yt-dlp); written in Rust.
 
+📖 **Documentation:** <https://anassaeneroi.codeberg.page/yt-offline/> — setup,
+first run, the anti-bot stack, troubleshooting, and architecture.
+
 ## What it backs up
 
 | Platform                     | Channels    | Playlists   | Single videos |
@@ -31,26 +34,44 @@ exact URL to refresh from.
 
 ### Library
 
-- **Multi-platform sidebar** grouped by source, with platform icons.
-- **Search** across your whole library, instant.
+- **Multi-platform sidebar** grouped by source, with platform icons, plus
+  **folders/groups** that nest channels to any depth, and **smart folders**
+  for per-video state flags (favourite / bookmark / watch-later / archive).
+- **Full-text search** across the whole library — titles, channels,
+  descriptions, **and subtitle transcripts** (SQLite FTS5, with highlighted
+  snippets), alongside a quick title/id filter box for narrowing the
+  current view.
+- **Filter chips** (watched, date, size, has-subtitles, has-chapters) that
+  AND together, with saveable **named presets** (web).
 - **Sort by:** Newest / Oldest (upload date), Largest / Smallest, Longest /
   Shortest, Title.
-- **Watched tracking** + **resume positions** persisted in SQLite.
-- **Continue watching** view of partially-played videos.
-- **Subtitles** (auto + manual, SRT and WebVTT) + **chapters** + **SponsorBlock**
-  marks embedded into the video file.
+- **Watched tracking** + **resume positions** persisted in SQLite, plus a
+  **Continue watching** view and **shuffle play** of a random unwatched video.
+- **Subtitles** (auto + manual, SRT and WebVTT), **chapters**, and
+  **configurable SponsorBlock** (off / chapter-mark / cut) — global and
+  per-channel.
+- **Per-channel & per-video notes** — searchable annotations.
+- **Bulk tagging** — multi-select to set state flags across many videos at once.
 - **Statistics** — totals, top channels by size/count, weekly downloads
   histogram, upload-year histogram.
-- **Maintenance** — finds duplicate video IDs across folders and missing
-  sidecars (thumbnail / info.json / description), with one-click repair.
+- **Maintenance** — finds exact duplicate video IDs, **perceptual
+  "similar content"** duplicates (the same video re-uploaded / mirrored /
+  re-encoded under a *different* ID, detected by comparing sampled frames),
+  and missing sidecars (thumbnail / info.json / description), each with
+  one-click cleanup or repair.
 
 ### Playback
 
 - **Desktop GUI** launches your configured player (mpv by default; mpv gets
-  resume-position tracking via JSON-IPC).
-- **Web UI** plays videos inline in any browser, with subtitle tracks and a
-  chapters panel. Optional on-the-fly **ffmpeg transcoding** for browsers
-  that can't decode MKV.
+  resume-position tracking via JSON-IPC). A floating **transcript window**
+  lets you search the subtitles and click any line to seek the running mpv.
+- **Web UI** plays videos inline in any browser, with subtitle tracks, a
+  **chapters** panel, and a searchable **transcript** pane — click any line
+  to seek, and the current line highlights as the video plays. Optional
+  on-the-fly **ffmpeg transcoding** for browsers that can't decode MKV.
+- **Comment viewer** (web) — for videos archived with comments: threaded
+  with collapse/expand, in-comment search, sort (top / newest / oldest), an
+  uploader badge, and a "new since last visit" highlight.
 
 ### Downloads
 
@@ -59,15 +80,45 @@ exact URL to refresh from.
   (browser-impersonation for bot-detection bypass) and `deno` for player-JS
   evaluation. No system installation required.
 - Or use **system yt-dlp** — toggleable in Settings.
-- **Concurrent-download limit** (default 3) with a visible queue.
+- **Concurrent-download limit** (default 3) with a visible queue and live
+  WebSocket progress.
 - **Quality picker:** Best / 1080p / 720p / 480p / 360p, or **Music mode**
   for audio-only extraction into `music/<artist>/`.
-- **Retry hardening:** `--retries 30 --fragment-retries 30
-  --retry-sleep linear=1:30:2 --sleep-requests 1` so connection resets self-heal
-  instead of failing the job.
+- **Per-channel overrides** — quality, subtitles, SponsorBlock mode, format
+  conversion, YouTube player-clients, rate/size/date filters, and raw extra
+  yt-dlp args, applied automatically on scheduled re-checks.
+- **Format conversion** — optional post-download ffmpeg pass: remux to MP4,
+  re-encode to H.264/AAC at a chosen CRF, or extract audio (global or
+  per-channel, with a keep-original toggle).
+- **Anti-bot stack** — browser TLS impersonation via `curl_cffi`, an
+  optional **POT (Proof-of-Origin) token provider** (bundled `bgutil-pot`),
+  configurable **player clients** to route around captcha-walled clients,
+  and a cookie-freshness / anonymous-jar warning.
+- **Auto-retry + adaptive throttle** — transient rate-limit/network failures
+  are re-queued after a cooldown, and the batch slows itself after a hit
+  (on top of `--retries 30 --fragment-retries 30 --retry-sleep linear=1:30:2`).
 - **Scheduler** — periodically re-check every channel for new uploads.
 - **Cookies** — paste / file-pick a Netscape `cookies.txt`, or fall back to
   `--cookies-from-browser` for whatever browser you pick.
+
+### Reliability
+
+- **Hang watchdog** — a yt-dlp/ffmpeg job that goes silent for 5 minutes is
+  killed and re-queued, so a stalled process can't wedge the queue.
+- **Disk-full preflight** — refuses to start a download when the target
+  filesystem is nearly full, surfacing a clear error instead of a
+  half-written file.
+- **9-class error classifier** — every failure gets a one-line suggested fix
+  (rate-limited, members-only, geoblocked, bad cookies, codec missing, disk
+  full, …) shown in both UIs.
+- **Crash log** — any thread panic is appended to `yt-offline.crash.log`
+  next to the database, so a GUI launched without a terminal still leaves a
+  trace.
+- **Library backup & restore** — download a snapshot of the SQLite database;
+  restore does a schema-validated, idempotent merge (watched / positions /
+  flags / folders / notes).
+- Poison-recovering locks keep one handler's panic from taking down the
+  long-running web server.
 
 ### Web server
 
@@ -102,6 +153,11 @@ plus three Emo/Scene flavours (Nocturnal, Coffin, Scene Queen).
 
 ### Misc
 
+- **Desktop UI zoom** — global egui scale (whole UI, not just cards) via a
+  Settings slider or `Ctrl +`/`-`/`0`, persisted.
+- **System tray** (Linux StatusNotifierItem) with opt-in minimize-to-tray.
+- **Keyboard shortcuts** in the web UI (`/` filter, `f` full-text search,
+  `r` rescan, `d` downloads, `?` help).
 - Native notifications when downloads finish (notify-rust / zbus, no GTK
   build dep).
 - `/api/stats`, `/api/ytdlp/update`, `/api/scheduler/run` — every UI button
@@ -195,13 +251,22 @@ fields are also editable in Settings.
 directory      = "/path/to/library"            # library root; every platform nests under it (channels/, tiktok/, …)
 max_concurrent = 3                              # parallel yt-dlp processes
 use_bundled_ytdlp = false                       # true = use the venv set up by the Install button
+use_pot_provider  = false                       # run bgutil-pot for YouTube Proof-of-Origin tokens
+sponsorblock_mode = "mark"                      # off | mark (chapter markers) | remove (cut segments)
+youtube_player_clients = ""                     # e.g. "tv,mweb" to route around captcha-walled clients
 
 [player]
 command = "mpv"      # any executable that takes a file path as last arg
 browser = "firefox"  # used by --cookies-from-browser when no cookies.txt is set
 
 [ui]
-theme = "dark"       # dark | light | dracula | trans | emo-nocturnal | emo-coffin | emo-scene-queen
+theme    = "dark"    # dark | light | dracula | trans | emo-nocturnal | emo-coffin | emo-scene-queen
+ui_scale = 1.0       # global zoom for the desktop UI
+
+# Subtitles ([subtitles]: download / auto / embed / convert-format / langs)
+# and post-download format conversion ([convert]: mode / crf / preset /
+# audio_format / keep_original) also have their own sections — easiest to set
+# from Settings. Both support per-channel overrides.
 
 [scheduler]
 enabled        = false
@@ -236,7 +301,9 @@ Other top-bar buttons:
 
 - **⟳ Rescan** — re-read the library directory.
 - **📊 Stats** — totals, top channels, weekly download histogram.
-- **🩺 Maintenance** — find and resolve duplicates / missing sidecars.
+- **🔎 Search** — full-text across titles, descriptions, and transcripts.
+- **🩺 Maintenance** — resolve duplicate IDs, perceptual "similar content"
+  duplicates, and missing sidecars.
 - **⚙ Settings** — everything in `config.toml`, plus cookies, password,
   bundled-yt-dlp install/update, and starting the web server.
 
@@ -244,7 +311,9 @@ Other top-bar buttons:
 
 Start the server (`--web` CLI flag or **Start** button in Settings →
 **Web server**), open `http://localhost:8080` (or your configured bind
-address). The UI mirrors the desktop one and adds inline video playback.
+address). The UI mirrors the desktop one and adds inline video playback with
+a searchable transcript pane, a threaded comment viewer, and full-text
+library search (🔍 in the header, or press `f`).
 
 If a download password is set, you'll be redirected to a login page;
 the session cookie is HttpOnly + SameSite=Strict, valid 30 days.
