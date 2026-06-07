@@ -95,8 +95,10 @@ wall is RateLimited, not NotFound).
   and drives the HTTP API with curl — genuine end-to-end coverage of the
   axum + SQLite + config stack.
 
-`cargo test` runs both. `.forgejo/workflows/test.yml` runs them on every
-push.
+`cargo test` runs both. (A `.forgejo/workflows/test.yml` CI definition
+exists, but Codeberg runs Woodpecker rather than Forgejo Actions, so it
+doesn't execute there without a self-hosted runner — run the suite
+locally.)
 
 ## Platform support
 

@@ -31,9 +31,11 @@ lands in `dist/`.
 
 ## CI
 
-`.forgejo/workflows/release.yml` runs `scripts/package.sh all` on every
-pushed `v*` tag and attaches the artifacts to the Codeberg release.
-`.forgejo/workflows/test.yml` runs the full test suite on every push.
+The repo ships `.forgejo/workflows/` definitions (`test.yml`,
+`release.yml`), but Codeberg executes Woodpecker rather than Forgejo
+Actions — so they don't run there without a self-hosted runner. Until
+then, build packages locally with `scripts/package.sh` and publish docs
+with `scripts/publish-docs.sh`.
 
 The repo's [`docs/PACKAGING.md`](https://codeberg.org/anassaeneroi/yt-offline/src/branch/main/docs/PACKAGING.md)
 has the per-distro install commands and the Windows/macOS status in full.

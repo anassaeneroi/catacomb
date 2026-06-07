@@ -80,20 +80,23 @@ end-to-end tests that spawn the **real** `--web` binary against a scratch
 tempdir and drive the HTTP API with curl (index/library serving, ETag
 304, settings round-trip + persistence, folders CRUD + cycle guard, notes
 round-trip, channel-options round-trip + clear, DB backup). Each test
-gets its own server/port/tempdir, so they run in parallel.
-`.forgejo/workflows/test.yml` runs the full suite on every push. Stretch
-left: a recorded-fixture corpus for the download pipeline and a headless
-web-UI test.
+gets its own server/port/tempdir, so they run in parallel — `cargo test`
+runs the lot. (A `.forgejo/workflows/test.yml` CI definition exists, but
+Codeberg executes Woodpecker, not Forgejo Actions, so it's inert there
+without a self-hosted runner; tests run locally.) Stretch left: a
+recorded-fixture corpus for the download pipeline and a headless web-UI
+test.
 
 ### 2.2 Documentation site — DONE
 
 An mdBook under `docs/` (eight pages: introduction, installation,
 first-run/config, downloading, anti-bot, troubleshooting, architecture,
-packaging), published to Codeberg Pages by
-`.forgejo/workflows/docs.yml`. The anti-bot and troubleshooting pages
-capture the cookies/curl_cffi/POT/player-client knowledge; the
-architecture page documents the two-front-ends/one-engine design for
-contributors.
+packaging), published to Codeberg Pages via `scripts/publish-docs.sh`
+(build the book + force-push it to the `pages` branch — Codeberg doesn't
+run Forgejo Actions, so publishing is a local one-liner rather than CI).
+The anti-bot and troubleshooting pages capture the cookies/curl_cffi/POT/
+player-client knowledge; the architecture page documents the
+two-front-ends/one-engine design for contributors.
 
 ### 2.3 Error recovery / structured logging — DONE
 
