@@ -46,12 +46,15 @@ cases maturity. The plan below is now mostly "surpass" work.
 | Error classification + suggested fixes | ✅ 9-class + hints | ✅ rescue recipes | Tied |
 | Stability hardening | ✅ crash log + disk-full preflight + hang watchdog + poison-recover locks | partial | We lead |
 | Desktop UI scale | ✅ global egui zoom, persisted | ✅ GTK native | Tied |
+| Full-text search (titles/desc/transcripts) | ✅ SQLite FTS5 + snippets | ❌ name filter only | We lead |
+| Transcript viewer (search + click-to-seek) | ✅ web pane + desktop window | ❌ | We lead |
+| Content-aware dedup (perceptual) | ✅ ffmpeg→dHash, duration-bucketed | ❌ ID-only | We lead |
 | Maturity / edge cases | ~months | ~years | **Tartube leads** |
 
-Score: 14 ahead, 1 behind, 13 tied. **Phase 1 (Tartube parity) is
-complete** — the only thing Tartube still leads on is years-of-edge-cases
-maturity, which is time, not a feature. Everything below is "surpass"
-territory plus test/doc investment.
+Score: 17 ahead, 1 behind, 13 tied. **Phase 1 (Tartube parity) is
+complete** and several Phase 3 "surpass" features have landed — the only
+thing Tartube still leads on is years-of-edge-cases maturity, which is
+time, not a feature.
 
 ## Phase 1 — COMPLETE
 
@@ -149,32 +152,42 @@ A "remote library" mode where one yt-offline instance can browse
 another's library (read-only) over the same axum API. Useful for a
 "home archive + travel laptop" setup.
 
-### 3.6 Comment viewer enhancements
+### 3.6 Comment viewer enhancements — DONE
 
-The comments capture (1.4) already ships a viewer. Surpass Tartube
-(which only dumps the raw JSON) with:
+The web comment viewer is now threaded with per-thread collapse/expand,
+in-comment full-text search (highlighted), sort (top / newest / oldest),
+an uploader (OP) badge, and a "new since last visit" highlight + count
+(localStorage per-video timestamp). Sentiment chips were dropped as
+low-value. (Comments stay a web-only viewer; the desktop captures them
+but points you at the web UI.)
 
-- Threaded display with collapse/expand at any depth.
-- Full-text search within a video's comments.
-- "New since last visit" highlights.
-- Sentiment / keyword filter chips.
+### 3.7 Library-wide deduplication — DONE
 
-### 3.7 Library-wide deduplication
-
-Right now `maintenance` finds duplicates only by yt-dlp video ID — it
-catches "you downloaded this exact video twice," but not the same content
-re-uploaded under a *different* ID (a reupload, a cross-platform mirror, a
-re-encode). Surpass by perceptual-hashing sampled frames (ffmpeg → dHash)
-and grouping videos whose fingerprints match within a Hamming threshold,
-even across IDs/resolutions/encodings. A new `video_fingerprint` cache
-table (keyed by path+mtime like `info_cache`) makes it a one-time cost per
-video; bucket by duration first to keep the comparison sub-quadratic.
+`maintenance` still finds exact duplicate video IDs; on top of that,
+`fingerprint.rs` adds content-aware dedup — ffmpeg keyframe-seek samples
+6 frames/video → 9×8 grayscale → 64-bit dHash, grouped within a Hamming
+threshold but only inside a duration-tolerance window (sorted sliding
+window + union-find) to stay near-linear. A `video_fingerprint` cache
+table (keyed by path+mtime like `info_cache`) makes it one-time per video.
+Surfaced as a review-only "Similar content" report (background job +
+progress) in both the web and desktop Maintenance views; never
+auto-deletes. Measured ~0.5 s/video serial (~65 ms across 8 cores).
 
 ### 3.8 Plugin / scripting hook
 
 Lua or WASM-based hooks that run on download events: pre-download
 filename rewriter, post-download archive uploader, custom metadata
 enricher. Inverts the "we hardcode everything" model.
+
+### 3.9 Library-wide full-text search + transcript tooling — DONE
+
+Beyond the original plan. A `video_search` FTS5 index over titles,
+channels, descriptions, **and subtitle transcripts** (mtime-gated build,
+refreshed after every scan; ranked hits with highlighted snippets),
+surfaced as a 🔍 search in both UIs. Plus a searchable, click-to-seek
+**transcript viewer** — a pane beside the web player (live-highlights the
+current line) and a floating desktop window that seeks mpv over IPC —
+backed by a shared `vtt` WebVTT/SRT parser.
 
 ## Phase 4 — Stretch / blue-sky
 
@@ -190,6 +203,19 @@ Probably never, or much later.
 
 Roughly reverse-chronological. Items that closed out a roadmap line.
 
+- **Transcripts in search** (3.9) — subtitle text folded into the FTS
+  index so search matches spoken words; FTS5 column-add migration.
+- **Perceptual-hash dedup** (3.7) — `fingerprint.rs` (ffmpeg→dHash,
+  duration-bucketed grouping) + `video_fingerprint` cache; background
+  "Similar content" review job in both Maintenance views.
+- **Library-wide full-text search + transcript viewer** (3.9) — `video_search`
+  FTS5 index (titles/channels/descriptions); 🔍 search + a click-to-seek,
+  live-highlighting transcript pane (web) / window (desktop) over a shared
+  `vtt` parser.
+- **Comment viewer enhancements** (3.6) — threaded collapse/expand,
+  in-comment search, sort, OP badge, new-since-last-visit.
+- **Configurable SponsorBlock** — off / mark / remove, global + per-channel
+  (was a hardcoded `--sponsorblock-mark all`).
 - **Hang watchdog + poison-recover locks** (2.5) — SIGKILL a yt-dlp/ffmpeg
   job silent for 5 min (classified retryable so it re-queues); recover
   poisoned `WebState` mutexes instead of cascading a panic into a dead
@@ -245,10 +271,15 @@ Roughly reverse-chronological. Items that closed out a roadmap line.
 - **Phase 1** (Tartube parity) is **complete** — kept above for the record.
 - **Phase 2** is complete: integration tests (2.1), docs site (2.2),
   error recovery (2.3), restore (2.4), stability hardening (2.5).
-- **Phase 3** is the "surpass" work now that we're at parity.
+- **Phase 3** is the "surpass" work now that we're at parity. Shipped so
+  far: WebSocket progress (3.3), comment viewer (3.6), perceptual-hash
+  dedup (3.7), and full-text search + transcript tooling (3.9). Still open:
+  Windows/macOS binaries (3.1), Android (3.2), smart auto-tagging (3.4),
+  federation (3.5), plugin hooks (3.8).
 - **Phase 4** items might be valuable, but commit to nothing.
 
 Items inside a phase are loosely ordered by user-visible impact, not strict
-prerequisite. With parity reached, the highest-leverage next moves are
-**3.1 (Windows/macOS binaries)** for reach and **3.7 (perceptual-hash
-dedup)** / **3.6 (comment-viewer)** for features Tartube can't match.
+prerequisite. With the easy "surpass" wins banked, the highest-leverage
+remaining moves are **3.1 (Windows/macOS binaries)** for reach and a
+**RSS/podcast feed** or **smart auto-tagging (3.4)** for self-contained
+features Tartube can't match.
