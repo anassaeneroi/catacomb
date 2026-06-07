@@ -163,6 +163,11 @@ pub struct App {
     search_results: Vec<crate::database::SearchHit>,
     show_search: bool,
     search_focus: bool,
+    // Transcript viewer (floating window)
+    show_transcript: bool,
+    transcript_video: Option<String>,
+    transcript_cues: Vec<crate::vtt::Cue>,
+    transcript_query: String,
     // Scheduler
     last_scheduled_check: Option<Instant>,
     // Cards cache — recomputed only when inputs change
@@ -487,6 +492,10 @@ impl App {
             search_results: Vec::new(),
             show_search: false,
             search_focus: false,
+            show_transcript: false,
+            transcript_video: None,
+            transcript_cues: Vec::new(),
+            transcript_query: String::new(),
             last_scheduled_check: None,
             cards_cache: Vec::new(),
             cards_cache_key: None,
@@ -932,6 +941,98 @@ impl App {
             });
         if !open { self.show_search = false; }
         if let Some(id) = to_play { self.play_by_id(&id); }
+    }
+
+    /// Load a video's first subtitle file into the transcript viewer.
+    fn open_transcript(&mut self, id: &str, path: PathBuf) {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                self.transcript_cues = crate::vtt::parse(&text);
+                self.transcript_video = Some(id.to_string());
+                self.transcript_query.clear();
+                self.show_transcript = true;
+                if self.transcript_cues.is_empty() {
+                    self.status = "That subtitle file had no readable cues".into();
+                }
+            }
+            Err(e) => self.status = format!("Couldn't read transcript: {e}"),
+        }
+    }
+
+    /// Floating transcript window: searchable cue list; clicking a line seeks
+    /// the running mpv (via its JSON-IPC socket) when this video is playing.
+    /// The web UI's 📄 transcript pane is the browser-side equivalent.
+    fn transcript_window(&mut self, ctx: &egui::Context) {
+        if !self.show_transcript { return; }
+        let mut open = true;
+        let mut seek_to: Option<f64> = None;
+        let playing = self.currently_playing.is_some()
+            && self.currently_playing.as_deref() == self.transcript_video.as_deref();
+        egui::Window::new("📄 Transcript")
+            .open(&mut open)
+            .default_width(440.0)
+            .default_height(520.0)
+            .show(ctx, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.transcript_query)
+                        .hint_text("search the transcript…")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.label(
+                    egui::RichText::new(if playing {
+                        "Click a line to jump there in mpv."
+                    } else {
+                        "Play this video to seek by clicking a line."
+                    })
+                    .small().weak(),
+                );
+                ui.separator();
+                let q = self.transcript_query.trim().to_lowercase();
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for cue in &self.transcript_cues {
+                        if !q.is_empty() && !cue.text.to_lowercase().contains(&q) { continue; }
+                        let line = format!("{}   {}", format_duration(cue.start), cue.text);
+                        let resp = ui.add(
+                            egui::Label::new(line).wrap().sense(egui::Sense::click()),
+                        );
+                        if resp.clicked() { seek_to = Some(cue.start); }
+                        if resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+                    }
+                });
+            });
+        if !open { self.show_transcript = false; }
+        if let Some(s) = seek_to { self.mpv_seek(s); }
+    }
+
+    /// Seek the running mpv to `secs` by writing a `seek … absolute` command
+    /// to its JSON-IPC socket (set up in [`Self::play_with_tracking`]). No-op
+    /// with a status hint when this video isn't the one currently playing.
+    #[cfg(unix)]
+    fn mpv_seek(&mut self, secs: f64) {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        let Some(id) = self.transcript_video.clone() else { return; };
+        if self.currently_playing.as_deref() != Some(id.as_str()) {
+            self.status = "Play this video first, then click a line to seek".into();
+            return;
+        }
+        let sock = format!("/tmp/yt-offline-{id}.sock");
+        match UnixStream::connect(&sock) {
+            Ok(mut s) => {
+                let cmd = format!("{{\"command\":[\"seek\",{secs},\"absolute\"]}}\n");
+                if s.write_all(cmd.as_bytes()).is_ok() {
+                    self.status = format!("Seek to {}", format_duration(secs));
+                } else {
+                    self.status = "Couldn't send seek to mpv".into();
+                }
+            }
+            Err(_) => self.status = "Couldn't reach mpv (is it still playing with IPC?)".into(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn mpv_seek(&mut self, _secs: f64) {
+        self.status = "Seeking the player requires mpv IPC (Unix only)".into();
     }
 
     fn play_with_tracking(&mut self, path: &Path, video_id: String) {
@@ -3232,6 +3333,15 @@ impl App {
                         self.toggle_watched(&selected_id);
                     }
 
+                    if let Some(sub) = video.subtitles.first() {
+                        if ui.button("📄 Transcript")
+                            .on_hover_text("Searchable transcript; click a line to seek the player")
+                            .clicked()
+                        {
+                            self.open_transcript(&selected_id, sub.path.clone());
+                        }
+                    }
+
                     if video.has_live_chat {
                         ui.label(egui::RichText::new("💬 live chat").small().weak());
                     }
@@ -3941,6 +4051,7 @@ impl eframe::App for App {
         self.folder_manager_window(ctx);
         self.move_to_folder_window(ctx);
         self.search_window(ctx);
+        self.transcript_window(ctx);
 
         match self.current_screen {
             Screen::Library => {

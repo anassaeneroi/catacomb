@@ -87,6 +87,14 @@
   .chapter.active{background:var(--card);border-left:3px solid var(--accent)}
   .chapter .ch-time{color:var(--muted);font-size:11px;font-family:monospace}
   .chapter .ch-title{font-weight:500;margin-top:1px}
+  .transcript-pane{width:300px;background:var(--bg);border:1px solid var(--border);border-radius:4px;display:flex;flex-direction:column;flex-shrink:0;min-height:0}
+  .transcript-pane h4{font-size:11px;padding:7px 10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+  .t-search{margin:6px;padding:4px 8px;background:var(--panel);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px}
+  .t-list{overflow-y:auto;flex:1;min-height:0}
+  .t-cue{padding:5px 10px;font-size:12px;cursor:pointer;border-bottom:1px solid var(--border);line-height:1.35}
+  .t-cue:hover{background:var(--card)}
+  .t-cue.active{background:var(--card);border-left:3px solid var(--accent)}
+  .t-cue .t-time{color:var(--muted);font-size:10px;font-family:monospace;margin-right:6px}
   .settings-row{display:flex;align-items:center;gap:8px;padding:6px 0}
   .settings-row label{flex:1;font-size:13px}
   .settings-hint{font-size:11px;color:var(--muted)}
@@ -161,6 +169,7 @@
     .modal video{max-height:55vh}
     #details{max-height:160px;padding:8px 10px}
     .chapters-pane{display:none}
+    .transcript-pane{display:none !important}
     section#content{padding:8px}
     /* Modal "new download" form stacks vertically on small screens so
        the URL + button + quality picker don't squeeze each other. */
@@ -1248,10 +1257,17 @@ function shufflePlay(){
 function playVideo(id){
   const v=findVideo(id);if(!v||!v.video_url)return;
   currentPlayingId=id;
+  transcript={cues:[],loaded:false}; // reset for the new video
   const bg=document.createElement('div');bg.className='modal-bg';
   bg.onclick=e=>{if(e.target===bg)closeModal(bg)};
   const tracks=(v.subtitles||[]).map((s,i)=>`<track kind="subtitles" src="${esc(safeUrl(s.url))}" srclang="${esc(s.lang)}" label="${esc(s.label)}"${i===0?' default':''}>`).join('');
   const chapPane=v.has_chapters?`<div class="chapters-pane" id="chapters-pane"><h4>Chapters</h4><div id="chapters-list"><em style="padding:10px;display:block;color:var(--muted)">Loading…</em></div></div>`:'';
+  const hasSubs=v.subtitles&&v.subtitles.length;
+  const transcriptPane=hasSubs?`<div class="transcript-pane" id="transcript-pane" style="display:none">
+      <h4>Transcript</h4>
+      <input class="t-search" id="t-search" placeholder="Search transcript…" oninput="filterTranscript()">
+      <div class="t-list" id="t-list"><em style="padding:10px;display:block;color:var(--muted)">Loading…</em></div>
+    </div>`:'';
   // Show upload date + duration in the modal header so the viewer has
   // basic context without opening the metadata pane.
   const headerMeta=[
@@ -1262,10 +1278,11 @@ function playVideo(id){
   bg.innerHTML=`<div class="modal">
     <div class="modal-hdr">
       <h2>${esc(v.title)}${metaLine}</h2>
+      ${hasSubs?`<button onclick="toggleTranscript('${esc(id)}')" title="Transcript (searchable, click to seek)">📄</button>`:''}
       <button onclick="openComments('${esc(id)}')" title="Comments">💬</button>
       <button onclick="closeModal(this.closest('.modal-bg'))">✕ Close</button>
     </div>
-    <div class="modal-body"><video id="player-video" src="${esc(safeUrl(v.video_url))}" controls autoplay crossorigin="anonymous">${tracks}</video>${chapPane}</div>
+    <div class="modal-body"><video id="player-video" src="${esc(safeUrl(v.video_url))}" controls autoplay crossorigin="anonymous">${tracks}</video>${chapPane}${transcriptPane}</div>
   </div>`;
   document.body.appendChild(bg);
   const vid=bg.querySelector('#player-video');
@@ -1312,6 +1329,76 @@ async function loadChapters(id){
   }catch{}
 }
 function jumpToChapter(s){const v=document.getElementById('player-video');if(v){v.currentTime=s;v.play()}}
+
+/* ── Transcript viewer (parses the served .vtt client-side) ──────── */
+let transcript={cues:[],loaded:false};
+let tSearching=false;
+function toggleTranscript(id){
+  const pane=document.getElementById('transcript-pane');if(!pane)return;
+  const showing=pane.style.display!=='none';
+  pane.style.display=showing?'none':'flex';
+  if(!showing&&!transcript.loaded){
+    const v=findVideo(id);const sub=((v&&v.subtitles)||[])[0];
+    if(sub&&sub.url)loadTranscript(sub.url); else {const l=document.getElementById('t-list');if(l)l.innerHTML='<em style="padding:10px;display:block;color:var(--muted)">No subtitle track.</em>'}
+  }
+}
+async function loadTranscript(url){
+  const list=document.getElementById('t-list');
+  try{
+    const text=await(await fetch(safeUrl(url))).text();
+    transcript.cues=parseVtt(text);
+    transcript.loaded=true;
+    renderCues(transcript.cues.map((c,i)=>({c,i})),'');
+    const vid=document.getElementById('player-video');
+    if(vid)vid.addEventListener('timeupdate',syncTranscript);
+  }catch(e){if(list)list.innerHTML=`<div style="color:#f87171;padding:10px">Couldn't load transcript: ${esc(e.message)}</div>`}
+}
+// Minimal WebVTT/SRT cue parser: pull out each "start --> end" line and the
+// text lines under it, stripping inline tags. Tolerant of SRT comma decimals.
+function parseVtt(text){
+  const cues=[],lines=text.split(/\r?\n/);
+  const tc=/-->/;
+  for(let i=0;i<lines.length;i++){
+    if(tc.test(lines[i])){
+      const start=parseVttTime(lines[i].split('-->')[0].trim());
+      if(isNaN(start)){continue}
+      const buf=[];i++;
+      while(i<lines.length&&lines[i].trim()!==''){buf.push(lines[i]);i++}
+      const txt=buf.join(' ').replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim();
+      if(txt)cues.push({start,text:txt});
+    }
+  }
+  // Collapse consecutive duplicate lines (common in auto-captions).
+  return cues.filter((c,i)=>i===0||c.text!==cues[i-1].text);
+}
+function parseVttTime(s){
+  s=(s||'').replace(',','.').replace(/[^\d:.]/g,'');
+  const p=s.split(':').map(Number);
+  if(p.some(isNaN)||!p.length)return NaN;
+  return p.reduce((acc,x)=>acc*60+x,0);
+}
+function renderCues(items,q){
+  const list=document.getElementById('t-list');if(!list)return;
+  if(!items.length){list.innerHTML='<em style="padding:10px;display:block;color:var(--muted)">'+(q?'No lines match.':'No transcript text.')+'</em>';return}
+  list.innerHTML=items.map(({c,i})=>`<div class="t-cue" data-i="${i}" onclick="seekTo(${c.start})"><span class="t-time">${fmtDur(c.start)}</span>${tHl(c.text,q)}</div>`).join('');
+}
+function filterTranscript(){
+  const q=(document.getElementById('t-search')?.value||'').toLowerCase().trim();
+  tSearching=!!q;
+  const items=transcript.cues.map((c,i)=>({c,i}));
+  renderCues(q?items.filter(({c})=>c.text.toLowerCase().includes(q)):items,q);
+}
+function seekTo(s){const v=document.getElementById('player-video');if(v){v.currentTime=s;v.play()}}
+function syncTranscript(){
+  if(tSearching)return; // don't fight the user's filtered view
+  const v=document.getElementById('player-video'),list=document.getElementById('t-list');
+  if(!v||!list)return;
+  const t=v.currentTime,cues=transcript.cues;let ai=-1;
+  for(let i=0;i<cues.length;i++){if(t>=cues[i].start)ai=i;else break}
+  list.querySelectorAll('.t-cue.active').forEach(el=>el.classList.remove('active'));
+  if(ai>=0){const el=list.querySelector('.t-cue[data-i="'+ai+'"]');if(el){el.classList.add('active');el.scrollIntoView({block:'nearest'})}}
+}
+function tHl(s,q){const e=esc(s);if(!q)return e;try{return e.replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','ig'),'<mark>$1</mark>')}catch{return e}}
 
 /* ── Comments viewer ───────────────────────────────────────────── */
 let cmt={vid:null,list:[],q:'',sort:'threaded',collapsed:new Set(),prevVisit:0};

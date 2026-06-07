@@ -30,6 +30,7 @@ mod stats;
 mod theme;
 mod tray;
 mod util;
+mod vtt;
 mod web;
 mod ytdlp_bin;
 
