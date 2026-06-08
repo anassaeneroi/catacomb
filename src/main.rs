@@ -36,6 +36,33 @@ mod vtt;
 mod web;
 mod ytdlp_bin;
 
+fn renderer_from_name(requested: Option<&str>) -> eframe::Renderer {
+    match requested.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("glow" | "opengl" | "gl") => eframe::Renderer::Glow,
+        Some("wgpu" | "vulkan" | "vk") | None => eframe::Renderer::Wgpu,
+        Some(name) => {
+            eprintln!(
+                "Warning: unknown renderer '{name}' (expected 'wgpu' or 'glow'); using wgpu."
+            );
+            eframe::Renderer::Wgpu
+        }
+    }
+}
+
+fn renderer_from_args(args: &[String]) -> eframe::Renderer {
+    let requested = args
+        .iter()
+        .position(|a| a == "--renderer")
+        .and_then(|pos| args.get(pos + 1).map(String::as_str));
+
+    if requested.is_some() {
+        renderer_from_name(requested)
+    } else {
+        let env_renderer = std::env::var("YT_OFFLINE_RENDERER").ok();
+        renderer_from_name(env_renderer.as_deref())
+    }
+}
+
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -82,10 +109,11 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([800.0, 500.0])
             .with_title("yt-offline"),
-        // Force the wgpu (Vulkan) renderer. The default glow/OpenGL path
-        // crashes on NVIDIA + Wayland when the window is maximized
-        // (Glutin EGL_BAD_ALLOC). wgpu reconfigures the swapchain cleanly.
-        renderer: eframe::Renderer::Wgpu,
+        // Default to wgpu (Vulkan): the glow/OpenGL path crashes on some
+        // NVIDIA + Wayland maximizes (Glutin EGL_BAD_ALLOC). Keep a launch
+        // escape hatch for systems where Vulkan/wgpu opens a blank window:
+        // `YT_OFFLINE_RENDERER=glow yt-offline` or `yt-offline --renderer glow`.
+        renderer: renderer_from_args(&args),
         ..Default::default()
     };
     eframe::run_native(
@@ -93,4 +121,42 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc, tray)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn renderer_name_accepts_default_and_aliases() {
+        assert_eq!(super::renderer_from_name(None), eframe::Renderer::Wgpu);
+        assert_eq!(
+            super::renderer_from_name(Some("wgpu")),
+            eframe::Renderer::Wgpu
+        );
+        assert_eq!(
+            super::renderer_from_name(Some("vulkan")),
+            eframe::Renderer::Wgpu
+        );
+        assert_eq!(
+            super::renderer_from_name(Some("glow")),
+            eframe::Renderer::Glow
+        );
+        assert_eq!(
+            super::renderer_from_name(Some("opengl")),
+            eframe::Renderer::Glow
+        );
+        assert_eq!(
+            super::renderer_from_name(Some("unknown")),
+            eframe::Renderer::Wgpu
+        );
+    }
+
+    #[test]
+    fn renderer_arg_overrides_env_parser_path() {
+        let args = vec![
+            "yt-offline".to_string(),
+            "--renderer".to_string(),
+            "gl".to_string(),
+        ];
+        assert_eq!(super::renderer_from_args(&args), eframe::Renderer::Glow);
+    }
 }

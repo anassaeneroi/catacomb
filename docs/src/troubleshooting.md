@@ -96,6 +96,27 @@ handles the resize cleanly. Make sure you have a working Vulkan driver
 (`vulkan-icd-loader` + your GPU's Vulkan package), which any desktop with
 working graphics already has.
 
+## The desktop window opens but stays blank
+
+The desktop defaults to the wgpu/Vulkan renderer. On some systems with a
+broken Vulkan stack, the OS can create the window while wgpu never
+presents a frame. Try the OpenGL renderer:
+
+```bash
+YT_OFFLINE_RENDERER=glow yt-offline
+```
+
+or:
+
+```bash
+yt-offline --renderer glow
+```
+
+If that works, update/reinstall your Vulkan driver later and switch back
+to the default renderer. On NVIDIA + Wayland, prefer the default wgpu
+renderer when possible because OpenGL has historically crashed on window
+maximize.
+
 ## The web UI looks like an old version after an upgrade
 
 The SPA is served `Cache-Control: no-store`, so a hard reload

@@ -10,12 +10,13 @@ authors = ["InannaBeloved <anassaeneroi@pm.me>"]
 readme = "README.md"
 
 [dependencies]
-# Use the wgpu (Vulkan/Metal/DX) renderer instead of the default glow
+# Default to the wgpu (Vulkan/Metal/DX) renderer instead of the default glow
 # (OpenGL) one. NVIDIA + Wayland crashes the GL surface on window resize
 # (Glutin EGL_BAD_ALLOC / OutOfMemory on maximize); wgpu's Vulkan path
-# reconfigures the swapchain cleanly. We drop the `glow` default feature
-# and keep the rest (accesskit, fonts, wayland, x11).
-eframe = { version = "0.29", default-features = false, features = ["accesskit", "default_fonts", "wayland", "x11", "wgpu"] }
+# reconfigures the swapchain cleanly. Keep glow compiled in as an escape
+# hatch for machines where wgpu/Vulkan creates a window but never presents
+# a frame (`YT_OFFLINE_RENDERER=glow` or `--renderer glow`).
+eframe = { version = "0.29", default-features = false, features = ["accesskit", "default_fonts", "wayland", "x11", "wgpu", "glow"] }
 image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png"] }
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
