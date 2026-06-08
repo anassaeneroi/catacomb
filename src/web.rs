@@ -2833,16 +2833,15 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     // warm-filesystem rescan of a large library).
     let db = Database::open(&db_path)
         .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
-    let mut library = library::scan_channels_with_cache(&channels_root, Some(&db));
-    if let Ok(map) = db.get_all_channel_options() {
-        library::apply_channel_options(&mut library, &map);
-    }
-    if let Ok(folder_map) = db.get_all_channel_assignments() {
-        library::apply_channel_folders(&mut library, &folder_map);
-    }
+    // Defer the initial library scan until *after* the listener binds (see
+    // the spawn_blocking below). A cold-cache scan of a large library on a
+    // slow disk can take minutes, and running it here blocks the bind —
+    // making the server look dead on the network (e.g. over Tailscale)
+    // until it finishes. Start empty; `/api/library` returns an empty set
+    // until the first scan lands and bumps the library version.
+    let library: Vec<library::Channel> = Vec::new();
     let watched = db.get_watched().unwrap_or_default();
     let positions = db.get_positions().unwrap_or_default();
-    refresh_search_index(&db, &library);
 
     let mut downloader = Downloader::new(
         channels_root.clone(),
@@ -3041,7 +3040,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         // skips already-compressed content types automatically.
         .layer(CompressionLayer::new().gzip(true))
         .layer(middleware::from_fn(security_headers))
-        .with_state(state);
+        .with_state(state.clone());
 
     let listener = match tokio::net::TcpListener::bind(format!("{bind_addr}:{port}")).await {
         Ok(l) => l,
@@ -3051,6 +3050,27 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         }
     };
     println!("yt-offline web UI: http://localhost:{port}");
+
+    // Now that we're accepting connections, run the initial library scan in
+    // the background so a cold-cache scan of a large library doesn't delay
+    // the bind. Mirrors post_rescan(): scan → apply options/folders →
+    // refresh search index → swap into state + bump the library version so
+    // connected clients pick it up. spawn_blocking keeps the parallel
+    // (rayon) filesystem walk off the async worker threads.
+    let scan_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut new_lib =
+            library::scan_channels_with_cache(&scan_state.channels_root, Some(&scan_state.db));
+        if let Ok(map) = scan_state.db.get_all_channel_options() {
+            library::apply_channel_options(&mut new_lib, &map);
+        }
+        if let Ok(folder_map) = scan_state.db.get_all_channel_assignments() {
+            library::apply_channel_folders(&mut new_lib, &folder_map);
+        }
+        refresh_search_index(&scan_state.db, &new_lib);
+        *scan_state.library.lock_recover() = new_lib;
+        bump_library_version(&scan_state);
+    });
 
     // `into_make_service_with_connect_info` so handlers can extract the
     // client's `SocketAddr` (used for per-IP rate limiting on /api/login).
