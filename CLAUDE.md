@@ -162,6 +162,13 @@ both the transcript indexer and the transcript viewers.
   desktop code goes in `app.rs`, web handlers in `web.rs`, shared logic in the
   focused modules (`downloader`, `database`, `library`, `platform`, `fingerprint`,
   `vtt`, …).
-- Tray (`ksni`) and file dialogs (`rfd` xdg-portal) are Linux-only/no-GTK by
-  design; keep that posture (it's why packaging avoids a GTK dep). Windows/macOS
-  are not yet first-class — the tray would need a per-OS backend.
+- Tray (`ksni`) and the `rfd` xdg-portal dialog backend are Linux-only/no-GTK
+  by design (it's why packaging avoids a GTK dep). They're now **target-gated**
+  in `Cargo.toml` (`cfg(target_os = "linux")`); off Linux `rfd` uses its native
+  backend and `tray::start` is a compiled-out no-op (`None`). The tree
+  cross-compiles — `cargo check --target x86_64-pc-windows-gnu` is green — so
+  keep new platform-specific code behind `cfg(unix)`/`cfg(windows)`/
+  `cfg(target_os = …)` with a fallback, the way `disk_space`, `plex`, the mpv
+  IPC, and the `chmod` guards already do. Windows/macOS still aren't *shipped*
+  (no tray backend, no link/CI yet), but don't reintroduce an unconditional
+  Linux-only dep.

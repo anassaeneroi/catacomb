@@ -32,11 +32,19 @@ tokio-stream = "0.1"
 tower-http = { version = "0.5", features = ["cors", "fs", "compression-gzip"] }
 argon2 = "0.5"
 rand = "0.8"
-# File-picker dialog for the desktop GUI. xdg-portal backend keeps it pure-Rust
-# (zbus, no GTK/libdbus build dep), consistent with notify-rust above.
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
-ksni = { version = "0.3.4", features = ["tokio"] }
 libc = "0.2.186"
+
+# Platform-specific desktop deps. On Linux the tray (ksni — StatusNotifierItem
+# over zbus) and the rfd file picker (xdg-portal backend) stay pure-Rust with no
+# GTK build dep, matching notify-rust. On Windows/macOS there's no SNI tray yet
+# (tray::start is a compiled-out no-op) and rfd falls back to its native backend
+# (Win32 / AppKit) via its default features.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.4", features = ["tokio"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rfd = { version = "0.15", features = ["tokio"] }
 
 [profile.release]
 opt-level = 3

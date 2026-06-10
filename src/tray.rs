@@ -21,7 +21,7 @@
 //! the tray entirely optional — if `TrayController::start` fails the app
 //! continues normally.
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::Receiver;
 
 /// Menu events emitted by the tray. The main app drains these in
 /// [`eframe::App::update`] and translates them into viewport commands or
@@ -49,8 +49,9 @@ pub struct TrayHandle {
 /// by ksni when the SNI host needs a property; menu activations call the
 /// boxed closures we store in `MenuItem::activate`, which forward into
 /// the channel back to the main thread.
+#[cfg(target_os = "linux")]
 struct TrayModel {
-    tx: Sender<TrayEvent>,
+    tx: std::sync::mpsc::Sender<TrayEvent>,
     /// PNG bytes for the icon, decoded once at construction. ksni asks
     /// for raw ARGB so we keep both forms.
     icon_argb: Vec<u8>,
@@ -58,6 +59,7 @@ struct TrayModel {
     icon_h: i32,
 }
 
+#[cfg(target_os = "linux")]
 impl ksni::Tray for TrayModel {
     fn id(&self) -> String {
         "yt-offline".into()
@@ -127,6 +129,7 @@ impl ksni::Tray for TrayModel {
 /// Returns `None` if the runtime / channel can't be set up. A `Some(_)`
 /// return does *not* guarantee the icon is actually visible — that depends
 /// on whether a StatusNotifier host is registered on the user's desktop.
+#[cfg(target_os = "linux")]
 pub fn start(icon_png_bytes: &[u8]) -> Option<TrayHandle> {
     // Decode the PNG eagerly so we fail fast if the embedded asset is bad.
     let img = image::load_from_memory(icon_png_bytes).ok()?;
@@ -141,7 +144,7 @@ pub fn start(icon_png_bytes: &[u8]) -> Option<TrayHandle> {
         argb.push(px[2]);
     }
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
     let model = TrayModel {
         tx,
         icon_argb: argb,
@@ -174,4 +177,14 @@ pub fn start(icon_png_bytes: &[u8]) -> Option<TrayHandle> {
         .ok()?;
 
     Some(TrayHandle { events: rx })
+}
+
+/// Non-Linux stub: there's no StatusNotifierItem tray backend on Windows or
+/// macOS yet (ksni is Linux/SNI-only), so the tray is simply absent and the
+/// app runs windowed-only. A real implementation would need a per-OS backend
+/// (e.g. `tray-icon`) behind this same signature. Returning `None` makes
+/// `App` behave exactly as it does on Linux when no SNI host is registered.
+#[cfg(not(target_os = "linux"))]
+pub fn start(_icon_png_bytes: &[u8]) -> Option<TrayHandle> {
+    None
 }

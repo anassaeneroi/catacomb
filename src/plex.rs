@@ -118,8 +118,17 @@ fn make_symlink(target: &Path, link: &Path) -> Result<(), String> {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link)
         .map_err(|e| format!("{}: {e}", link.display()))?;
-    #[cfg(not(unix))]
-    return Err("symlinks are not supported on this platform".to_string());
+    // Windows distinguishes file vs dir symlinks; the Plex tree only links to
+    // video files. Requires Developer Mode or admin at runtime — a failure
+    // here surfaces as the usual per-link error rather than aborting.
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(target, link)
+        .map_err(|e| format!("{}: {e}", link.display()))?;
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = target;
+        return Err("symlinks are not supported on this platform".to_string());
+    }
     Ok(())
 }
 

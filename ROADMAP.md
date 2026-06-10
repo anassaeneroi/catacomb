@@ -126,13 +126,25 @@ instead of cascading one handler's panic into a dead server.
 
 Once we're at parity, we push past Tartube on its own ground.
 
-### 3.1 Cross-compile macOS + Windows binaries
+### 3.1 Cross-compile macOS + Windows binaries — GROUNDWORK DONE
 
-The Linux packaging (1.8) is done; this is the natural next reach. Blocked
-on abstracting the Linux-only bits behind a per-OS backend — the `ksni`
-tray and the `rfd` xdg-portal file dialog have no Windows/macOS path yet.
-Once the tray is a trait with per-OS impls, the rest of the stack
-(eframe/wgpu, axum, rusqlite-bundled) already cross-compiles.
+The compile blockers are cleared: `cargo check --target
+x86_64-pc-windows-gnu` is green (only the upstream egui `f32: From<f64>`
+warnings). The Linux-only deps are now target-gated in `Cargo.toml` —
+`ksni` and `rfd`'s `xdg-portal` backend are `cfg(target_os = "linux")`
+only, with `rfd` falling back to its native Win32/AppKit backend
+elsewhere. `tray::start` is `cfg`-split: the SNI/ksni implementation on
+Linux, a no-op `None` stub on other OSes (windowed-only, exactly the
+no-SNI-host behavior). The rest was already portable — `disk_space`
+(`statvfs`), `plex` (symlinks; now with a Windows `symlink_file` path),
+the mpv IPC `UnixStream`, and the `chmod`/`PermissionsExt` guards are all
+`cfg(unix)`-gated. macOS is Unix, so those paths apply there unchanged.
+
+Remaining for a shipped binary: a real per-OS tray backend (e.g.
+`tray-icon`) if the tray is wanted off Linux; a CI matrix that actually
+*links* (mingw-w64 / an osxcross or macOS runner) and produces artifacts;
+and runtime testing on each OS. The hard part — making the tree compile
+off Linux — is done.
 
 ### 3.2 Android client
 
