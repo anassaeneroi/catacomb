@@ -134,6 +134,13 @@ pub struct BackupSection {
     /// overrides live in [`crate::download_options::DownloadOptions`].
     #[serde(default = "default_sponsorblock_mode")]
     pub sponsorblock_mode: String,
+    /// Download the comment tree into each video's info.json sidecar via
+    /// yt-dlp `--write-comments`. Off by default — comment download is slow
+    /// (yt-dlp paginates through thousands of replies on popular videos).
+    /// When on, the player's Comments tab is populated. Per-channel overrides
+    /// live in [`crate::download_options::DownloadOptions`].
+    #[serde(default)]
+    pub fetch_comments: bool,
 }
 
 fn default_max_concurrent() -> usize { 3 }
@@ -273,6 +280,7 @@ impl Config {
                 use_pot_provider: false,
                 youtube_player_clients: String::new(),
                 sponsorblock_mode: default_sponsorblock_mode(),
+                fetch_comments: false,
             },
             player: PlayerSection::default(),
             ui: UiSection::default(),

@@ -142,7 +142,7 @@
   .dl-new-flags{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
   .dl-new-flags label{display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap}
   .preview-thumb{width:100%;max-width:280px;aspect-ratio:16/9;object-fit:cover;border-radius:4px;background:#000;flex-shrink:0}
-  .empty{text-align:center;color:var(--muted);padding:40px;font-size:13px}
+  .empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:40px;font-size:13px}
   @media(max-width:640px){
     #menu-btn{display:block}
     aside{position:fixed;top:0;left:0;height:100%;z-index:50;transform:translateX(-100%);width:240px}
@@ -776,7 +776,7 @@ function renderChannelGrid(){
   const chs=q?library.filter(ch=>ch.name.toLowerCase().includes(q)||ch.uploader?.toLowerCase().includes(q)):library;
   setStatus(chs.length+' channel'+(chs.length!==1?'s':''));
   if(!chs.length){grid.innerHTML='<div class="empty">Nothing here.</div>';return}
-  grid.innerHTML='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;padding:4px">'+chs.map((ch,i)=>{
+  grid.innerHTML='<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;padding:4px">'+chs.map((ch,i)=>{
     const idx=library.indexOf(ch);
     const thumb=ch.thumb_url?`<img src="${ch.thumb_url}" loading="lazy" alt="">`:'<div class="nothumb">📺</div>';
     const size=ch.size_bytes>0?` · ${fmtSize(ch.size_bytes)}`:'';
@@ -799,7 +799,7 @@ function renderMusicGrid(){
   const tracks=q?musicTracks.filter(t=>t.title.toLowerCase().includes(q)||t.artist.toLowerCase().includes(q)):musicTracks;
   setStatus(tracks.length+' track'+(tracks.length!==1?'s':''));
   if(!tracks.length){grid.innerHTML='<div class="empty">No music yet. Use 🎵 Music mode in the download bar.</div>';return}
-  let currentArtist='',h='<div style="width:100%;padding:4px">';
+  let currentArtist='',h='<div style="grid-column:1/-1;width:100%;padding:4px">';
   for(const t of tracks){
     if(t.artist!==currentArtist){
       currentArtist=t.artist;
@@ -994,9 +994,9 @@ async function openChannelOptions(idx){
     <div class="settings-row"><label>Audio-only</label>
       <input type="checkbox" id="opt-audio" ${opts.audio_only?'checked':''}></div>
     <div class="settings-hint" style="margin-bottom:4px">Useful for music channels — saves disk + skips video re-encode.</div>
-    <div class="settings-row"><label>Fetch comments</label>
-      <input type="checkbox" id="opt-comments" ${opts.fetch_comments?'checked':''}></div>
-    <div class="settings-hint" style="margin-bottom:4px">Adds <code>--write-comments</code>. Embeds the comment tree into info.json — slow for popular videos but enables the Comments tab in the player.</div>
+    <div class="settings-row"><label>Fetch comments (blank = global)</label>
+      ${triSelect('opt-comments',opts.fetch_comments)}</div>
+    <div class="settings-hint" style="margin-bottom:4px">Adds <code>--write-comments</code>. Embeds the comment tree into info.json — slow for popular videos but enables the Comments tab in the player. "Default" uses the global setting.</div>
     <div class="settings-row"><label>Skip auth check</label>
       <input type="checkbox" id="opt-skipauth" ${opts.skip_auth_check?'checked':''}></div>
     <div class="settings-hint" style="margin-bottom:4px">Adds <code>--extractor-args youtubetab:skip=authcheck</code>. Safe for <strong>public</strong> channels — silences the "playlists that require authentication may not extract correctly" warning without changing which videos are found. Leave off for members-only/private channels, where that warning means your cookies may not be working.</div>
@@ -1058,7 +1058,7 @@ function readChannelOptionsForm(){
   return {
     quality:q?q:null,
     audio_only:document.getElementById('opt-audio')?.checked||false,
-    fetch_comments:document.getElementById('opt-comments')?.checked||false,
+    fetch_comments:triValue('opt-comments'),
     skip_auth_check:document.getElementById('opt-skipauth')?.checked||false,
     limit_rate_kb:intOrNull('opt-rate'),
     min_filesize_mb:intOrNull('opt-minsz'),
@@ -1785,6 +1785,11 @@ async function openSettings(){
       </select>
     </div>
     <div class="settings-hint" style="margin-bottom:6px">Uses the community SponsorBlock database for sponsor / intro / self-promo segments. <b>Mark</b> adds skippable chapter markers; <b>Remove</b> cuts the segments out of the saved file. Per-channel overrides live in each channel's options.</div>
+    <div class="settings-row" style="margin-top:8px">
+      <label for="cf-comments">Fetch comments</label>
+      <input type="checkbox" id="cf-comments" ${cur.fetch_comments?'checked':''}>
+    </div>
+    <div class="settings-hint" style="margin-bottom:6px">Adds <code>--write-comments</code> to every download — fetches each video's comment tree into its info.json so the player's Comments tab works. Slow on popular videos. Per-channel overrides live in each channel's options.</div>
     <hr style="border-color:var(--border);margin:12px 0">
     <div style="font-weight:700;margin-bottom:8px">Subtitles (global defaults)</div>
     <div class="settings-hint" style="margin-bottom:6px">Applied to every download. Individual channels can override these in their Channel options dialog.</div>
@@ -2027,12 +2032,13 @@ async function saveSettings(btn){
   const subsFormat=document.getElementById('cf-subs-format')?.value||'';
   const playerClients=document.getElementById('cf-player-clients')?.value||'';
   const sponsorblock=document.getElementById('cf-sponsorblock')?.value||'mark';
+  const fetchComments=document.getElementById('cf-comments')?.checked||false;
   const convMode=document.getElementById('cf-convert-mode')?.value||'';
   const convCrf=parseInt(document.getElementById('cf-convert-crf')?.value||'23',10);
   const convPreset=document.getElementById('cf-convert-preset')?.value||'';
   const convAudio=document.getElementById('cf-convert-audio')?.value||'';
   const convKeep=document.getElementById('cf-convert-keep')?.checked||false;
-  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider,subtitles_enabled:subsEnabled,subtitles_auto:subsAuto,subtitles_embed:subsEmbed,subtitle_langs:subsLangs,subtitle_format:subsFormat,youtube_player_clients:playerClients,sponsorblock_mode:sponsorblock,convert_mode:convMode,convert_crf:convCrf,convert_preset:convPreset,convert_audio_format:convAudio,convert_keep_original:convKeep};
+  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider,subtitles_enabled:subsEnabled,subtitles_auto:subsAuto,subtitles_embed:subsEmbed,subtitle_langs:subsLangs,subtitle_format:subsFormat,youtube_player_clients:playerClients,sponsorblock_mode:sponsorblock,fetch_comments:fetchComments,convert_mode:convMode,convert_crf:convCrf,convert_preset:convPreset,convert_audio_format:convAudio,convert_keep_original:convKeep};
   if(bindMode)payload.bind_mode=bindMode;
   if(plexPath!==undefined)payload.plex_library_path=plexPath;
   if(sourceUrl!==undefined)payload.source_url=sourceUrl;

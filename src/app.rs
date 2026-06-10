@@ -116,6 +116,11 @@ pub struct App {
     /// non-YouTube content is included.
     library_root: PathBuf,
     library: Vec<library::Channel>,
+    /// Receiver for the initial library scan, which runs on a background
+    /// thread so the window appears immediately instead of blocking on a
+    /// cold-cache scan of a large library. `None` once the scan has landed
+    /// (or was never deferred). Polled in `update()`.
+    library_load_rx: Option<std::sync::mpsc::Receiver<Vec<library::Channel>>>,
     sidebar_view: SidebarView,
     selected_video: Option<String>,
     /// Edit buffer for the selected video's note, plus the id it belongs
@@ -256,7 +261,9 @@ pub struct App {
 struct ChannelOptionsForm {
     quality_idx: usize,           // 0=default, 1=Best, 2=1080p, 3=720p, 4=480p, 5=360p
     audio_only: bool,
-    fetch_comments: bool,
+    // Per-channel comment-fetch override: 0=Default(global), 1=On, 2=Off.
+    // Maps to Option<bool> on save (same tri-state as the subtitle indices).
+    comments_idx: usize,
     skip_auth_check: bool,
     limit_rate_kb: String,
     min_filesize_mb: String,
@@ -369,23 +376,40 @@ impl App {
         let db_path = channels_root.join("yt-offline.db");
         let db = Database::open(&db_path)
             .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
-        let mut library = library::scan_channels_with_cache(&channels_root, Some(&db));
-        let status = format!(
-            "{} channels, {} videos",
-            library.len(),
-            library.iter().map(|c| c.total_videos()).sum::<usize>()
-        );
-        // Hydrate per-channel download options + folder assignments from
-        // SQLite onto the scanned library before publishing it to the UI.
-        if let Ok(map) = db.get_all_channel_options() {
-            library::apply_channel_options(&mut library, &map);
+        // Defer the (potentially multi-minute, disk-bound) library scan +
+        // search-index sync to a background thread so the window appears
+        // immediately instead of blocking on a cold-cache scan of a large
+        // library. The UI renders an empty library until the scan lands and
+        // update() swaps it in. The folder/watched/flag reads below are cheap
+        // DB lookups that don't depend on the scan, so they stay synchronous.
+        let (library_load_tx, library_load_rx) =
+            std::sync::mpsc::channel::<Vec<library::Channel>>();
+        let status = "Scanning library…".to_string();
+        {
+            let db = db.clone();
+            let channels_root = channels_root.clone();
+            let ctx = cc.egui_ctx.clone();
+            std::thread::Builder::new()
+                .name("yt-offline-libscan".into())
+                .spawn(move || {
+                    let mut library = library::scan_channels_with_cache(&channels_root, Some(&db));
+                    // Hydrate per-channel download options + folder assignments
+                    // from SQLite onto the scanned library before publishing it.
+                    if let Ok(map) = db.get_all_channel_options() {
+                        library::apply_channel_options(&mut library, &map);
+                    }
+                    if let Ok(folder_map) = db.get_all_channel_assignments() {
+                        library::apply_channel_folders(&mut library, &folder_map);
+                    }
+                    if let Err(e) = db.sync_search_index(&library::build_search_entries(&library)) {
+                        eprintln!("search index sync failed: {e}");
+                    }
+                    let _ = library_load_tx.send(library);
+                    ctx.request_repaint(); // wake update() to swap the result in
+                })
+                .ok();
         }
-        if let Ok(folder_map) = db.get_all_channel_assignments() {
-            library::apply_channel_folders(&mut library, &folder_map);
-        }
-        if let Err(e) = db.sync_search_index(&library::build_search_entries(&library)) {
-            eprintln!("search index sync failed: {e}");
-        }
+        let library: Vec<library::Channel> = Vec::new();
         let folders = db.list_folders().unwrap_or_default();
         let watched = db.get_watched().unwrap_or_default();
         let flags = db.get_video_flags().unwrap_or_default();
@@ -408,6 +432,7 @@ impl App {
         downloader.subtitle_defaults = config.subtitles.clone();
         downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
         downloader.sponsorblock_mode = config.backup.sponsorblock_mode.clone();
+        downloader.fetch_comments = config.backup.fetch_comments;
         downloader.convert_defaults = config.convert.clone();
         let config_bind = config.web.bind.clone();
         let password_set = db.get_setting("password_hash").ok().flatten().is_some();
@@ -473,6 +498,7 @@ impl App {
             channels_root: channels_root.clone(),
             library_root,
             library,
+            library_load_rx: Some(library_load_rx),
             sidebar_view: SidebarView::All,
             selected_video: None,
             note_buffer: String::new(),
@@ -575,7 +601,7 @@ impl App {
         ChannelOptionsForm {
             quality_idx,
             audio_only: opts.audio_only,
-            fetch_comments: opts.fetch_comments,
+            comments_idx: tri_to_idx(opts.fetch_comments),
             skip_auth_check: opts.skip_auth_check,
             limit_rate_kb: num(opts.limit_rate_kb),
             min_filesize_mb: num(opts.min_filesize_mb),
@@ -613,7 +639,7 @@ impl App {
         crate::download_options::DownloadOptions {
             quality,
             audio_only: f.audio_only,
-            fetch_comments: f.fetch_comments,
+            fetch_comments: idx_to_tri(f.comments_idx),
             skip_auth_check: f.skip_auth_check,
             limit_rate_kb: parse_num(&f.limit_rate_kb),
             min_filesize_mb: parse_num(&f.min_filesize_mb),
@@ -946,7 +972,7 @@ impl App {
         let progress = self.dedup_progress.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.dedup_rx = Some(rx);
-        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let workers = crate::fingerprint::default_workers();
         std::thread::spawn(move || {
             let res = crate::fingerprint::rebuild_and_group(
                 &db, inputs, &valid_paths, workers, &progress.0, &progress.1,
@@ -2038,6 +2064,19 @@ impl App {
     fn maintenance_screen(&mut self, ctx: &egui::Context) {
         let report = self.health_report.clone().unwrap_or_default();
 
+        // Swap in the library once the deferred startup scan finishes.
+        let loaded_library = self.library_load_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(lib) = loaded_library {
+            self.library = lib;
+            self.status = format!(
+                "{} channels, {} videos",
+                self.library.len(),
+                self.library.iter().map(|c| c.total_videos()).sum::<usize>()
+            );
+            self.library_load_rx = None;
+            ctx.request_repaint();
+        }
+
         // Drain the background dedup result if it's ready.
         let mut dedup_done = None;
         if let Some(rx) = &self.dedup_rx {
@@ -2387,8 +2426,14 @@ impl App {
                     ui.end_row();
 
                     ui.label("Fetch comments");
-                    ui.checkbox(&mut form.fetch_comments, "Embed --write-comments into info.json")
-                        .on_hover_text("Slow on popular videos. Once captured, comments are browsable from the player modal in the web UI.");
+                    egui::ComboBox::from_id_salt("ch_comments")
+                        .selected_text(match form.comments_idx { 1 => "On", 2 => "Off", _ => "Default (global)" })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut form.comments_idx, 0, "Default (global)");
+                            ui.selectable_value(&mut form.comments_idx, 1, "On");
+                            ui.selectable_value(&mut form.comments_idx, 2, "Off");
+                        })
+                        .response.on_hover_text("Default = use the global Fetch comments setting. Adds --write-comments — slow on popular videos. Once captured, comments are browsable from the player modal in the web UI.");
                     ui.end_row();
 
                     ui.label("Skip auth check");
@@ -3020,6 +3065,15 @@ impl App {
                                  overrides live in each channel's options.");
                         ui.end_row();
 
+                        ui.label("Fetch comments:");
+                        ui.checkbox(&mut self.config.backup.fetch_comments, "Download comments (--write-comments)")
+                            .on_hover_text(
+                                "Fetch each video's comment tree into its info.json so the \
+                                 web player's Comments tab is populated. Slow on popular \
+                                 videos (yt-dlp paginates through thousands of replies). \
+                                 Per-channel overrides live in each channel's options.");
+                        ui.end_row();
+
                         ui.label("Web UI port:");
                         ui.add(
                             egui::DragValue::new(&mut self.config.web.port)
@@ -3429,6 +3483,7 @@ impl App {
                         self.downloader.subtitle_defaults = self.config.subtitles.clone();
                         self.downloader.youtube_player_clients = self.config.backup.youtube_player_clients.clone();
                         self.downloader.sponsorblock_mode = self.config.backup.sponsorblock_mode.clone();
+                        self.downloader.fetch_comments = self.config.backup.fetch_comments;
                         self.downloader.convert_defaults = self.config.convert.clone();
                         if dir_changed {
                             self.channels_root = new_dir.clone();

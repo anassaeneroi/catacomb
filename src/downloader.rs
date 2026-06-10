@@ -18,6 +18,7 @@
 //! | `--embed-metadata --embed-info-json --embed-chapters` | Embed rich metadata into the MKV |
 //! | `--xattrs` | Store metadata in filesystem extended attributes |
 //! | `--sponsorblock-mark/-remove all` | SponsorBlock handling, per `sponsorblock_mode` (off/mark/remove; see [`Self::apply_sponsorblock`]) |
+//! | `--write-comments` | Fetch the comment tree, per `fetch_comments` global + per-channel override (see [`Self::apply_comments`]) |
 //! | `--impersonate <target>` | Browser TLS fingerprint per source platform (see [`crate::platform::Platform::impersonate_target`]) |
 //! | `--break-on-existing` | Stop when the archive file records the video as already downloaded |
 //! | `--download-archive archive.txt` | Record downloaded IDs to avoid re-downloading |
@@ -317,6 +318,10 @@ pub struct Downloader {
     /// Global `backup.sponsorblock_mode` ("off" / "mark" / "remove").
     /// Per-channel options can override. Set at construction + on save.
     pub sponsorblock_mode: String,
+    /// Global `backup.fetch_comments`. When true, downloads pass
+    /// `--write-comments`. Per-channel options can override. Set at
+    /// construction + on settings save.
+    pub fetch_comments: bool,
     /// Global `[convert]` config. Drives the post-download ffmpeg pass.
     /// Per-channel options override the mode. Set at construction + save.
     pub convert_defaults: crate::config::ConvertSection,
@@ -363,6 +368,7 @@ impl Downloader {
             subtitle_defaults: crate::config::SubtitlesSection::default(),
             youtube_player_clients: String::new(),
             sponsorblock_mode: "mark".to_string(),
+            fetch_comments: false,
             convert_defaults: crate::config::ConvertSection::default(),
             retry_queue: Vec::new(),
             rate_limited_backoff: false,
@@ -408,6 +414,18 @@ impl Downloader {
             "mark" => { cmd.arg("--sponsorblock-mark").arg("all"); }
             "remove" => { cmd.arg("--sponsorblock-remove").arg("all"); }
             _ => {} // "off" or unknown → no SponsorBlock processing
+        }
+    }
+
+    /// Add `--write-comments` when comment fetching is enabled, merging the
+    /// per-channel override (`Some(true)`/`Some(false)`) with the global
+    /// `fetch_comments` default (used when the override is `None`).
+    fn apply_comments(&self, cmd: &mut Command, opts: Option<&DownloadOptions>) {
+        let enabled = opts
+            .and_then(|o| o.fetch_comments)
+            .unwrap_or(self.fetch_comments);
+        if enabled {
+            cmd.arg("--write-comments");
         }
     }
 
@@ -763,6 +781,8 @@ impl Downloader {
         self.apply_player_client(&mut cmd, channel_options);
         // SponsorBlock: global default + per-channel override (off/mark/remove).
         self.apply_sponsorblock(&mut cmd, channel_options);
+        // Comment fetching: global backup.fetch_comments + per-channel override.
+        self.apply_comments(&mut cmd, channel_options);
         // Post-download conversion: resolve global [convert] + per-channel
         // override. When active, ask yt-dlp to print each finished file's
         // final path (after_move) so we can enqueue an ffmpeg pass on it.

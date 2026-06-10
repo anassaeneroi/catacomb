@@ -112,12 +112,14 @@ pub struct DownloadOptions {
     #[serde(default)]
     pub extra_args: Vec<String>,
 
-    /// Embed video comments into the info.json sidecar (yt-dlp
-    /// `--write-comments`). Off by default because comment download is slow
-    /// — yt-dlp paginates through thousands of replies for popular videos.
-    /// When on, the web UI's player modal exposes a Comments tab.
+    /// Per-channel override for fetching video comments into the info.json
+    /// sidecar (yt-dlp `--write-comments`). `None` defers to the global
+    /// `backup.fetch_comments`; `Some(true)`/`Some(false)` forces it on/off
+    /// for this channel. Resolved in the downloader's comment resolver, which
+    /// merges this with the global default. When on, the player's Comments
+    /// tab is populated (comment download is slow on popular videos).
     #[serde(default)]
-    pub fetch_comments: bool,
+    pub fetch_comments: Option<bool>,
 
     /// Skip yt-dlp's channel-tab authentication sanity check by passing
     /// `--extractor-args youtubetab:skip=authcheck`.
@@ -179,9 +181,9 @@ impl DownloadOptions {
                 cmd.arg(arg);
             }
         }
-        if self.fetch_comments {
-            cmd.arg("--write-comments");
-        }
+        // Comment fetching (--write-comments) is emitted by the downloader's
+        // comment resolver, which merges this per-channel override with the
+        // global backup.fetch_comments default. apply() handles the rest.
         if self.skip_auth_check {
             // Its own --extractor-args flag; the youtubetab: namespace is
             // distinct from the POT provider's youtubepot-bgutilhttp: one,

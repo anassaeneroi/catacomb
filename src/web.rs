@@ -416,6 +416,10 @@ struct SettingsPayload {
     /// SponsorBlock mode: "off" / "mark" / "remove".
     #[serde(default)]
     sponsorblock_mode: String,
+    /// Global comment fetching (`--write-comments`). Per-channel overrides
+    /// live in each channel's DownloadOptions, not here.
+    #[serde(default)]
+    fetch_comments: bool,
     /// Global [convert] settings, round-tripped on GET + POST.
     #[serde(default)]
     convert_mode: String,
@@ -451,6 +455,22 @@ fn file_url(library_root: &StdPath, full: &StdPath) -> Option<String> {
     }
     if parts.is_empty() { return None; }
     Some(format!("/files/{}", parts.join("/")))
+}
+
+/// Like `file_url` but targets the `/api/sub-vtt/…` endpoint. All subtitle
+/// tracks are routed through that handler (not the raw `/files/` mount) so
+/// their cue position/alignment settings get stripped before the player
+/// renders them — otherwise auto-generated captions render left-aligned.
+fn sub_vtt_url(library_root: &StdPath, full: &StdPath) -> Option<String> {
+    let rel = full.strip_prefix(library_root).ok()?;
+    let mut parts: Vec<String> = Vec::new();
+    for c in rel.components() {
+        if let std::path::Component::Normal(s) = c {
+            parts.push(percent_encode_segment(s.to_str()?));
+        }
+    }
+    if parts.is_empty() { return None; }
+    Some(format!("/api/sub-vtt/{}", parts.join("/")))
 }
 
 fn percent_encode_segment(s: &str) -> String {
@@ -603,7 +623,42 @@ fn srt_to_vtt(srt: &str) -> String {
     let mut out = String::from("WEBVTT\n\n");
     for line in srt.lines() {
         if line.contains("-->") {
-            out.push_str(&line.replace(',', "."));
+            out.push_str(&strip_cue_settings(&line.replace(',', ".")));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Drop the per-cue position/alignment settings ("align:start position:0%",
+/// "line:…", "size:…") that yt-dlp's auto-generated captions append to every
+/// cue timing line. Browsers honor them and left-align/offset the text;
+/// removing them restores the default centered, bottom rendering. Only the
+/// settings *after* the "start --> end" timestamps are removed — the two
+/// timestamps are preserved verbatim.
+fn strip_cue_settings(timing_line: &str) -> String {
+    match timing_line.find("-->") {
+        Some(arrow) => {
+            let start = timing_line[..arrow].trim_end();
+            let after = timing_line[arrow + 3..].trim_start();
+            // The end timestamp is the first whitespace-delimited token; any
+            // cue settings follow it and are dropped.
+            let end = after.split_whitespace().next().unwrap_or("");
+            format!("{start} --> {end}")
+        }
+        None => timing_line.to_string(),
+    }
+}
+
+/// Strip cue settings from an already-WebVTT document (leaves the header,
+/// cue identifiers, and text untouched — only timing lines are normalized).
+fn normalize_vtt(vtt: &str) -> String {
+    let mut out = String::with_capacity(vtt.len());
+    for line in vtt.lines() {
+        if line.contains("-->") {
+            out.push_str(&strip_cue_settings(line));
         } else {
             out.push_str(line);
         }
@@ -815,6 +870,27 @@ mod tests {
         // Comma in body preserved; comma in timestamp converted to dot.
         assert!(vtt.contains("00:00:01.500 --> 00:00:03.000"));
         assert!(vtt.contains("Hello, world"));
+    }
+
+    #[test]
+    fn strip_cue_settings_drops_alignment_keeps_timestamps() {
+        let line = "00:00:01.000 --> 00:00:03.000 align:start position:0%";
+        assert_eq!(strip_cue_settings(line), "00:00:01.000 --> 00:00:03.000");
+        // A plain timing line is unchanged.
+        let plain = "00:00:01.000 --> 00:00:03.000";
+        assert_eq!(strip_cue_settings(plain), plain);
+        // Non-timing lines pass through untouched.
+        assert_eq!(strip_cue_settings("Hello align:start"), "Hello align:start");
+    }
+
+    #[test]
+    fn normalize_vtt_strips_settings_only_on_timing_lines() {
+        let vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000 align:start position:10%\nHello\n";
+        let out = normalize_vtt(vtt);
+        assert!(out.contains("00:00:01.000 --> 00:00:03.000\n"));
+        assert!(!out.contains("align:start"));
+        assert!(out.contains("Hello"));
+        assert!(out.starts_with("WEBVTT"));
     }
 
     #[test]
@@ -1214,14 +1290,9 @@ async fn build_library_payload(state: &Arc<WebState>) -> LibraryResponse {
         let thumb_url = v.thumb_path.as_deref().and_then(|p| file_url(root, p));
         let subtitles: Vec<SubtitleInfo> = v.subtitles.iter()
             .filter_map(|s| {
-                let is_srt = s.path.extension().and_then(|e| e.to_str()) == Some("srt");
-                let url = if is_srt {
-                    // Route SRT through the on-the-fly conversion endpoint.
-                    let rel = s.path.strip_prefix(root).ok()?;
-                    Some(format!("/api/sub-vtt/{}", rel.display()))
-                } else {
-                    file_url(root, &s.path)
-                }?;
+                // Route every track (SRT and VTT alike) through /api/sub-vtt so
+                // cue settings are stripped and SRT is converted on the fly.
+                let url = sub_vtt_url(root, &s.path)?;
                 Some(SubtitleInfo {
                     lang: s.lang.clone(),
                     label: lang_label(&s.lang),
@@ -1444,6 +1515,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let subs = cfg.subtitles.clone();
     let player_clients_out = cfg.backup.youtube_player_clients.clone();
     let sponsorblock_out = cfg.backup.sponsorblock_mode.clone();
+    let fetch_comments_out = cfg.backup.fetch_comments;
     let convert = cfg.convert.clone();
     drop(cfg);
 
@@ -1483,6 +1555,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         subtitle_langs: subs.langs,
         youtube_player_clients: player_clients_out.clone(),
         sponsorblock_mode: sponsorblock_out.clone(),
+        fetch_comments: fetch_comments_out,
         convert_mode: convert.mode.clone(),
         convert_crf: convert.crf,
         convert_preset: convert.preset.clone(),
@@ -1529,6 +1602,7 @@ async fn post_settings(
     cfg.subtitles.langs = body.subtitle_langs.trim().to_string();
     cfg.backup.youtube_player_clients = body.youtube_player_clients.trim().to_string();
     cfg.backup.sponsorblock_mode = body.sponsorblock_mode.trim().to_string();
+    cfg.backup.fetch_comments = body.fetch_comments;
     // Global format-conversion defaults.
     cfg.convert.mode = body.convert_mode.trim().to_string();
     cfg.convert.crf = body.convert_crf;
@@ -1551,6 +1625,7 @@ async fn post_settings(
     let subs = cfg.subtitles.clone();
     let player_clients_out = cfg.backup.youtube_player_clients.clone();
     let sponsorblock_out = cfg.backup.sponsorblock_mode.clone();
+    let fetch_comments_out = cfg.backup.fetch_comments;
     let convert = cfg.convert.clone();
     drop(cfg);
 
@@ -1565,6 +1640,7 @@ async fn post_settings(
         dl.subtitle_defaults = subs.clone();
         dl.youtube_player_clients = player_clients_out.clone();
         dl.sponsorblock_mode = sponsorblock_out.clone();
+        dl.fetch_comments = fetch_comments_out;
         dl.convert_defaults = convert.clone();
     }
 
@@ -1622,6 +1698,7 @@ async fn post_settings(
         subtitle_langs: subs.langs,
         youtube_player_clients: player_clients_out.clone(),
         sponsorblock_mode: sponsorblock_out.clone(),
+        fetch_comments: fetch_comments_out,
         convert_mode: convert.mode.clone(),
         convert_crf: convert.crf,
         convert_preset: convert.preset.clone(),
@@ -1630,7 +1707,9 @@ async fn post_settings(
     }).into_response()
 }
 
-/// `GET /api/sub-vtt/*path` — serve an SRT subtitle file as WebVTT.
+/// `GET /api/sub-vtt/*path` — serve a subtitle file as WebVTT: SRT is
+/// converted on the fly, VTT is normalized; both have per-cue position/
+/// alignment settings stripped so captions render centered, not left-aligned.
 ///
 /// The path is relative to the channels root.  The file must be within the
 /// channels root (path traversal is rejected with 403).
@@ -1651,7 +1730,8 @@ async fn get_sub_vtt(
         Ok(s) => s,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
-    let vtt = srt_to_vtt(&content);
+    let is_srt = path.extension().and_then(|e| e.to_str()) == Some("srt");
+    let vtt = if is_srt { srt_to_vtt(&content) } else { normalize_vtt(&content) };
     ([(header::CONTENT_TYPE, "text/vtt; charset=utf-8")], vtt).into_response()
 }
 
@@ -2226,7 +2306,7 @@ fn run_dedup(
     by_path: HashMap<String, SimilarVideo>,
     valid_paths: HashSet<String>,
 ) {
-    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let workers = crate::fingerprint::default_workers();
     let outcome: Result<Vec<SimilarGroup>, String> =
         crate::fingerprint::rebuild_and_group(&db, inputs, &valid_paths, workers, &dedup.done, &dedup.total)
             .map(|path_groups| {
@@ -2853,6 +2933,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     downloader.subtitle_defaults = config.subtitles.clone();
     downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
     downloader.sponsorblock_mode = config.backup.sponsorblock_mode.clone();
+    downloader.fetch_comments = config.backup.fetch_comments;
     downloader.convert_defaults = config.convert.clone();
     let music_root = downloader.music_root();
     let _ = std::fs::create_dir_all(&music_root);

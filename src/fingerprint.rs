@@ -114,6 +114,18 @@ pub struct FpComputed {
     pub hashes: Vec<u64>,
 }
 
+/// How many worker threads the dedup/fingerprint pass should use by default.
+/// Deliberately leaves CPU headroom — each worker also spawns an ffmpeg
+/// process for frame extraction, and the pass is a background maintenance job
+/// that must not starve the UI, downloads, or scans. Uses roughly half the
+/// cores, clamped to `[1, cores-1]` so at least one core stays free.
+pub fn default_workers() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cores / 2).clamp(1, cores.saturating_sub(1).max(1))
+}
+
 /// Fingerprint many videos in parallel, bumping `progress` after each one so a
 /// UI can show "N / total". Mirrors the library scanner's hand-rolled worker
 /// pool (no rayon dependency).
@@ -311,6 +323,17 @@ pub fn rebuild_and_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_workers_leaves_headroom() {
+        let w = default_workers();
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        assert!(w >= 1, "must use at least one worker");
+        // On any multi-core machine at least one core stays free.
+        if cores > 1 {
+            assert!(w < cores, "should leave a core free (w={w}, cores={cores})");
+        }
+    }
 
     #[test]
     fn dhash_gradients() {
