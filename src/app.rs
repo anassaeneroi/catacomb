@@ -229,6 +229,9 @@ pub struct App {
     // Maintenance (library health) screen state. The flag is gone now —
     // Screen::Maintenance + this report's presence drive the render.
     health_report: Option<crate::maintenance::HealthReport>,
+    /// Auto-tag grouping suggestions, recomputed when the Maintenance screen
+    /// opens and after a group is applied. Empty when there's nothing to suggest.
+    autotag_suggestions: Vec<crate::autotag::GroupSuggestion>,
     stats_report: Option<crate::stats::StatsReport>,
     // Per-channel download-options dialog state
     show_channel_options: bool,
@@ -573,6 +576,7 @@ impl App {
             backup_open_tx,
             backup_open_rx,
             health_report: None,
+            autotag_suggestions: Vec::new(),
             stats_report: None,
             show_channel_options: false,
             channel_options_target: None,
@@ -1446,6 +1450,7 @@ impl App {
                     } else {
                         self.health_report =
                             Some(crate::maintenance::scan(&self.library_root, &self.library));
+                        self.autotag_suggestions = crate::autotag::suggest(&self.library);
                         self.current_screen = Screen::Maintenance;
                     }
                 }
@@ -2098,6 +2103,8 @@ impl App {
         let mut rescan_health = false;
         let mut start_dedup = false;
         let mut dedup_remove: Vec<PathBuf> = Vec::new();
+        let mut apply_autotag_group: Option<usize> = None;
+        let autotag_suggestions = self.autotag_suggestions.clone();
         let dedup_groups = self.dedup_groups.clone();
         let dedup_running = self.dedup_running;
         let dedup_started = self.dedup_started;
@@ -2234,8 +2241,38 @@ impl App {
                             });
                         }
                     }
+
+                    ui.add_space(12.0);
+                    ui.heading("🏷 Auto-tag suggestions");
+                    ui.label(egui::RichText::new(
+                        "Unfiled channels grouped by platform + typical video length. \
+                         Apply a group to move those channels into a folder.").weak().small());
+                    if autotag_suggestions.is_empty() {
+                        ui.label(egui::RichText::new(
+                            "No suggestions — every channel is already filed or too ambiguous to call.")
+                            .weak());
+                    }
+                    for (gi, g) in autotag_suggestions.iter().enumerate() {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(
+                                    format!("📁 {} ({})", g.group, g.channels.len())).strong());
+                                if ui.button(format!("Move all → {}", g.group)).clicked() {
+                                    apply_autotag_group = Some(gi);
+                                }
+                            });
+                            for c in &g.channels {
+                                ui.label(format!("  {} · {} · {}",
+                                    c.display_name, c.platform_label, c.reason));
+                            }
+                        });
+                    }
             });
         });
+
+        if let Some(gi) = apply_autotag_group {
+            self.apply_autotag_group(gi);
+        }
 
         // ── Apply collected actions ────────────────────────────────────────
         let mut changed = false;
@@ -2277,6 +2314,44 @@ impl App {
         if start_dedup {
             self.start_dedup();
         }
+    }
+
+    /// Apply one auto-tag suggestion: create (or reuse) a folder with the
+    /// suggested name and move all of that group's channels into it, mirroring
+    /// the DB write onto the in-memory library. Recomputes suggestions so the
+    /// now-filed channels drop out.
+    fn apply_autotag_group(&mut self, gi: usize) {
+        let Some(group) = self.autotag_suggestions.get(gi).cloned() else { return };
+        let existing = self.folders.iter()
+            .find(|f| f.name.eq_ignore_ascii_case(&group.group))
+            .map(|f| f.id);
+        let folder_id = match existing {
+            Some(id) => id,
+            None => match self.db.create_folder(&group.group) {
+                Ok(id) => {
+                    self.folders = self.db.list_folders().unwrap_or_default();
+                    id
+                }
+                Err(e) => {
+                    self.status = format!("Create folder failed: {e}");
+                    return;
+                }
+            },
+        };
+        let mut moved = 0;
+        for c in &group.channels {
+            if self.db.set_channel_folder(&c.platform, &c.handle, Some(folder_id)).is_ok() {
+                for ch in self.library.iter_mut() {
+                    if ch.platform.dir_name() == c.platform && ch.name == c.handle {
+                        ch.folder_id = Some(folder_id);
+                        break;
+                    }
+                }
+                moved += 1;
+            }
+        }
+        self.status = format!("Moved {moved} channel(s) → {}", group.group);
+        self.autotag_suggestions = crate::autotag::suggest(&self.library);
     }
 
     fn stats_screen(&mut self, ctx: &egui::Context) {

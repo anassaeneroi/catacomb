@@ -2200,8 +2200,63 @@ function renderMaintenance(r){
   h+=`<h3 style="font-size:13px;margin:16px 0 8px">Similar content (perceptual)</h3>
     <div class="settings-hint" style="margin-bottom:8px">Finds the same video re-uploaded under a different ID — mirrors, re-encodes, resolution changes — by comparing sampled frames. The first scan fingerprints your library (a few minutes); after that it's cached, so re-scans are quick.</div>
     <div id="dedup-area"></div>`;
+  h+=`<h3 style="font-size:13px;margin:16px 0 8px">🏷 Auto-tag suggestions</h3>
+    <div class="settings-hint" style="margin-bottom:8px">Groups your <b>unfiled</b> channels by source platform and typical video length. Review a group and apply it to drop those channels into a folder — nothing moves until you click Apply.</div>
+    <div id="autotag-area"><em style="color:var(--muted);font-size:12px">Analyzing…</em></div>`;
   body.innerHTML=h;
   initDedupArea();
+  initAutotagArea();
+}
+
+/* ── Smart auto-tagging (suggested folder groups) ───────────────── */
+async function initAutotagArea(){
+  const area=document.getElementById('autotag-area');if(!area)return;
+  let groups;
+  try{groups=await(await api('/api/autotag/suggest')).json();}
+  catch(e){area.innerHTML=`<div style="color:#f87171;font-size:12px">Could not analyze: ${esc(e.message)}</div>`;return}
+  renderAutotag(groups);
+}
+function renderAutotag(groups){
+  const area=document.getElementById('autotag-area');if(!area)return;
+  if(!groups||!groups.length){area.innerHTML='<div style="color:var(--muted);font-size:12px">No grouping suggestions — every channel is already filed or too ambiguous to call.</div>';return}
+  // Confidence → dot colour: strong (green) ≥ .85, medium (amber) ≥ .7, else grey.
+  const dot=c=>{const col=c>=0.85?'#4ade80':c>=0.7?'#facc15':'#9ca3af';return `<span title="confidence ${(c*100).toFixed(0)}%" style="flex-shrink:0;width:8px;height:8px;border-radius:50%;background:${col};display:inline-block"></span>`};
+  let h='';
+  groups.forEach((g,gi)=>{
+    h+=`<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px" data-grp="${gi}">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-weight:600;font-size:12px;flex:1">📁 ${esc(g.group)} <span style="color:var(--muted)">(${g.channels.length})</span></span>
+        <button class="primary" onclick="applyAutotag(${gi},this)">Apply → ${esc(g.group)}</button>
+      </div>`;
+    g.channels.forEach((c,ci)=>{
+      h+=`<label style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
+        <input type="checkbox" class="at-chk" data-grp="${gi}" data-ci="${ci}" checked>
+        ${dot(c.confidence)}
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.display_name)} <span style="color:var(--muted)">· ${esc(c.platform_label)} · ${esc(c.reason)}</span></span>
+      </label>`;
+    });
+    h+=`</div>`;
+  });
+  area.innerHTML=h;
+  // Stash the data so applyAutotag can read the channel keys back.
+  area._groups=groups;
+}
+async function applyAutotag(gi,btn){
+  const area=document.getElementById('autotag-area');
+  const groups=area&&area._groups;if(!groups||!groups[gi])return;
+  const g=groups[gi];
+  const picked=[...area.querySelectorAll(`.at-chk[data-grp="${gi}"]`)]
+    .filter(cb=>cb.checked)
+    .map(cb=>g.channels[+cb.dataset.ci])
+    .map(c=>({platform:c.platform,handle:c.handle}));
+  if(!picked.length){setStatus('No channels selected');return}
+  btn.disabled=true;btn.textContent='Applying…';
+  try{
+    const r=await(await api('/api/autotag/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group:g.group,channels:picked})})).json();
+    setStatus(`Moved ${r.applied} channel${r.applied===1?'':'s'} → ${g.group}`);
+    await loadLibrary();renderSidebar();
+    initAutotagArea(); // re-analyze: applied channels drop out (now filed)
+  }catch(e){setStatus('Apply failed: '+e.message);btn.disabled=false;btn.textContent='Apply → '+g.group;}
 }
 
 /* ── Perceptual dedup (similar content) ─────────────────────────── */

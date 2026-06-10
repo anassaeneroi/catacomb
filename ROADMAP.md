@@ -140,11 +140,20 @@ Native client over the existing web API. Background download via
 WorkManager + JobScheduler. Push notifications via Tailscale-routed
 HTTPS or a userland push channel.
 
-### 3.4 Smart auto-tagging
+### 3.4 Smart auto-tagging — DONE
 
-Cluster channels by uploader frequency, content type, and metadata.
-Suggest groups ("looks like a music channel — move to Music?"). Builds
-on Phase 1.2's group system.
+`autotag.rs` classifies each *unfiled* channel from already-scanned
+metadata — source platform plus the median video duration and upload
+cadence — into a suggested folder group: "Music" (music platforms or
+audio-only channels), "Shorts" (median < 90 s / TikTok), "Long-form &
+Podcasts" (median > 25 min), or "Streams & VODs" (Twitch). Mid-length
+YouTube is deliberately left unsuggested rather than guessed at. Each
+suggestion carries a confidence and a human reason ("median length 76 s;
+~1/mo"). Surfaced in both Maintenance views: the web shows per-channel
+checkboxes + "Apply → group" (POST /api/autotag/apply creates/reuses the
+folder and assigns), desktop shows "Move all → group". Pure arithmetic
+over the in-memory library, so it's recomputed on demand with no job.
+Never moves anything until you apply.
 
 ### 3.5 Federation / multi-host
 

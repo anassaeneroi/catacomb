@@ -2112,6 +2112,85 @@ async fn get_maintenance_scan(State(state): State<Arc<WebState>>) -> impl IntoRe
     Json(report)
 }
 
+/// `GET /api/autotag/suggest` — heuristic folder-grouping suggestions for
+/// unfiled channels (see [`crate::autotag`]). Pure arithmetic over the
+/// in-memory library, so it's computed on demand rather than as a job.
+async fn get_autotag_suggest(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let lib = state.library.lock_recover();
+    Json(crate::autotag::suggest(&lib))
+}
+
+#[derive(Deserialize)]
+struct AutotagChannel {
+    platform: String,
+    handle: String,
+}
+
+#[derive(Deserialize)]
+struct AutotagApplyBody {
+    /// Target folder name; created if it doesn't already exist.
+    group: String,
+    channels: Vec<AutotagChannel>,
+}
+
+/// `POST /api/autotag/apply` — accept a suggested group: create the folder
+/// (or reuse an existing one with the same name) and move the given channels
+/// into it. Mirrors the move onto the in-memory library + bumps the ETag, the
+/// same way `post_assign_folder` does for a single channel.
+async fn post_autotag_apply(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<AutotagApplyBody>,
+) -> impl IntoResponse {
+    let name = body.group.trim();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty group name").into_response();
+    }
+    // Reuse a folder of the same name (case-insensitive) if one exists,
+    // otherwise create it.
+    let existing = match state.db.list_folders() {
+        Ok(folders) => folders
+            .iter()
+            .find(|f| f.name.eq_ignore_ascii_case(name))
+            .map(|f| f.id),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
+    };
+    let folder_id = match existing {
+        Some(id) => id,
+        None => match state.db.create_folder(name) {
+            Ok(id) => id,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("create folder: {e}"))
+                    .into_response()
+            }
+        },
+    };
+
+    let mut applied = 0usize;
+    for c in &body.channels {
+        if state
+            .db
+            .set_channel_folder(&c.platform, &c.handle, Some(folder_id))
+            .is_ok()
+        {
+            applied += 1;
+        }
+    }
+    {
+        let mut lib = state.library.lock_recover();
+        for ch in lib.iter_mut() {
+            if body
+                .channels
+                .iter()
+                .any(|c| ch.platform.dir_name() == c.platform && ch.name == c.handle)
+            {
+                ch.folder_id = Some(folder_id);
+            }
+        }
+    }
+    bump_library_version(&state);
+    Json(serde_json::json!({ "folder_id": folder_id, "applied": applied })).into_response()
+}
+
 #[derive(Deserialize)]
 struct RemoveRequest {
     paths: Vec<PathBuf>,
@@ -3088,6 +3167,8 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/plex/generate", post(post_plex_generate))
         .route("/api/maintenance/scan", get(get_maintenance_scan))
         .route("/api/maintenance/remove", post(post_maintenance_remove))
+        .route("/api/autotag/suggest", get(get_autotag_suggest))
+        .route("/api/autotag/apply", post(post_autotag_apply))
         .route("/api/maintenance/dedup/scan", post(post_dedup_scan))
         .route("/api/maintenance/dedup/status", get(get_dedup_status))
         .route("/api/maintenance/repair/:id", post(post_maintenance_repair))
