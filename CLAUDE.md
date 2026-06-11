@@ -161,7 +161,10 @@ both the transcript indexer and the transcript viewers.
 - `app.rs` and `web.rs` are large (~3–4k lines) because each owns a full UI; new
   desktop code goes in `app.rs`, web handlers in `web.rs`, shared logic in the
   focused modules (`downloader`, `database`, `library`, `platform`, `fingerprint`,
-  `vtt`, …).
+  `vtt`, `autotag`, `remote`, …). `autotag` suggests folder groups for unfiled
+  channels; `remote` is federation — a `RemoteClient` that browses a peer
+  instance's library read-only (media via the peer's feed token, see
+  `auth_middleware`).
 - Tray (`ksni`) and the `rfd` xdg-portal dialog backend are Linux-only/no-GTK
   by design (it's why packaging avoids a GTK dep). They're now **target-gated**
   in `Cargo.toml` (`cfg(target_os = "linux")`); off Linux `rfd` uses its native

@@ -29,6 +29,7 @@ mod maintenance;
 mod platform;
 mod plex;
 mod pot_provider;
+mod remote;
 mod stats;
 mod theme;
 mod tray;

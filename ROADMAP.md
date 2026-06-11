@@ -167,11 +167,24 @@ folder and assigns), desktop shows "Move all → group". Pure arithmetic
 over the in-memory library, so it's recomputed on demand with no job.
 Never moves anything until you apply.
 
-### 3.5 Federation / multi-host
+### 3.5 Federation / multi-host — DONE
 
-A "remote library" mode where one yt-offline instance can browse
-another's library (read-only) over the same axum API. Useful for a
-"home archive + travel laptop" setup.
+A read-only "remote library" mode: configure peers as `[[remote]]` entries
+(name, url, optional password) and browse their libraries from this
+instance. `remote.rs`'s `RemoteClient` (blocking reqwest, rustls, cookie
+jar) fetches the peer's `/api/library`, logging in first if the peer has a
+password. Media is **not** proxied — the library JSON's media URLs
+(`/files/`, `/music-files/`, `/api/transcode/`, `/api/sub-vtt/`) are
+rewritten to absolute peer URLs with the peer's read-only **feed token**
+appended, which the peer's auth middleware now accepts for those GET paths.
+So only the small library JSON travels through us; video streams straight
+from the peer to the browser/mpv. Surfaced in both UIs: the web sidebar
+gets a 🌐 Remotes switcher (read-only mode hides the download bar + per-card
+mutating actions); desktop gets a 🌐 Remotes screen that fetches off-thread
+and plays via mpv on the tokenized URL. Verified end-to-end against a second
+local instance (incl. a transcoded stream returning HTTP 200 with the token).
+Follow-ups: an in-UI "add remote" editor (today it's config-file only) and a
+desktop thumbnail/grid view to match the web fidelity.
 
 ### 3.6 Comment viewer enhancements — DONE
 

@@ -24,6 +24,25 @@ pub struct Config {
     pub subtitles: SubtitlesSection,
     #[serde(default)]
     pub convert: ConvertSection,
+    /// Federation: other yt-offline instances whose libraries can be browsed
+    /// read-only from this one (see [`crate::remote`]). Each is a
+    /// `[[remote]]` table in config.toml.
+    #[serde(default, rename = "remote")]
+    pub remotes: Vec<RemoteSection>,
+}
+
+/// One `[[remote]]` entry — a peer yt-offline instance to browse read-only.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RemoteSection {
+    /// Display name in the UI's remote switcher.
+    pub name: String,
+    /// Base URL of the peer's web server, e.g. `http://woofbox:8081` or
+    /// `https://archive.example`. No trailing slash needed.
+    pub url: String,
+    /// Password for the peer, if it has one set. `None`/absent = open peer
+    /// (e.g. bound to a trusted tailnet). Stored plaintext like `cookies`.
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 /// `[convert]` table — global post-download format-conversion defaults.
@@ -289,6 +308,7 @@ impl Config {
             plex: PlexSection::default(),
             subtitles: SubtitlesSection::default(),
             convert: ConvertSection::default(),
+            remotes: Vec::new(),
         }
     }
 }

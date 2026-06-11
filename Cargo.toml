@@ -32,6 +32,12 @@ tokio-stream = "0.1"
 tower-http = { version = "0.5", features = ["cors", "fs", "compression-gzip"] }
 argon2 = "0.5"
 rand = "0.8"
+# HTTP client for federation (remote-library mode). Pure-Rust TLS (rustls, no
+# system OpenSSL) to match the bundled-everything posture. Blocking API + a
+# cookie store so RemoteClient can log into a password-protected peer and
+# reuse the session; the web layer calls it under spawn_blocking, desktop
+# calls it directly.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json", "cookies"] }
 libc = "0.2.186"
 
 # Platform-specific desktop deps. On Linux the tray (ksni — StatusNotifierItem

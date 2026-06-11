@@ -143,6 +143,10 @@ pub struct WebState {
     /// GET access to `/feed*` and the media mounts even when a password is
     /// set. Persisted in the `feed_token` setting; stable until regenerated.
     pub feed_token: String,
+    /// Federation peers (read-only remote libraries), built once from
+    /// `config.remotes` at startup. Indexed by position for the `/api/remotes`
+    /// endpoints. Empty when no `[[remote]]` is configured.
+    pub remotes: Vec<std::sync::Arc<crate::remote::RemoteClient>>,
 }
 
 /// Live state for the background perceptual-dedup job (see
@@ -1165,7 +1169,14 @@ async fn auth_middleware(
     // read-only feed token. Scoped to reads of feeds + media only — never
     // `/api/*` mutations.
     if req.method().as_str() == "GET"
-        && (path.starts_with("/feed") || path.starts_with("/files/") || path.starts_with("/music-files/"))
+        && (path.starts_with("/feed")
+            || path.starts_with("/files/")
+            || path.starts_with("/music-files/")
+            // Read-only media streams a federated peer needs when transcode is
+            // on (/api/transcode) or for subtitle playback (/api/sub-vtt). Both
+            // are GET-only re-reads of already-token-readable media.
+            || path.starts_with("/api/transcode/")
+            || path.starts_with("/api/sub-vtt/"))
         && req.uri().query().is_some_and(|q| query_has_token(q, &state.feed_token))
     {
         return next.run(req).await;
@@ -2112,6 +2123,35 @@ async fn get_maintenance_scan(State(state): State<Arc<WebState>>) -> impl IntoRe
     Json(report)
 }
 
+/// `GET /api/remotes` — list configured federation peers for the UI switcher.
+async fn get_remotes(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let list: Vec<_> = state
+        .remotes
+        .iter()
+        .enumerate()
+        .map(|(i, r)| serde_json::json!({ "id": i, "name": r.name, "url": r.base_url() }))
+        .collect();
+    Json(list)
+}
+
+/// `GET /api/remotes/:id/library` — proxy a peer's library (read-only). Media
+/// URLs come back absolute + token-bearing so the browser loads them straight
+/// from the peer; only this JSON travels through us. The blocking
+/// [`crate::remote::RemoteClient`] runs on a blocking task off the async pool.
+async fn get_remote_library(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<usize>,
+) -> Response {
+    let Some(remote) = state.remotes.get(id).cloned() else {
+        return (StatusCode::NOT_FOUND, "no such remote").into_response();
+    };
+    match tokio::task::spawn_blocking(move || remote.library_json()).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, format!("remote error: {e}")).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "remote task failed").into_response(),
+    }
+}
+
 /// `GET /api/autotag/suggest` — heuristic folder-grouping suggestions for
 /// unfiled channels (see [`crate::autotag`]). Pure arithmetic over the
 /// in-memory library, so it's computed on demand rather than as a job.
@@ -3033,6 +3073,12 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     // subscribe and the broadcast is lossy by design (subscribers that lag
     // get a Lagged error and just resubscribe).
     let (progress_tx, _initial_rx) = tokio::sync::broadcast::channel::<String>(16);
+    // Build the federation peers from config before `config` is moved in.
+    let remotes: Vec<std::sync::Arc<crate::remote::RemoteClient>> = config
+        .remotes
+        .iter()
+        .map(|r| std::sync::Arc::new(crate::remote::RemoteClient::new(r)))
+        .collect();
     let state = Arc::new(WebState {
         library: Mutex::new(library),
         downloader: Mutex::new(downloader),
@@ -3054,6 +3100,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         library_body_cache: Mutex::new(None),
         dedup: std::sync::Arc::new(DedupState::default()),
         feed_token,
+        remotes,
     });
 
     // Broadcast progress snapshots to WebSocket subscribers. Ticks fast
@@ -3169,6 +3216,8 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/maintenance/remove", post(post_maintenance_remove))
         .route("/api/autotag/suggest", get(get_autotag_suggest))
         .route("/api/autotag/apply", post(post_autotag_apply))
+        .route("/api/remotes", get(get_remotes))
+        .route("/api/remotes/:id/library", get(get_remote_library))
         .route("/api/maintenance/dedup/scan", post(post_dedup_scan))
         .route("/api/maintenance/dedup/status", get(get_dedup_status))
         .route("/api/maintenance/repair/:id", post(post_maintenance_repair))

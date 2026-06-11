@@ -41,6 +41,8 @@ enum Screen {
     Settings,
     Stats,
     Maintenance,
+    /// Read-only browser for a federated peer's library (see `crate::remote`).
+    Remotes,
 }
 
 /// One video in a perceptual-similarity group (desktop dedup review).
@@ -232,6 +234,17 @@ pub struct App {
     /// Auto-tag grouping suggestions, recomputed when the Maintenance screen
     /// opens and after a group is applied. Empty when there's nothing to suggest.
     autotag_suggestions: Vec<crate::autotag::GroupSuggestion>,
+    // Federation (read-only remote libraries).
+    remotes: Vec<std::sync::Arc<crate::remote::RemoteClient>>,
+    /// Currently-selected peer index, if the Remotes screen is showing one.
+    remote_selected: Option<usize>,
+    /// Last fetched remote library; `None` until a peer is loaded.
+    remote_library: Option<crate::remote::RemoteLibrary>,
+    /// Status/error line for the Remotes screen.
+    remote_status: String,
+    /// Receiver for the background fetch of a peer's library (network I/O is
+    /// done off the UI thread). `None` when no fetch is in flight.
+    remote_rx: Option<Receiver<Result<crate::remote::RemoteLibrary, String>>>,
     stats_report: Option<crate::stats::StatsReport>,
     // Per-channel download-options dialog state
     show_channel_options: bool,
@@ -436,6 +449,10 @@ impl App {
         downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
         downloader.sponsorblock_mode = config.backup.sponsorblock_mode.clone();
         downloader.fetch_comments = config.backup.fetch_comments;
+        // Federation peers, built once from config (read-only remote libraries).
+        let remotes: Vec<std::sync::Arc<crate::remote::RemoteClient>> = config.remotes.iter()
+            .map(|r| std::sync::Arc::new(crate::remote::RemoteClient::new(r)))
+            .collect();
         downloader.convert_defaults = config.convert.clone();
         let config_bind = config.web.bind.clone();
         let password_set = db.get_setting("password_hash").ok().flatten().is_some();
@@ -577,6 +594,11 @@ impl App {
             backup_open_rx,
             health_report: None,
             autotag_suggestions: Vec::new(),
+            remotes,
+            remote_selected: None,
+            remote_library: None,
+            remote_status: String::new(),
+            remote_rx: None,
             stats_report: None,
             show_channel_options: false,
             channel_options_target: None,
@@ -1454,6 +1476,15 @@ impl App {
                         self.current_screen = Screen::Maintenance;
                     }
                 }
+                if !self.remotes.is_empty()
+                    && ui.selectable_label(self.current_screen == Screen::Remotes, "🌐 Remotes").clicked()
+                {
+                    if self.current_screen == Screen::Remotes {
+                        self.current_screen = Screen::Library;
+                    } else {
+                        self.current_screen = Screen::Remotes;
+                    }
+                }
                 if ui.selectable_label(self.current_screen == Screen::Settings, "⚙ Settings").clicked() {
                     if self.current_screen == Screen::Settings {
                         self.current_screen = Screen::Library;
@@ -2082,6 +2113,25 @@ impl App {
             ctx.request_repaint();
         }
 
+        // Receive a background remote-library fetch (federation).
+        let remote_result = self.remote_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(res) = remote_result {
+            self.remote_rx = None;
+            match res {
+                Ok(lib) => {
+                    let n: usize = lib.channels.iter().map(|c| c.videos.len()).sum();
+                    self.remote_status =
+                        format!("{} channels · {} videos", lib.channels.len(), n);
+                    self.remote_library = Some(lib);
+                }
+                Err(e) => {
+                    self.remote_status = format!("Error: {e}");
+                    self.remote_library = None;
+                }
+            }
+            ctx.request_repaint();
+        }
+
         // Drain the background dedup result if it's ready.
         let mut dedup_done = None;
         if let Some(rx) = &self.dedup_rx {
@@ -2352,6 +2402,100 @@ impl App {
         }
         self.status = format!("Moved {moved} channel(s) → {}", group.group);
         self.autotag_suggestions = crate::autotag::suggest(&self.library);
+    }
+
+    /// Kick off a background fetch of peer `idx`'s library (network I/O off
+    /// the UI thread). The result is delivered over `remote_rx`, drained in
+    /// `update()`. The screen requests repaints while a fetch is in flight.
+    fn start_remote_fetch(&mut self, idx: usize) {
+        let Some(client) = self.remotes.get(idx).cloned() else { return };
+        self.remote_selected = Some(idx);
+        self.remote_library = None;
+        self.remote_status = format!("Connecting to {}…", client.name);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.remote_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(client.library());
+        });
+    }
+
+    /// Launch the configured player on a remote (absolute, tokenized) URL.
+    /// mpv streams it straight from the peer; no resume tracking (that's local).
+    fn play_remote_url(&mut self, url: &str) {
+        let cmd = self.config.player.command.clone();
+        match Command::new(&cmd).arg(url).spawn() {
+            Ok(_) => self.remote_status = "Launched player".to_string(),
+            Err(e) => self.remote_status = format!("Player error ({cmd}): {e}"),
+        }
+    }
+
+    /// Read-only browser for a federated peer's library.
+    fn remotes_screen(&mut self, ctx: &egui::Context) {
+        // Keep polling while a background fetch is in flight.
+        if self.remote_rx.is_some() {
+            ctx.request_repaint();
+        }
+        let mut select_remote: Option<usize> = None;
+        let mut play_url: Option<String> = None;
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("← Library").clicked() {
+                    self.current_screen = Screen::Library;
+                }
+                ui.heading("🌐 Remote libraries");
+            });
+            ui.label(egui::RichText::new(
+                "Browse another yt-offline instance read-only. Playback streams from the peer.")
+                .weak().small());
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                for (i, r) in self.remotes.iter().enumerate() {
+                    let sel = self.remote_selected == Some(i);
+                    if ui.selectable_label(sel, format!("🌐 {}", r.name)).clicked() {
+                        select_remote = Some(i);
+                    }
+                }
+            });
+            if !self.remote_status.is_empty() {
+                ui.label(egui::RichText::new(&self.remote_status).weak().small());
+            }
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if let Some(lib) = &self.remote_library {
+                    if lib.channels.is_empty() {
+                        ui.label(egui::RichText::new("This peer's library is empty.").weak());
+                    }
+                    for ch in &lib.channels {
+                        egui::CollapsingHeader::new(format!("{} ({})", ch.name, ch.videos.len()))
+                            .show(ui, |ui| {
+                                for v in &ch.videos {
+                                    ui.horizontal(|ui| {
+                                        let playable = v.video_url.is_some();
+                                        if ui.add_enabled(playable, egui::Button::new("▶")).clicked() {
+                                            if let Some(u) = &v.video_url {
+                                                play_url = Some(u.clone());
+                                            }
+                                        }
+                                        let dur = v.duration_secs
+                                            .map(format_duration)
+                                            .unwrap_or_default();
+                                        ui.label(format!("{}  {}", v.title, dur));
+                                    });
+                                }
+                            });
+                    }
+                } else if self.remote_selected.is_none() {
+                    ui.label(egui::RichText::new(
+                        "Pick a peer above to browse its library.").weak());
+                }
+            });
+        });
+        if let Some(i) = select_remote {
+            self.start_remote_fetch(i);
+        }
+        if let Some(u) = play_url {
+            self.play_remote_url(&u);
+        }
     }
 
     fn stats_screen(&mut self, ctx: &egui::Context) {
@@ -4380,6 +4524,7 @@ impl eframe::App for App {
             Screen::Settings => self.settings_screen(ctx),
             Screen::Stats => self.stats_screen(ctx),
             Screen::Maintenance => self.maintenance_screen(ctx),
+            Screen::Remotes => self.remotes_screen(ctx),
         }
     }
 }

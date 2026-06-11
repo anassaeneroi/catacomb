@@ -74,6 +74,10 @@
   .card-foot{padding:4px 8px 8px;display:flex;gap:6px}
   .card-foot button{font-size:11px;padding:4px 8px}
   .card-foot .play{background:var(--accent);border-color:var(--accent);color:#fff;flex:1}
+  /* Remote (federated) browsing is read-only: hide the download bar and every
+     per-card mutating action, leaving just Play. */
+  .remote-mode .dl-new{display:none}
+  .remote-mode .card-foot button:not(.play){display:none}
   .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:100;padding:10px}
   .modal{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;max-width:95vw;max-height:95vh;display:flex;flex-direction:column;gap:10px;width:100%;overflow:hidden}
   .modal-hdr{display:flex;align-items:center;gap:8px;flex-shrink:0}
@@ -281,7 +285,36 @@ async function api(path,opts){const r=await fetch(path,opts);if(!r.ok)throw new 
 // can short-circuit with 304 Not Modified when nothing has changed. Saves
 // megabytes of JSON for large libraries on every periodic refresh.
 let libraryEtag=null;
+let remotes=[], remoteMode=null;   // remoteMode = peer id when browsing a remote, else null
+async function loadRemotes(){
+  try{remotes=await(await api('/api/remotes')).json();}catch(e){remotes=[];}
+  renderSidebar();
+}
+async function enterRemote(id){
+  const r=remotes.find(x=>x.id===id);if(!r)return;
+  setStatus('Connecting to '+r.name+'…');
+  try{
+    const data=await(await api('/api/remotes/'+id+'/library')).json();
+    remoteMode=id;
+    library=data.channels||[];
+    librarySnapshotFolders=data.folders||[];
+    channelUrls=library.map(ch=>ch.channel_url||null);
+    document.body.classList.add('remote-mode');
+    resetViewSelectors();selected.clear();closeSidebar();
+    renderSidebar();renderGrid();
+    setStatus('Viewing '+r.name+' (read-only)');
+  }catch(e){setStatus('Remote error: '+e.message);}
+}
+function exitRemote(){
+  remoteMode=null;
+  document.body.classList.remove('remote-mode');
+  libraryEtag=null;          // force a fresh local fetch
+  resetViewSelectors();selected.clear();closeSidebar();
+  loadLibrary();
+  setStatus('Back to your library');
+}
 async function loadLibrary(){
+  if(remoteMode!==null)return;   // a remote is in view; don't clobber it with local polling
   try{
     const opts=libraryEtag?{headers:{'If-None-Match':libraryEtag}}:{};
     const r=await api('/api/library',opts);
@@ -315,7 +348,14 @@ function renderSidebar(){
   const bmkCount=allVids.filter(v=>v.bookmark).length;
   const waitCount=allVids.filter(v=>v.waiting).length;
   const anySmart=showFavourites||showBookmarks||showWaiting;
-  let h=`<div class="sidebar-label">Library</div>`;
+  let h='';
+  // Federation: peers to browse read-only, plus an exit row when in one.
+  if(remotes.length){
+    h+=`<div class="sidebar-label" style="display:flex;align-items:center;gap:6px">🌐 Remotes</div>`;
+    if(remoteMode!==null)h+=`<div class="ch-item" onclick="exitRemote()">← Back to my library</div>`;
+    remotes.forEach(r=>{h+=`<div class="ch-item${remoteMode===r.id?' active':''}" onclick="enterRemote(${r.id})" title="${esc(r.url)}">🌐 ${esc(r.name)}</div>`;});
+  }
+  h+=`<div class="sidebar-label">${remoteMode!==null?'Remote library (read-only)':'Library'}</div>`;
   if(contVids.length)h+=`<div class="ch-item${showContinue?' active':''}" onclick="setContinue()">▶ Continue (${contVids.length})</div>`;
   if(hasDated)h+=`<div class="ch-item${showRecent?' active':''}" onclick="setRecent()">🕒 Recent additions</div>`;
   if(favCount)h+=`<div class="ch-item${showFavourites?' active':''}" onclick="setFavourites()">★ Favourites (${favCount})</div>`;
@@ -341,11 +381,14 @@ function renderSidebar(){
         const pl=ch.playlists[pi];
         s+=`<div class="ch-sub${activePlaylistIdx===pi?' active':''}" onclick="setView(${i},${pi})">└ ${esc(pl.name)} (${pl.videos.length})</div>`;
       }
-      s+=`<div class="ch-sub" style="color:var(--accent)" onclick="downloadChannelByIdx(${i})">⬇ Check for new videos</div>`;
-      s+=`<div class="ch-sub" onclick="openChannelOptions(${i})">⚙ Channel options…</div>`;
-      s+=`<div class="ch-sub" onclick="openMoveToFolder(${i})">📁 Move to folder…</div>`;
-      const hasNote=!!channelNote(ch.platform,ch.name);
-      s+=`<div class="ch-sub" onclick="editChannelNote(${i})"${hasNote?' style="color:var(--accent)"':''}>📝 ${hasNote?'Edit note…':'Add note…'}</div>`;
+      // Mutating sub-actions are local-only; hide them when browsing a remote.
+      if(remoteMode===null){
+        s+=`<div class="ch-sub" style="color:var(--accent)" onclick="downloadChannelByIdx(${i})">⬇ Check for new videos</div>`;
+        s+=`<div class="ch-sub" onclick="openChannelOptions(${i})">⚙ Channel options…</div>`;
+        s+=`<div class="ch-sub" onclick="openMoveToFolder(${i})">📁 Move to folder…</div>`;
+        const hasNote=!!channelNote(ch.platform,ch.name);
+        s+=`<div class="ch-sub" onclick="editChannelNote(${i})"${hasNote?' style="color:var(--accent)"':''}>📝 ${hasNote?'Edit note…':'Add note…'}</div>`;
+      }
     }
     return s;
   };
@@ -2654,6 +2697,7 @@ loadFilterPresets();
   renderSidebar();
   renderGrid();
 })();
+loadRemotes();
 loadSourceNotice();
 </script>
 </body>
