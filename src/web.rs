@@ -1746,9 +1746,18 @@ async fn get_sub_vtt(
     ([(header::CONTENT_TYPE, "text/vtt; charset=utf-8")], vtt).into_response()
 }
 
+/// Query for [`get_transcode`]: `start` seconds to begin the stream at, so the
+/// player can scrub a non-seekable live transcode by re-requesting at an offset.
+#[derive(Deserialize)]
+struct TranscodeQuery {
+    #[serde(default)]
+    start: Option<f64>,
+}
+
 async fn get_transcode(
     State(state): State<Arc<WebState>>,
     Path(id): Path<String>,
+    Query(q): Query<TranscodeQuery>,
 ) -> Response {
     let path = {
         let lib = state.library.lock_recover();
@@ -1760,8 +1769,14 @@ async fn get_transcode(
 
     let mut cmd = tokio::process::Command::new("ffmpeg");
     cmd.arg("-hide_banner")
-        .arg("-loglevel").arg("error")
-        .arg("-i").arg(&path)
+        .arg("-loglevel").arg("error");
+    // Seek to the requested offset before the input (fast keyframe seek). The
+    // live pipe isn't byte-range seekable, so the player re-requests the stream
+    // at a new `start` to scrub; ffmpeg rebases timestamps to 0 from there.
+    if let Some(start) = q.start.filter(|s| *s > 0.0) {
+        cmd.arg("-ss").arg(format!("{start:.3}"));
+    }
+    cmd.arg("-i").arg(&path)
         .arg("-c:v").arg("libx264")
         .arg("-preset").arg("veryfast")
         .arg("-crf").arg("23")

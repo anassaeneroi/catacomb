@@ -84,6 +84,19 @@
   .modal-hdr h2{flex:1;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .modal-body{display:flex;gap:12px;overflow:hidden;flex:1;min-height:0}
   .modal video{flex:1;min-width:0;max-height:75vh;background:#000}
+  /* Custom player (used for non-seekable transcode streams): the live ffmpeg
+     pipe has no byte ranges, so we drive a scrubber off the known duration and
+     re-request the stream at an offset on seek. */
+  .vid-wrap{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+  .vid-wrap video{flex:1;min-height:0;max-height:72vh;width:100%;background:#000}
+  .vctrl{display:flex;align-items:center;gap:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;flex-wrap:wrap}
+  .vctrl .vbtn{background:transparent;border:none;color:var(--text);cursor:pointer;font-size:15px;line-height:1;padding:4px 7px;border-radius:4px}
+  .vctrl .vbtn:hover{background:var(--card)}
+  .vctrl .vseek{flex:1;min-width:120px;accent-color:var(--accent);cursor:pointer;height:5px}
+  .vctrl .vvol{width:70px;accent-color:var(--accent);cursor:pointer}
+  .vctrl .vtime{font-size:12px;color:var(--muted);font-family:monospace;white-space:nowrap}
+  .vid-wrap:fullscreen{background:#000;padding:0;gap:0}
+  .vid-wrap:fullscreen video{max-height:none}
   .chapters-pane{width:200px;background:var(--bg);border:1px solid var(--border);border-radius:4px;overflow-y:auto;flex-shrink:0}
   .chapters-pane h4{font-size:11px;padding:7px 10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg)}
   .chapter{padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:1px solid var(--border)}
@@ -1298,6 +1311,44 @@ function shufflePlay(){
   }
   playVideo(pick.id);
 }
+// Player state for the custom transcode controls. For direct /files/ videos
+// `isTranscode` is false and native <video controls> handle everything.
+let player={isTranscode:false,base:'',seekBase:0,duration:0};
+function transcodeUrlAt(t){const u=player.base;const sep=u.includes('?')?'&':'?';return safeUrl(u+sep+'start='+Math.max(0,t).toFixed(2));}
+// Effective playback position: a transcode element's currentTime restarts at 0
+// each seek, so add the offset we started the stream at.
+function effTime(){const v=document.getElementById('player-video');if(!v)return 0;return player.isTranscode?player.seekBase+(v.currentTime||0):(v.currentTime||0);}
+// The one seek path everything routes through (scrubber, ±10s, chapters,
+// transcript, keyboard, resume). Transcode reloads the stream at the offset;
+// direct video just sets currentTime.
+function playerSeek(t){
+  const v=document.getElementById('player-video');if(!v)return;
+  t=Math.max(0,player.duration?Math.min(t,player.duration):t);
+  if(player.isTranscode){player.seekBase=t;v.src=transcodeUrlAt(t);v.load();v.play().catch(()=>{});}
+  else{v.currentTime=t;v.play().catch(()=>{});}
+  updateVctrl();
+}
+function vTogglePlay(){const v=document.getElementById('player-video');if(!v)return;if(v.paused)v.play().catch(()=>{});else v.pause();}
+function vToggleMute(){const v=document.getElementById('player-video');if(!v)return;v.muted=!v.muted;updateVctrl();}
+function vFullscreen(){const w=document.querySelector('.vid-wrap');if(w){if(document.fullscreenElement)document.exitFullscreen();else w.requestFullscreen&&w.requestFullscreen();}}
+function updateVctrl(){
+  const v=document.getElementById('player-video');if(!v||!player.isTranscode)return;
+  const t=effTime(),d=player.duration||0;
+  const tl=document.getElementById('v-time');if(tl)tl.textContent=fmtDur(t)+' / '+fmtDur(d);
+  const sk=document.getElementById('v-seek');if(sk&&!sk._drag)sk.value=Math.floor(t);
+  const pb=document.getElementById('v-play');if(pb)pb.textContent=v.paused?'⏵':'⏸';
+  const mb=document.getElementById('v-mute');if(mb)mb.textContent=(v.muted||v.volume===0)?'🔇':'🔊';
+}
+function playerKey(e){
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;
+  const v=document.getElementById('player-video');if(!v)return;
+  if(e.key===' '||e.key==='k'){e.preventDefault();vTogglePlay();}
+  else if(e.key==='f'){e.preventDefault();vFullscreen();}
+  else if(player.isTranscode&&e.key==='ArrowLeft'){e.preventDefault();playerSeek(effTime()-5);}
+  else if(player.isTranscode&&e.key==='ArrowRight'){e.preventDefault();playerSeek(effTime()+5);}
+  else if(player.isTranscode&&e.key==='j'){e.preventDefault();playerSeek(effTime()-10);}
+  else if(player.isTranscode&&e.key==='l'){e.preventDefault();playerSeek(effTime()+10);}
+}
 function playVideo(id){
   const v=findVideo(id);if(!v||!v.video_url)return;
   currentPlayingId=id;
@@ -1319,6 +1370,21 @@ function playVideo(id){
     v.duration_secs!=null?fmtDur(v.duration_secs):null,
   ].filter(Boolean).join(' · ');
   const metaLine=headerMeta?`<span style="font-size:11px;color:var(--muted);margin-left:8px">${esc(headerMeta)}</span>`:'';
+  const isT=(v.video_url||'').includes('/api/transcode/');
+  const resume=(v.resume_pos&&v.resume_pos>5)?v.resume_pos:0;
+  player={isTranscode:isT,base:v.video_url,seekBase:isT?resume:0,duration:v.duration_secs||0};
+  const initSrc=isT?transcodeUrlAt(player.seekBase):esc(safeUrl(v.video_url));
+  const dmax=Math.max(1,Math.floor(player.duration||0));
+  const bar=isT?`<div class="vctrl" id="vctrl">
+      <button class="vbtn" id="v-play" onclick="vTogglePlay()" title="Play / Pause (space)">⏸</button>
+      <button class="vbtn" onclick="playerSeek(effTime()-10)" title="Back 10s (j)">« 10</button>
+      <button class="vbtn" onclick="playerSeek(effTime()+10)" title="Forward 10s (l)">10 »</button>
+      <span class="vtime" id="v-time">0:00 / ${fmtDur(player.duration)}</span>
+      <input type="range" class="vseek" id="v-seek" min="0" max="${dmax}" step="1" value="${Math.floor(player.seekBase)}" title="Seek">
+      <button class="vbtn" id="v-mute" onclick="vToggleMute()" title="Mute">🔊</button>
+      <input type="range" class="vvol" id="v-vol" min="0" max="1" step="0.05" value="1" title="Volume">
+      <button class="vbtn" onclick="vFullscreen()" title="Fullscreen (f)">⛶</button>
+    </div>`:'';
   bg.innerHTML=`<div class="modal">
     <div class="modal-hdr">
       <h2>${esc(v.title)}${metaLine}</h2>
@@ -1326,11 +1392,22 @@ function playVideo(id){
       <button onclick="openComments('${esc(id)}')" title="Comments">💬</button>
       <button onclick="closeModal(this.closest('.modal-bg'))">✕ Close</button>
     </div>
-    <div class="modal-body"><video id="player-video" src="${esc(safeUrl(v.video_url))}" controls autoplay crossorigin="anonymous">${tracks}</video>${chapPane}${transcriptPane}</div>
+    <div class="modal-body"><div class="vid-wrap"><video id="player-video" src="${initSrc}" ${isT?'':'controls'} autoplay crossorigin="anonymous">${tracks}</video>${bar}</div>${chapPane}${transcriptPane}</div>
   </div>`;
   document.body.appendChild(bg);
   const vid=bg.querySelector('#player-video');
-  if(v.resume_pos&&v.resume_pos>5)vid.addEventListener('loadedmetadata',()=>{vid.currentTime=v.resume_pos},{once:true});
+  // Direct (seekable) videos resume via currentTime; a transcode stream was
+  // already started at the resume offset above.
+  if(!isT&&resume)vid.addEventListener('loadedmetadata',()=>{vid.currentTime=resume},{once:true});
+  if(isT){
+    const sk=bg.querySelector('#v-seek');
+    sk.addEventListener('input',()=>{sk._drag=true;const tl=document.getElementById('v-time');if(tl)tl.textContent=fmtDur(+sk.value)+' / '+fmtDur(player.duration);});
+    sk.addEventListener('change',()=>{sk._drag=false;playerSeek(+sk.value);});
+    bg.querySelector('#v-vol').addEventListener('input',function(){vid.volume=+this.value;vid.muted=(+this.value===0);updateVctrl();});
+    ['timeupdate','play','pause','volumechange'].forEach(ev=>vid.addEventListener(ev,updateVctrl));
+    updateVctrl();
+  }
+  bg.tabIndex=-1;bg.addEventListener('keydown',playerKey);bg.focus();
   if(saveTimer)clearInterval(saveTimer);
   saveTimer=setInterval(()=>savePosition(vid),5000);
   vid.addEventListener('pause',()=>savePosition(vid));
@@ -1338,8 +1415,9 @@ function playVideo(id){
 }
 
 async function savePosition(vid){
-  if(!vid||vid.readyState<1||!currentPlayingId)return;
-  const pos=vid.currentTime,dur=vid.duration;
+  if(!vid||!currentPlayingId)return;
+  const pos=player.isTranscode?effTime():vid.currentTime;
+  const dur=player.isTranscode?player.duration:vid.duration;
   if(!pos||!dur)return;
   const nearEnd=dur>0&&pos>dur*0.95;
   try{
@@ -1365,14 +1443,14 @@ async function loadChapters(id){
     list.innerHTML=chapters.map(c=>`<div class="chapter" onclick="jumpToChapter(${c.start})"><div class="ch-time">${fmtDur(c.start)}</div><div class="ch-title">${esc(c.title)}</div></div>`).join('');
     const vid=document.getElementById('player-video');
     if(vid)vid.addEventListener('timeupdate',()=>{
-      const t=vid.currentTime;let ai=-1;
+      const t=effTime();let ai=-1;
       for(let i=0;i<chapters.length;i++){if(t>=chapters[i].start)ai=i;else break}
       list.querySelectorAll('.chapter').forEach((el,i)=>{el.classList.toggle('active',i===ai)});
       const a=list.querySelector('.chapter.active');if(a)a.scrollIntoView({block:'nearest'});
     });
   }catch{}
 }
-function jumpToChapter(s){const v=document.getElementById('player-video');if(v){v.currentTime=s;v.play()}}
+function jumpToChapter(s){playerSeek(s);}
 
 /* ── Transcript viewer (parses the served .vtt client-side) ──────── */
 let transcript={cues:[],loaded:false};
@@ -1432,12 +1510,12 @@ function filterTranscript(){
   const items=transcript.cues.map((c,i)=>({c,i}));
   renderCues(q?items.filter(({c})=>c.text.toLowerCase().includes(q)):items,q);
 }
-function seekTo(s){const v=document.getElementById('player-video');if(v){v.currentTime=s;v.play()}}
+function seekTo(s){playerSeek(s);}
 function syncTranscript(){
   if(tSearching)return; // don't fight the user's filtered view
   const v=document.getElementById('player-video'),list=document.getElementById('t-list');
   if(!v||!list)return;
-  const t=v.currentTime,cues=transcript.cues;let ai=-1;
+  const t=effTime(),cues=transcript.cues;let ai=-1;
   for(let i=0;i<cues.length;i++){if(t>=cues[i].start)ai=i;else break}
   list.querySelectorAll('.t-cue.active').forEach(el=>el.classList.remove('active'));
   if(ai>=0){const el=list.querySelector('.t-cue[data-i="'+ai+'"]');if(el){el.classList.add('active');el.scrollIntoView({block:'nearest'})}}
