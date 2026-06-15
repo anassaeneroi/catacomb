@@ -58,10 +58,13 @@ use crate::maintenance;
 pub struct JobSnapshot {
     pub label: String,
     pub url: String,
-    /// One of `"running"`, `"done"`, or `"failed"`.
+    /// One of `"running"`, `"done"`, `"failed"`, or `"cancelled"`.
     pub state: &'static str,
     pub progress: f32,
     pub last_line: String,
+    /// Whether a manual "Retry" can re-issue this job (it has the captured
+    /// inputs). False for running jobs, live recordings, and self-update.
+    pub can_retry: bool,
     /// Classification of the failure, if `state == "failed"`. One of
     /// `rate-limited`, `members-only`, `geo-blocked`, `not-found`,
     /// `codec-missing`, `disk-full`, `network-error`, `bad-cookies`, `other`,
@@ -205,16 +208,25 @@ impl WebState {
                 state: match j.state {
                     JobState::Running => "running",
                     JobState::Done => "done",
+                    // A user cancel lands as Failed internally; surface it as a
+                    // distinct state so the UI doesn't show an error class.
+                    JobState::Failed if j.cancelled => "cancelled",
                     JobState::Failed => "failed",
                 },
                 progress: j.progress,
                 last_line: j.log.back().cloned().unwrap_or_default(),
+                can_retry: j.state != JobState::Running && j.has_retry_spec(),
                 // Skip `Other` so the badge doesn't get a useless generic
-                // label — the raw log line is still shown for that case.
-                error_class: j.failure_class.filter(|c|
-                    *c != crate::error_class::ErrorClass::Other
-                ),
-                error_hint: j.failure_class.map(|c| c.hint()).unwrap_or(""),
+                // label — the raw log line is still shown for that case. A
+                // cancelled job has no meaningful error class either.
+                error_class: if j.cancelled { None } else {
+                    j.failure_class.filter(|c|
+                        *c != crate::error_class::ErrorClass::Other
+                    )
+                },
+                error_hint: if j.cancelled { "" } else {
+                    j.failure_class.map(|c| c.hint()).unwrap_or("")
+                },
             })
             .collect()
     }
@@ -424,6 +436,9 @@ struct SettingsPayload {
     /// live in each channel's DownloadOptions, not here.
     #[serde(default)]
     fetch_comments: bool,
+    /// Whether the perceptual "similar content" dedup scan is enabled.
+    #[serde(default = "crate::config::default_true")]
+    dedup_enabled: bool,
     /// Global [convert] settings, round-tripped on GET + POST.
     #[serde(default)]
     convert_mode: String,
@@ -1527,6 +1542,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let player_clients_out = cfg.backup.youtube_player_clients.clone();
     let sponsorblock_out = cfg.backup.sponsorblock_mode.clone();
     let fetch_comments_out = cfg.backup.fetch_comments;
+    let dedup_enabled_out = cfg.backup.dedup_enabled;
     let convert = cfg.convert.clone();
     drop(cfg);
 
@@ -1567,6 +1583,7 @@ async fn get_settings(State(state): State<Arc<WebState>>) -> impl IntoResponse {
         youtube_player_clients: player_clients_out.clone(),
         sponsorblock_mode: sponsorblock_out.clone(),
         fetch_comments: fetch_comments_out,
+        dedup_enabled: dedup_enabled_out,
         convert_mode: convert.mode.clone(),
         convert_crf: convert.crf,
         convert_preset: convert.preset.clone(),
@@ -1614,6 +1631,7 @@ async fn post_settings(
     cfg.backup.youtube_player_clients = body.youtube_player_clients.trim().to_string();
     cfg.backup.sponsorblock_mode = body.sponsorblock_mode.trim().to_string();
     cfg.backup.fetch_comments = body.fetch_comments;
+    cfg.backup.dedup_enabled = body.dedup_enabled;
     // Global format-conversion defaults.
     cfg.convert.mode = body.convert_mode.trim().to_string();
     cfg.convert.crf = body.convert_crf;
@@ -1637,6 +1655,7 @@ async fn post_settings(
     let player_clients_out = cfg.backup.youtube_player_clients.clone();
     let sponsorblock_out = cfg.backup.sponsorblock_mode.clone();
     let fetch_comments_out = cfg.backup.fetch_comments;
+    let dedup_enabled_out = cfg.backup.dedup_enabled;
     let convert = cfg.convert.clone();
     drop(cfg);
 
@@ -1652,6 +1671,7 @@ async fn post_settings(
         dl.youtube_player_clients = player_clients_out.clone();
         dl.sponsorblock_mode = sponsorblock_out.clone();
         dl.fetch_comments = fetch_comments_out;
+        dl.dedup_enabled = dedup_enabled_out;
         dl.convert_defaults = convert.clone();
     }
 
@@ -1710,6 +1730,7 @@ async fn post_settings(
         youtube_player_clients: player_clients_out.clone(),
         sponsorblock_mode: sponsorblock_out.clone(),
         fetch_comments: fetch_comments_out,
+        dedup_enabled: dedup_enabled_out,
         convert_mode: convert.mode.clone(),
         convert_crf: convert.crf,
         convert_preset: convert.preset.clone(),
@@ -1948,6 +1969,54 @@ async fn post_remove_job(
 ) -> impl IntoResponse {
     state.downloader.lock_recover().remove_job(idx);
     (StatusCode::OK, "removed")
+}
+
+/// `POST /api/jobs/:idx/cancel` — SIGKILL a running job and mark it cancelled.
+async fn post_cancel_job(
+    State(state): State<Arc<WebState>>,
+    Path(idx): Path<usize>,
+) -> impl IntoResponse {
+    if state.downloader.lock_recover().cancel_job(idx) {
+        (StatusCode::OK, "cancelled")
+    } else {
+        (StatusCode::CONFLICT, "not a running job")
+    }
+}
+
+/// `POST /api/jobs/:idx/retry` — re-issue a finished/failed/cancelled job,
+/// removing the old row. 409 if it's running or carries no retry inputs.
+async fn post_retry_job(
+    State(state): State<Arc<WebState>>,
+    Path(idx): Path<usize>,
+) -> impl IntoResponse {
+    if state.downloader.lock_recover().retry_job(idx) {
+        (StatusCode::OK, "retrying")
+    } else {
+        (StatusCode::CONFLICT, "not retryable")
+    }
+}
+
+/// `DELETE /api/jobs/queued/:idx` — drop a not-yet-started queued job.
+async fn delete_queued_job(
+    State(state): State<Arc<WebState>>,
+    Path(idx): Path<usize>,
+) -> impl IntoResponse {
+    if state.downloader.lock_recover().cancel_queued(idx) {
+        (StatusCode::OK, "removed")
+    } else {
+        (StatusCode::NOT_FOUND, "no such queued job")
+    }
+}
+
+/// `GET /api/jobs/:idx/log` — the full captured log buffer for one job.
+async fn get_job_log(
+    State(state): State<Arc<WebState>>,
+    Path(idx): Path<usize>,
+) -> impl IntoResponse {
+    match state.downloader.lock_recover().job_log(idx) {
+        Some(lines) => Json(serde_json::json!({ "lines": lines })).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such job").into_response(),
+    }
 }
 
 async fn get_chapters(
@@ -2368,6 +2437,12 @@ async fn get_feed_info(State(state): State<Arc<WebState>>) -> impl IntoResponse 
 /// (cached by mtime), then groups by visual similarity. Returns immediately;
 /// poll `/api/maintenance/dedup/status` for progress + results.
 async fn post_dedup_scan(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    // Honor the global off-switch (backup.dedup_enabled).
+    if !state.downloader.lock_recover().dedup_enabled {
+        return Json(serde_json::json!({
+            "started": false, "running": false, "disabled": true
+        }));
+    }
     if state.dedup.running.swap(true, Ordering::SeqCst) {
         return Json(serde_json::json!({ "started": false, "running": true }));
     }
@@ -3068,6 +3143,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
     downloader.sponsorblock_mode = config.backup.sponsorblock_mode.clone();
     downloader.fetch_comments = config.backup.fetch_comments;
+    downloader.dedup_enabled = config.backup.dedup_enabled;
     downloader.convert_defaults = config.convert.clone();
     let music_root = downloader.music_root();
     let _ = std::fs::create_dir_all(&music_root);
@@ -3215,6 +3291,10 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/rescan", post(post_rescan))
         .route("/api/jobs/clear", post(post_clear_jobs))
         .route("/api/jobs/:idx", axum::routing::delete(post_remove_job))
+        .route("/api/jobs/:idx/cancel", post(post_cancel_job))
+        .route("/api/jobs/:idx/retry", post(post_retry_job))
+        .route("/api/jobs/:idx/log", get(get_job_log))
+        .route("/api/queued/:idx", axum::routing::delete(delete_queued_job))
         .route("/api/description/:id", get(get_description))
         .route("/api/chapters/:id", get(get_chapters))
         .route("/api/comments/:id", get(get_comments))

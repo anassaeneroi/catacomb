@@ -449,6 +449,7 @@ impl App {
         downloader.youtube_player_clients = config.backup.youtube_player_clients.clone();
         downloader.sponsorblock_mode = config.backup.sponsorblock_mode.clone();
         downloader.fetch_comments = config.backup.fetch_comments;
+        downloader.dedup_enabled = config.backup.dedup_enabled;
         // Federation peers, built once from config (read-only remote libraries).
         let remotes: Vec<std::sync::Arc<crate::remote::RemoteClient>> = config.remotes.iter()
             .map(|r| std::sync::Arc::new(crate::remote::RemoteClient::new(r)))
@@ -961,6 +962,10 @@ impl App {
     /// result over a channel. No-op if a job is already running.
     fn start_dedup(&mut self) {
         if self.dedup_running { return; }
+        if !self.config.backup.dedup_enabled {
+            self.dedup_error = Some("Similar-content scan is disabled in Settings.".into());
+            return;
+        }
         let mut inputs = Vec::new();
         let mut by_path: HashMap<String, SimVideo> = HashMap::new();
         let mut valid_paths: HashSet<String> = HashSet::new();
@@ -2027,6 +2032,8 @@ impl App {
                     }
                 }
                 let mut remove_job: Option<usize> = None;
+                let mut cancel_job: Option<usize> = None;
+                let mut retry_job: Option<usize> = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let n = self.downloader.jobs.len();
                     for i in (0..n).rev() {
@@ -2034,21 +2041,28 @@ impl App {
                         let (text, color) = match job.state {
                             JobState::Running => ("running", egui::Color32::from_rgb(230, 200, 60)),
                             JobState::Done => ("done", egui::Color32::from_rgb(110, 200, 110)),
+                            JobState::Failed if job.cancelled => ("cancelled", egui::Color32::from_rgb(150, 150, 150)),
                             JobState::Failed => ("failed", egui::Color32::from_rgb(220, 110, 110)),
                         };
                         let finished = job.state != JobState::Running;
+                        let can_retry = finished && job.has_retry_spec();
                         ui.push_id(i, |ui| {
                             ui.group(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.colored_label(color, text);
                                     ui.label(&job.label);
-                                    if finished {
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if finished {
                                             if ui.small_button("✕").clicked() {
                                                 remove_job = Some(i);
                                             }
-                                        });
-                                    }
+                                            if can_retry && ui.small_button("↻ Retry").clicked() {
+                                                retry_job = Some(i);
+                                            }
+                                        } else if ui.small_button("⛔ Cancel").clicked() {
+                                            cancel_job = Some(i);
+                                        }
+                                    });
                                 });
                                 ui.label(egui::RichText::new(&job.url).small().weak());
                                 if job.state == JobState::Running {
@@ -2091,6 +2105,12 @@ impl App {
                         });
                     }
                 });
+                if let Some(i) = cancel_job {
+                    self.downloader.cancel_job(i);
+                }
+                if let Some(i) = retry_job {
+                    self.downloader.retry_job(i);
+                }
                 if let Some(i) = remove_job {
                     self.downloader.remove_job(i);
                 }
@@ -3293,6 +3313,15 @@ impl App {
                                  Per-channel overrides live in each channel's options.");
                         ui.end_row();
 
+                        ui.label("Similar-content scan:");
+                        ui.checkbox(&mut self.config.backup.dedup_enabled, "Enable perceptual dedup")
+                            .on_hover_text(
+                                "When on, the Maintenance \"Scan for similar content\" button \
+                                 fingerprints your videos (an ffmpeg keyframe pass) to find \
+                                 visual duplicates. Turn off on low-powered machines to skip \
+                                 that work entirely.");
+                        ui.end_row();
+
                         ui.label("Web UI port:");
                         ui.add(
                             egui::DragValue::new(&mut self.config.web.port)
@@ -3703,6 +3732,7 @@ impl App {
                         self.downloader.youtube_player_clients = self.config.backup.youtube_player_clients.clone();
                         self.downloader.sponsorblock_mode = self.config.backup.sponsorblock_mode.clone();
                         self.downloader.fetch_comments = self.config.backup.fetch_comments;
+                        self.downloader.dedup_enabled = self.config.backup.dedup_enabled;
                         self.downloader.convert_defaults = self.config.convert.clone();
                         if dir_changed {
                             self.channels_root = new_dir.clone();

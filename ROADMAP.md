@@ -237,6 +237,18 @@ Probably never, or much later.
 
 Roughly reverse-chronological. Items that closed out a roadmap line.
 
+- **Seekable transcoded web playback** — `/api/transcode/:id` accepts a
+  `start=` offset and the web player uses custom controls for live ffmpeg
+  streams, so MKV/H.264 transcode mode can scrub, resume, jump chapters,
+  and sync transcript highlights even though the pipe has no byte ranges.
+- **Federation / multi-host** (3.5) — read-only peer libraries with
+  tokenized direct media URLs, so videos stream from the peer rather than
+  proxying through this instance.
+- **Smart auto-tagging** (3.4) — suggests folder groups for unfiled
+  channels from platform, median duration, and upload cadence; never
+  moves channels until the user applies the suggestion.
+- **Podcast/RSS feeds** — whole-library and per-channel feed URLs with a
+  stable read-only token for feed readers and media clients.
 - **Transcripts in search** (3.9) — subtitle text folded into the FTS
   index so search matches spoken words; FTS5 column-add migration.
 - **Perceptual-hash dedup** (3.7) — `fingerprint.rs` (ffmpeg→dHash,
@@ -306,14 +318,15 @@ Roughly reverse-chronological. Items that closed out a roadmap line.
 - **Phase 2** is complete: integration tests (2.1), docs site (2.2),
   error recovery (2.3), restore (2.4), stability hardening (2.5).
 - **Phase 3** is the "surpass" work now that we're at parity. Shipped so
-  far: WebSocket progress (3.3), comment viewer (3.6), perceptual-hash
-  dedup (3.7), and full-text search + transcript tooling (3.9). Still open:
-  Windows/macOS binaries (3.1), Android (3.2), smart auto-tagging (3.4),
-  federation (3.5), plugin hooks (3.8).
+  far: WebSocket progress (3.3), smart auto-tagging (3.4), federation
+  (3.5), comment viewer (3.6), perceptual-hash dedup (3.7), and
+  full-text search + transcript tooling (3.9). Still open: shipped
+  Windows/macOS binaries (3.1; compile groundwork is done), Android
+  (3.2), and plugin hooks (3.8).
 - **Phase 4** items might be valuable, but commit to nothing.
 
 Items inside a phase are loosely ordered by user-visible impact, not strict
 prerequisite. With the easy "surpass" wins banked, the highest-leverage
-remaining moves are **3.1 (Windows/macOS binaries)** for reach and a
-**RSS/podcast feed** or **smart auto-tagging (3.4)** for self-contained
-features Tartube can't match.
+remaining moves are **3.1 (Windows/macOS release artifacts)** for reach,
+**3.8 (plugin hooks)** for extensibility, and **3.2 (Android client)** for
+mobile-first consumption.

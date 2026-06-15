@@ -142,7 +142,10 @@
   .job{display:flex;align-items:center;gap:8px;padding:5px 14px;font-size:12px;flex-wrap:wrap;min-width:0}
   .job-row .job{border-bottom:none}
   .badge{font-weight:700;min-width:48px;flex-shrink:0}
-  .badge.running{color:#facc15}.badge.done{color:#4ade80}.badge.failed{color:#f87171}
+  .badge.running{color:#facc15}.badge.done{color:#4ade80}.badge.failed{color:#f87171}.badge.cancelled{color:var(--muted)}.badge.queued{color:var(--muted)}
+  .job-meta{font-size:11px;color:var(--muted);flex-shrink:0;font-variant-numeric:tabular-nums}
+  .job-act{font-size:11px;padding:1px 7px;flex-shrink:0}
+  .job-log{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px solid var(--border);border-radius:4px;margin:0 14px 8px;padding:8px;max-height:220px;overflow:auto;color:var(--muted)}
   /* Error-class badge sits next to the state badge. Subtle so the actual
      hint below carries the user's attention. */
   .err-class{font-size:10px;background:#7f1d1d;color:#fecaca;border-radius:3px;padding:1px 6px;text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
@@ -1911,6 +1914,11 @@ async function openSettings(){
       <input type="checkbox" id="cf-comments" ${cur.fetch_comments?'checked':''}>
     </div>
     <div class="settings-hint" style="margin-bottom:6px">Adds <code>--write-comments</code> to every download — fetches each video's comment tree into its info.json so the player's Comments tab works. Slow on popular videos. Per-channel overrides live in each channel's options.</div>
+    <div class="settings-row" style="margin-top:8px">
+      <label for="cf-dedup">Similar-content scan</label>
+      <input type="checkbox" id="cf-dedup" ${cur.dedup_enabled!==false?'checked':''}>
+    </div>
+    <div class="settings-hint" style="margin-bottom:6px">Enables the Maintenance &ldquo;Scan for similar content&rdquo; tool, which fingerprints your videos (an ffmpeg keyframe pass) to find visual duplicates. Turn off on low-powered machines to skip that work.</div>
     <hr style="border-color:var(--border);margin:12px 0">
     <div style="font-weight:700;margin-bottom:8px">Subtitles (global defaults)</div>
     <div class="settings-hint" style="margin-bottom:6px">Applied to every download. Individual channels can override these in their Channel options dialog.</div>
@@ -2154,12 +2162,13 @@ async function saveSettings(btn){
   const playerClients=document.getElementById('cf-player-clients')?.value||'';
   const sponsorblock=document.getElementById('cf-sponsorblock')?.value||'mark';
   const fetchComments=document.getElementById('cf-comments')?.checked||false;
+  const dedupEnabled=document.getElementById('cf-dedup')?.checked!==false;
   const convMode=document.getElementById('cf-convert-mode')?.value||'';
   const convCrf=parseInt(document.getElementById('cf-convert-crf')?.value||'23',10);
   const convPreset=document.getElementById('cf-convert-preset')?.value||'';
   const convAudio=document.getElementById('cf-convert-audio')?.value||'';
   const convKeep=document.getElementById('cf-convert-keep')?.checked||false;
-  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider,subtitles_enabled:subsEnabled,subtitles_auto:subsAuto,subtitles_embed:subsEmbed,subtitle_langs:subsLangs,subtitle_format:subsFormat,youtube_player_clients:playerClients,sponsorblock_mode:sponsorblock,fetch_comments:fetchComments,convert_mode:convMode,convert_crf:convCrf,convert_preset:convPreset,convert_audio_format:convAudio,convert_keep_original:convKeep};
+  const payload={transcode,scheduler_enabled:schedEnabled,scheduler_interval_hours:schedInterval,max_concurrent:maxConcurrent,use_bundled_ytdlp:useBundledYtdlp,use_pot_provider:usePotProvider,subtitles_enabled:subsEnabled,subtitles_auto:subsAuto,subtitles_embed:subsEmbed,subtitle_langs:subsLangs,subtitle_format:subsFormat,youtube_player_clients:playerClients,sponsorblock_mode:sponsorblock,fetch_comments:fetchComments,dedup_enabled:dedupEnabled,convert_mode:convMode,convert_crf:convCrf,convert_preset:convPreset,convert_audio_format:convAudio,convert_keep_original:convKeep};
   if(bindMode)payload.bind_mode=bindMode;
   if(plexPath!==undefined)payload.plex_library_path=plexPath;
   if(sourceUrl!==undefined)payload.source_url=sourceUrl;
@@ -2398,7 +2407,15 @@ function dedupIdle(err){
 }
 async function startDedup(btn){
   if(btn)btn.disabled=true;
-  try{await api('/api/maintenance/dedup/scan',{method:'POST'});startDedupPoll();}
+  try{
+    const r=await(await api('/api/maintenance/dedup/scan',{method:'POST'})).json();
+    if(r&&r.disabled){
+      const a=document.getElementById('dedup-area');
+      if(a)a.innerHTML=`<div style="color:var(--muted);font-size:12px">Similar-content scan is disabled in Settings.</div>`;
+      return;
+    }
+    startDedupPoll();
+  }
   catch(e){setStatus('Error: '+e.message);if(btn)btn.disabled=false}
 }
 function startDedupPoll(){
@@ -2509,13 +2526,16 @@ function renderJobs(jobs,queued,maxConcurrent){
   }
   const fin=jobs.some(j=>j.state!=='running');
   const hdr=fin?`<div style="padding:4px 14px;display:flex;justify-content:flex-end;border-bottom:1px solid var(--border)"><button onclick="clearFinishedJobs()" style="font-size:11px;padding:2px 8px">✕ Clear finished</button></div>`:'';
-  const queuedHtml=queued.map(q=>`<div class="job">
-      <span class="badge" style="color:var(--muted)">queued</span>
+  // Queued jobs map 1:1 to the server's pending-queue index, so the cancel
+  // button can DELETE /api/queued/<i>.
+  const queuedHtml=queued.map((q,i)=>`<div class="job">
+      <span class="badge queued">queued</span>
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${esc(q.label)} — ${esc(q.url)}</span>
+      <button class="job-act" onclick="cancelQueued(${i})" title="Remove from queue">✕</button>
     </div>`).join('');
   const limitNote=maxConcurrent>0?`<div style="font-size:11px;color:var(--muted);padding:6px 14px">max ${maxConcurrent} concurrent</div>`:'';
   body.innerHTML=hdr+jobs.map((j,i)=>{
-    const dismiss=j.state!=='running'?`<button onclick="removeJob(${i})" style="font-size:11px;padding:1px 6px">✕</button>`:'';
+    const running=j.state==='running';
     // Failed-job hint: when the classifier matched a known pattern, show
     // the suggested action below the row in a subtle box. Unclassified
     // failures (error_class === undefined) fall back to just the raw
@@ -2524,18 +2544,70 @@ function renderJobs(jobs,queued,maxConcurrent){
       ? `<span class="err-class" title="${esc(j.error_hint||'')}">${esc(j.error_class)}</span>` : '';
     const errHint=j.state==='failed'&&j.error_hint
       ? `<div class="job-hint">${esc(j.error_hint)}</div>` : '';
-    return `<div class="job-row">
+    // Live speed/ETA parsed from the yt-dlp progress line (running only);
+    // otherwise show the raw last log line.
+    const meta=running?jobMeta(j.last_line):'';
+    const pct=running?` ${Math.round((j.progress||0)*100)}%`:'';
+    // Per-row actions: cancel (running), retry (finished + retryable),
+    // log toggle (always), dismiss (finished).
+    const acts=[];
+    if(running)acts.push(`<button class="job-act" onclick="cancelJob(${i},this)" title="Stop this download">⛔ Cancel</button>`);
+    if(!running&&j.can_retry)acts.push(`<button class="job-act" onclick="retryJob(${i},this)" title="Re-run this download">↻ Retry</button>`);
+    acts.push(`<button class="job-act" onclick="toggleJobLog(${i},this)" title="Show full log">📄 Log</button>`);
+    if(!running)acts.push(`<button class="job-act" onclick="removeJob(${i})" title="Dismiss">✕</button>`);
+    return `<div class="job-row" data-job="${i}">
       <div class="job">
         <span class="badge ${j.state}">${j.state}</span>
         ${errBadge}
         <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.label)} — ${esc(j.url)}</span>
-        ${j.state==='running'?`<progress value="${j.progress}" max="1"></progress>`:''}
-        <span class="last-line" style="font-size:11px;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_line)}</span>
-        ${dismiss}
+        ${running?`<progress value="${j.progress}" max="1"></progress><span class="job-meta">${esc(meta)}${pct}</span>`:`<span class="last-line" style="font-size:11px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.last_line)}</span>`}
+        ${acts.join('')}
       </div>
       ${errHint}
     </div>`;
   }).join('')+queuedHtml+limitNote;
+}
+// Parse a yt-dlp "[download] 42.7% of 100MiB at 5MiB/s ETA 00:10" line into a
+// compact "5MiB/s · ETA 00:10" meta string. Empty when the line isn't a
+// recognizable download-progress line (post-processing, fragments, etc.).
+function jobMeta(line){
+  if(!line)return '';
+  const sp=line.match(/at\s+([\d.]+\s*[KMGT]?i?B\/s)/i);
+  const eta=line.match(/ETA\s+([\d:]+)/i);
+  const parts=[];
+  if(sp)parts.push(sp[1].replace(/\s+/g,''));
+  if(eta)parts.push('ETA '+eta[1]);
+  return parts.join(' · ');
+}
+async function cancelJob(idx,btn){
+  if(btn)btn.disabled=true;
+  try{await api('/api/jobs/'+idx+'/cancel',{method:'POST'});await pollProgress();}
+  catch(e){setStatus('Error: '+e.message);if(btn)btn.disabled=false}
+}
+async function retryJob(idx,btn){
+  if(btn)btn.disabled=true;
+  try{await api('/api/jobs/'+idx+'/retry',{method:'POST'});await pollProgress();}
+  catch(e){setStatus('Error: '+e.message);if(btn)btn.disabled=false}
+}
+async function cancelQueued(idx){
+  try{await api('/api/queued/'+idx,{method:'DELETE'});await pollProgress();}
+  catch(e){setStatus('Error: '+e.message)}
+}
+// Expand/collapse the full server-side log for one job, fetched on demand.
+async function toggleJobLog(idx,btn){
+  const row=document.querySelector(`.job-row[data-job="${idx}"]`);
+  if(!row)return;
+  const existing=row.querySelector('.job-log');
+  if(existing){existing.remove();if(btn)btn.classList.remove('primary');return}
+  if(btn)btn.classList.add('primary');
+  const pre=document.createElement('div');
+  pre.className='job-log';pre.textContent='Loading…';
+  row.appendChild(pre);
+  try{
+    const d=await(await api('/api/jobs/'+idx+'/log')).json();
+    pre.textContent=(d.lines||[]).join('\n')||'(no log output)';
+    pre.scrollTop=pre.scrollHeight;
+  }catch(e){pre.textContent='Failed to load log: '+e.message}
 }
 // Open the Downloads modal. If it's already open, do nothing (clicking the
 // ⬇ button again would otherwise stack duplicate modals).

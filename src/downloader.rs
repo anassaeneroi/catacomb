@@ -163,6 +163,10 @@ pub struct Job {
     /// On the resulting failure we force a retryable class so auto-retry
     /// re-queues it — a hang is transient, worth one more try.
     watchdog_killed: bool,
+    /// True when the user explicitly cancelled this job (vs. a genuine
+    /// failure). Suppresses auto-retry and is surfaced as a distinct
+    /// "cancelled" state in the UI rather than a misleading error class.
+    pub cancelled: bool,
     rx: Receiver<Msg>,
 }
 
@@ -236,6 +240,13 @@ const AUTO_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(
 const HANG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl Job {
+    /// Whether this job carries the inputs needed for a manual retry (download
+    /// jobs do; live recordings, self-update, and synthetic preflight failures
+    /// don't). Drives the UI's "Retry" button.
+    pub fn has_retry_spec(&self) -> bool {
+        self.retry_spec.is_some()
+    }
+
     fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -322,6 +333,9 @@ pub struct Downloader {
     /// `--write-comments`. Per-channel options can override. Set at
     /// construction + on settings save.
     pub fetch_comments: bool,
+    /// Global `backup.dedup_enabled`. When false, the perceptual "similar
+    /// content" scan is hard-disabled in both UIs. Set at construction + save.
+    pub dedup_enabled: bool,
     /// Global `[convert]` config. Drives the post-download ffmpeg pass.
     /// Per-channel options override the mode. Set at construction + save.
     pub convert_defaults: crate::config::ConvertSection,
@@ -369,6 +383,7 @@ impl Downloader {
             youtube_player_clients: String::new(),
             sponsorblock_mode: "mark".to_string(),
             fetch_comments: false,
+            dedup_enabled: true,
             convert_defaults: crate::config::ConvertSection::default(),
             retry_queue: Vec::new(),
             rate_limited_backoff: false,
@@ -1029,6 +1044,7 @@ impl Downloader {
             child_pid,
             last_activity: std::time::Instant::now(),
             watchdog_killed: false,
+            cancelled: false,
             rx,
         });
     }
@@ -1069,6 +1085,7 @@ impl Downloader {
             child_pid: None,     // no process to watchdog
             last_activity: std::time::Instant::now(),
             watchdog_killed: false,
+            cancelled: false,
             rx,
         });
     }
@@ -1374,6 +1391,7 @@ impl Downloader {
             child_pid,
             last_activity: std::time::Instant::now(),
             watchdog_killed: false,
+            cancelled: false,
             rx,
         });
     }
@@ -1395,6 +1413,55 @@ impl Downloader {
                 self.jobs.remove(idx);
             }
         }
+    }
+
+    /// Cancel a running job by index: SIGKILL its process and mark it
+    /// `cancelled` so the auto-retry path skips it and the UI shows a
+    /// distinct "cancelled" state rather than a misleading error class.
+    /// The reader thread's `wait()` returns once the process dies and
+    /// delivers `Finished(false)` normally, transitioning it to Failed.
+    /// No-op for non-running jobs. Returns whether a job was cancelled.
+    pub fn cancel_job(&mut self, idx: usize) -> bool {
+        let Some(job) = self.jobs.get_mut(idx) else { return false };
+        if job.state != JobState::Running { return false; }
+        if let Some(pid) = job.child_pid {
+            kill_pid(pid);
+        }
+        job.cancelled = true;
+        job.retry_handled = true; // a user cancel must not auto-retry
+        job.last_activity = std::time::Instant::now();
+        job.log.push_back("⛔ cancelled by user".to_string());
+        true
+    }
+
+    /// Cancel a still-queued (not-yet-started) job by index into the pending
+    /// queue. Returns whether an entry was removed.
+    pub fn cancel_queued(&mut self, idx: usize) -> bool {
+        if idx < self.pending.len() {
+            self.pending.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Manually re-issue a finished (failed/cancelled/done) job by index,
+    /// reusing the inputs captured at start time. Resets the attempt counter
+    /// so the user-triggered retry gets a fresh auto-retry budget. The old
+    /// job row is removed. No-op (returns false) for a running job or one
+    /// with no captured `retry_spec` (e.g. live recordings, self-update).
+    pub fn retry_job(&mut self, idx: usize) -> bool {
+        let Some(job) = self.jobs.get(idx) else { return false };
+        if job.state == JobState::Running { return false; }
+        let Some(spec) = job.retry_spec.clone() else { return false };
+        self.jobs.remove(idx);
+        self.start_retry(spec, 0);
+        true
+    }
+
+    /// Full log buffer for a job by index (for the UI's per-job log view).
+    pub fn job_log(&self, idx: usize) -> Option<Vec<String>> {
+        self.jobs.get(idx).map(|j| j.log.iter().cloned().collect())
     }
 }
 
@@ -1626,6 +1693,7 @@ mod tests {
             child_pid: Some(999_999),
             last_activity: std::time::Instant::now(),
             watchdog_killed: true,
+            cancelled: false,
             rx,
         };
         tx.send(Msg::Finished(false)).unwrap();
@@ -1645,7 +1713,7 @@ mod tests {
             retry_spec: None, retry_count: 0, retry_handled: false,
             convert_on_finish: None, convert_handled: false,
             child_pid: Some(1), last_activity: std::time::Instant::now(),
-            watchdog_killed: false, rx,
+            watchdog_killed: false, cancelled: false, rx,
         };
         tx.send(Msg::Line("ERROR: Video unavailable. This video has been removed".into())).unwrap();
         tx.send(Msg::Finished(false)).unwrap();

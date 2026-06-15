@@ -160,10 +160,16 @@ pub struct BackupSection {
     /// live in [`crate::download_options::DownloadOptions`].
     #[serde(default)]
     pub fetch_comments: bool,
+    /// Whether the perceptual "similar content" dedup scan is available. On by
+    /// default; set to `false` to hard-disable fingerprinting in both UIs (the
+    /// scan button no-ops / the web scan endpoint returns 409). Useful on
+    /// low-powered machines where the ffmpeg keyframe pass is unwanted.
+    #[serde(default = "default_true")]
+    pub dedup_enabled: bool,
 }
 
 fn default_max_concurrent() -> usize { 3 }
-fn default_true() -> bool { true }
+pub fn default_true() -> bool { true }
 fn default_sponsorblock_mode() -> String { "mark".to_string() }
 
 /// `[player]` table — external player and browser cookie source.
@@ -300,6 +306,7 @@ impl Config {
                 youtube_player_clients: String::new(),
                 sponsorblock_mode: default_sponsorblock_mode(),
                 fetch_comments: false,
+                dedup_enabled: true,
             },
             player: PlayerSection::default(),
             ui: UiSection::default(),

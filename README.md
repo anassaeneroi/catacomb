@@ -359,10 +359,12 @@ switch to **Bundled** in Settings.
 **Web UI says "authentication required" but no password is set**
 Sessions cleared after the password was changed. Refresh the page.
 
-**Videos play but seeking jumps to the start**
-That's the transcoding mode (`web.transcode = true`). MKV streams can't be
-seeked while transcoding live; turn it off if your browser can play MKV
-directly.
+**Videos play but seeking is approximate**
+That's usually transcoding mode (`web.transcode = true`). yt-offline can
+scrub those live ffmpeg streams by re-requesting the stream at a `start=`
+offset, but ffmpeg's fast seek lands on a nearby keyframe rather than an
+exact byte position. Turn transcoding off if your browser can play the
+original file directly and you want native browser seeking.
 
 **Connection-reset / "Recv failure" errors on download**
 The defaults already retry 30× with linear backoff. If they're persistent,
