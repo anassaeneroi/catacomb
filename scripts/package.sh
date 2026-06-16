@@ -2,7 +2,7 @@
 # Build distributable packages for yt-offline.
 #
 # Usage:
-#   scripts/package.sh [deb|rpm|appimage|win|all]
+#   scripts/package.sh [deb|rpm|appimage|win|mac|all]
 #
 # With no argument, builds everything that's buildable on the current host.
 # Output lands in dist/. Each format is independent — a failure in one
@@ -13,11 +13,20 @@
 #   - .rpm     → cargo-generate-rpm  (cargo install cargo-generate-rpm)
 #   - AppImage → appimagetool        (downloaded to dist/tools/ if missing)
 #   - win .zip → x86_64-pc-windows-gnu target + mingw-w64 gcc + zip
+#   - mac .zip → {aarch64,x86_64}-apple-darwin target + osxcross + zip
 #
 # The Linux release binary is built once up front and reused by the Linux
-# formats; the Windows .zip cross-compiles a separate target on demand.
-# `all` skips the Windows zip unless the cross toolchain is present, so a
-# plain `all` on a stock Linux box still succeeds.
+# formats; the Windows/macOS .zips cross-compile separate targets on demand.
+# `all` skips the Windows and macOS zips unless their cross toolchains are
+# present, so a plain `all` on a stock Linux box still succeeds.
+#
+# macOS notes: cross-compiling for Apple targets needs osxcross
+# (https://github.com/tpoechtrager/osxcross) built with a macOS SDK, and its
+# wrapper compilers (oa64-clang / o64-clang) on PATH. Set MAC_ARCH=arm64
+# (default) or x86_64. The result is an unsigned yt-offline.app inside a .zip;
+# it is *not* codesigned or notarized, so on the target Mac it must be opened
+# via right-click → Open (or `xattr -dr com.apple.quarantine`) the first time.
+# See docs/PACKAGING.md.
 
 set -uo pipefail
 
@@ -221,10 +230,139 @@ win_available() {
         && command -v zip >/dev/null 2>&1
 }
 
+# ── macOS .app .zip (cross-compiled via osxcross) ────────────────────────────
+# Builds an unsigned yt-offline.app for one Apple arch (MAC_ARCH=arm64 default,
+# or x86_64) and zips it. Requires osxcross's wrapper compilers on PATH; the
+# crypto stack is `ring`, which cross-builds against osxcross's SDK fine. Like
+# the other formats we don't bundle yt-dlp/ffmpeg/mpv — the .app's README and
+# Info.plist note they're expected on PATH. Skips cleanly if the toolchain is
+# absent so `all` on a stock Linux box is unaffected.
+mac_target_for() {  # arch → rust target triple
+    case "$1" in
+        arm64|aarch64) echo "aarch64-apple-darwin" ;;
+        x86_64|x64)    echo "x86_64-apple-darwin" ;;
+        *)             echo "" ;;
+    esac
+}
+mac_wrapper_for() {  # arch → osxcross clang wrapper name
+    case "$1" in
+        arm64|aarch64) echo "oa64-clang" ;;
+        x86_64|x64)    echo "o64-clang" ;;
+        *)             echo "" ;;
+    esac
+}
+
+mac_available() {
+    local arch="${MAC_ARCH:-arm64}"
+    local target wrapper
+    target="$(mac_target_for "$arch")"; wrapper="$(mac_wrapper_for "$arch")"
+    [[ -n "$target" ]] \
+        && rustup target list --installed 2>/dev/null | grep -qx "$target" \
+        && command -v "$wrapper" >/dev/null 2>&1 \
+        && command -v zip >/dev/null 2>&1
+}
+
+build_mac() {
+    local arch="${MAC_ARCH:-arm64}"
+    local target wrapper
+    target="$(mac_target_for "$arch")"; wrapper="$(mac_wrapper_for "$arch")"
+    say "building macOS .app .zip ($arch → ${target:-?})"
+
+    if [[ -z "$target" ]]; then
+        RESULT[mac]="fail unknown MAC_ARCH '$arch' (want arm64 or x86_64)"; return
+    fi
+    if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+        RESULT[mac]="skip rust target $target not installed (rustup target add $target)"; return
+    fi
+    if ! command -v "$wrapper" >/dev/null 2>&1; then
+        RESULT[mac]="skip osxcross $wrapper not on PATH (build osxcross, add target/bin to PATH)"; return
+    fi
+    if ! command -v zip >/dev/null 2>&1; then
+        RESULT[mac]="skip zip not found"; return
+    fi
+
+    # Point cargo + cc-rs at the osxcross wrappers for this target. cargo reads
+    # the per-target linker from CARGO_TARGET_<TRIPLE>_LINKER (triple
+    # upper-cased, '-'→'_'); cc-rs (rusqlite-bundled, ring) reads CC/CXX/AR_<triple>.
+    local bindir; bindir="$(dirname "$(command -v "$wrapper")")"
+    local cxx="${wrapper%clang}clang++"          # oa64-clang → oa64-clang++
+    # ar/ranlib are only published under the versioned triple (e.g.
+    # aarch64-apple-darwin23-ar); discover it, fall back to llvm-ar.
+    local ver_triple ar ranlib
+    ver_triple="$(basename "$(ls "$bindir/${target%-darwin}-darwin"*-ar 2>/dev/null | head -1)" 2>/dev/null | sed 's/-ar$//')"
+    if [[ -n "$ver_triple" && -x "$bindir/${ver_triple}-ar" ]]; then
+        ar="$bindir/${ver_triple}-ar"; ranlib="$bindir/${ver_triple}-ranlib"
+    else
+        ar="$(command -v llvm-ar || echo ar)"; ranlib="$(command -v llvm-ranlib || echo ranlib)"
+    fi
+    local cargo_var="CARGO_TARGET_$(echo "$target" | tr 'a-z-' 'A-Z_')_LINKER"
+
+    if ! env \
+        "$cargo_var=$wrapper" \
+        "CC_${target//-/_}=$wrapper" \
+        "CXX_${target//-/_}=$cxx" \
+        "AR_${target//-/_}=$ar" \
+        "RANLIB_${target//-/_}=$ranlib" \
+        cargo build --release --target "$target"; then
+        RESULT[mac]="fail cargo build --target $target returned nonzero"; return
+    fi
+    local bin="target/$target/release/$PKG"
+    if [[ ! -f "$bin" ]]; then
+        RESULT[mac]="fail expected $bin after build"; return
+    fi
+
+    # ── Assemble the .app bundle (just a directory tree + Info.plist). ──
+    local app="$DIST/${PKG}.app"
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    install -m755 "$bin" "$app/Contents/MacOS/$PKG"
+
+    cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>            <string>yt-offline</string>
+    <key>CFBundleDisplayName</key>     <string>yt-offline</string>
+    <key>CFBundleIdentifier</key>      <string>org.codeberg.yt-offline</string>
+    <key>CFBundleVersion</key>         <string>${VERSION}</string>
+    <key>CFBundleShortVersionString</key> <string>${VERSION}</string>
+    <key>CFBundleExecutable</key>      <string>${PKG}</string>
+    <key>CFBundleIconFile</key>        <string>${PKG}.icns</string>
+    <key>CFBundlePackageType</key>     <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>  <string>11.0</string>
+    <key>NSHighResolutionCapable</key> <true/>
+</dict>
+</plist>
+PLIST
+
+    # Best-effort icon: convert icon.png → .icns if a converter exists; the
+    # bundle is valid without it (just falls back to a generic icon).
+    if command -v png2icns >/dev/null 2>&1; then
+        png2icns "$app/Contents/Resources/$PKG.icns" icon.png >/dev/null 2>&1 \
+            || warn "png2icns failed; .app will use a generic icon"
+    elif command -v iconutil >/dev/null 2>&1; then
+        : # iconutil is macOS-only; on a real Mac you'd build an .iconset here
+    else
+        warn "no png2icns/iconutil; .app ships without a custom icon"
+    fi
+
+    local out="$DIST/${PKG}-${VERSION}-${arch}-macos.zip"
+    rm -f "$out"
+    # Zip the .app from DIST so the archive root is the bundle. -y keeps any
+    # symlinks as links; -r recurses the bundle tree.
+    if (cd "$DIST" && zip -q -r -y "$out" "${PKG}.app"); then
+        RESULT[mac]="ok $out"
+    else
+        RESULT[mac]="fail zip returned nonzero"
+    fi
+    rm -rf "$app"
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
-# The Windows zip doesn't need the Linux release binary, so skip that slow
-# build when Windows is all that was asked for.
-if [[ "$WANT" != "win" ]]; then
+# The Windows/macOS zips don't need the Linux release binary, so skip that
+# slow build when a cross target is all that was asked for.
+if [[ "$WANT" != "win" && "$WANT" != "mac" ]]; then
     build_binary
 fi
 
@@ -233,16 +371,18 @@ case "$WANT" in
     rpm)      build_rpm ;;
     appimage) build_appimage ;;
     win)      build_win ;;
+    mac)      build_mac ;;
     all)      build_deb; build_rpm; build_appimage
-              if win_available; then build_win; fi ;;
-    *)        err "unknown target '$WANT' (want: deb|rpm|appimage|win|all)"; exit 2 ;;
+              if win_available; then build_win; fi
+              if mac_available; then build_mac; fi ;;
+    *)        err "unknown target '$WANT' (want: deb|rpm|appimage|win|mac|all)"; exit 2 ;;
 esac
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo
 say "package summary"
 status=0
-for fmt in deb rpm appimage win; do
+for fmt in deb rpm appimage win mac; do
     [[ -v RESULT[$fmt] ]] || continue
     state="${RESULT[$fmt]%% *}"
     detail="${RESULT[$fmt]#* }"

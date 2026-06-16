@@ -69,34 +69,67 @@ For repeated builds after pushing new commits, always pass `-C`
 (cleanbuild) so makepkg re-checks out the latest source instead of
 reusing a stale cached clone.
 
-## Windows — experimental
+## Windows (.zip)
 
-Windows is **not** currently a first-class target. Two Linux-only
-dependencies block a clean `--target x86_64-pc-windows-gnu` build:
+Windows cross-compiles cleanly from Linux — the formerly-blocking
+Linux-only deps are target-gated in `Cargo.toml` (`ksni` and `rfd`'s
+xdg-portal backend are `cfg(target_os = "linux")`; `tray::start` is a
+no-op off Linux; `rfd` falls back to its native Win32 backend).
 
-- **`ksni`** (system tray) — talks to the freedesktop StatusNotifierItem
-  D-Bus spec, which doesn't exist on Windows. Needs replacing with
-  `tray-icon` behind `#[cfg(windows)]`, or stubbing `src/tray.rs` to a
-  no-op on non-Unix.
-- **`rfd` xdg-portal backend** — the file picker uses the XDG desktop
-  portal. The `rfd` crate does support a native Windows backend, but the
-  feature flags in `Cargo.toml` would need to be made target-conditional.
+```sh
+rustup target add x86_64-pc-windows-gnu
+sudo apt install mingw-w64 zip          # or your distro's equivalent
+scripts/package.sh win
+```
 
-Once those are addressed, the rest (eframe, axum, rusqlite-bundled) is
-already cross-platform — `bundled_ytdlp_path()` and friends already have
-`cfg!(windows)` branches. The path to a Windows `.exe`/`.msi` (via
-[`cargo-wix`](https://github.com/volks73/cargo-wix)) is then mechanical.
+This produces `dist/yt-offline-<ver>-x86_64-windows.zip` containing
+`yt-offline.exe`, `LICENSE.txt`, and a `README.txt` listing the runtime
+PATH deps (yt-dlp / ffmpeg / mpv). Release builds link as a GUI-subsystem
+app (no console window); the binary reattaches to the launching terminal
+at runtime (`attach_windows_console` in `main.rs`) so `yt-offline.exe
+--web 8080` from PowerShell prints its logs, while a double-click stays
+windowless.
 
-Tracked as a follow-up; PRs welcome.
+`scripts/package.sh all` includes the Windows zip automatically when the
+target + mingw + zip are all present, and silently skips it otherwise.
 
-## macOS
+## macOS (.app .zip)
 
-Same shape as Windows: the tray needs a macOS backend. eframe runs fine
-on macOS otherwise. A `.app` bundle + `.dmg` would follow once the tray
-is abstracted behind a trait with per-OS implementations.
+macOS cross-compiles via [osxcross](https://github.com/tpoechtrager/osxcross),
+which needs Apple's macOS SDK (extracted from Xcode — its license does not
+permit redistribution, which is why this build is **local-only and not in
+CI**). The crypto stack is `ring`, which builds against the osxcross SDK
+without trouble.
+
+One-time setup: build osxcross with a macOS SDK and put its
+`target/bin` on your `PATH` (this provides the `oa64-clang` / `o64-clang`
+wrapper compilers). Then:
+
+```sh
+rustup target add aarch64-apple-darwin   # or x86_64-apple-darwin
+MAC_ARCH=arm64 scripts/package.sh mac     # arm64 (default) | x86_64
+```
+
+This cross-compiles, assembles an unsigned `yt-offline.app`
+(`Info.plist` + the Mach-O binary; an `.icns` icon too if `png2icns` is
+available), and zips it to `dist/yt-offline-<ver>-<arch>-macos.zip`. The
+`.app` is **not codesigned or notarized**, so on the target Mac it must be
+opened the first time via right-click → Open, or cleared with `xattr -dr
+com.apple.quarantine yt-offline.app`. Runtime deps (yt-dlp / ffmpeg / mpv)
+are expected on PATH as on the other platforms.
+
+A `.dmg` and codesigning/notarization (and a `tray-icon`-based macOS tray)
+are follow-ups; the tray is currently a no-op off Linux. A **MacPorts**
+port (a `Portfile` building from source, like the Arch `PKGBUILD`) is a
+possible future native-distribution path — unscheduled.
 
 ## CI
 
 `.forgejo/workflows/release.yml` runs `scripts/package.sh all` on every
-pushed tag (`v*`) and attaches the resulting `.deb`/`.rpm`/`.AppImage` to
-the Codeberg release. See that file for the runner setup.
+pushed tag (`v*`) and attaches the resulting artifacts to the Codeberg
+release. The Linux container also installs `mingw-w64` + `zip` + the
+`x86_64-pc-windows-gnu` target, so the **Windows zip is built in CI**
+alongside the `.deb`/`.rpm`/`.AppImage`. The **macOS zip is not in CI**
+(the SDK can't be hosted in a public image) — build it locally per the
+section above, or add a GitHub Actions `macos-latest` job which has Xcode
+and can also codesign/notarize.

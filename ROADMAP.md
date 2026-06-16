@@ -154,13 +154,19 @@ Linux; `disk_space` (`statvfs`), `plex` (symlinks, with a Windows
 `symlink_file` path), the mpv IPC `UnixStream`, and the
 `chmod`/`PermissionsExt` guards are all `cfg(unix)`-gated.
 
-**macOS is deferred, not blocked.** The code is Unix and cfg-gated, so it
-*should* compile on a Mac unchanged, but it can't be linked from the
-Linux host (no osxcross/SDK) and Codeberg has no macOS runners — so a real
-tested `.app`/binary needs either a GitHub Actions `macos-latest` runner
-(mirror CI there) or a local osxcross setup. Remaining for either OS: a
-real per-OS tray backend (e.g. `tray-icon`) if the tray is wanted off
-Linux, and on-hardware runtime testing.
+**macOS has a packaging path, pending the toolchain.** `scripts/package.sh
+mac` cross-compiles an Apple target (`MAC_ARCH=arm64` default, or
+`x86_64`) via osxcross, assembles an unsigned `yt-offline.app`
+(`Info.plist` + Mach-O + best-effort `.icns`), and zips it. The crypto
+stack is `ring`, which builds against the osxcross SDK fine. It's gated on
+the operator having osxcross built with a macOS SDK on PATH (the SDK comes
+from Xcode and can't be redistributed, so this stays **local-only, not in
+CI** — `all` skips it cleanly when the toolchain is absent). Untested
+end-to-end here because this box has no osxcross/SDK. Remaining: actually
+run it through osxcross + on-hardware testing; codesigning/notarization
+and a `.dmg`; and a real macOS tray backend (e.g. `tray-icon` — the tray
+is a no-op off Linux today). A GitHub Actions `macos-latest` job is the
+alternative that also unlocks signing.
 
 ### 3.2 Android client
 
