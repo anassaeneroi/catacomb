@@ -126,25 +126,41 @@ instead of cascading one handler's panic into a dead server.
 
 Once we're at parity, we push past Tartube on its own ground.
 
-### 3.1 Cross-compile macOS + Windows binaries — GROUNDWORK DONE
+### 3.1 Cross-compile macOS + Windows binaries — WINDOWS SHIPS; macOS DEFERRED
 
-The compile blockers are cleared: `cargo check --target
-x86_64-pc-windows-gnu` is green (only the upstream egui `f32: From<f64>`
-warnings). The Linux-only deps are now target-gated in `Cargo.toml` —
-`ksni` and `rfd`'s `xdg-portal` backend are `cfg(target_os = "linux")`
-only, with `rfd` falling back to its native Win32/AppKit backend
-elsewhere. `tray::start` is `cfg`-split: the SNI/ksni implementation on
-Linux, a no-op `None` stub on other OSes (windowed-only, exactly the
-no-SNI-host behavior). The rest was already portable — `disk_space`
-(`statvfs`), `plex` (symlinks; now with a Windows `symlink_file` path),
-the mpv IPC `UnixStream`, and the `chmod`/`PermissionsExt` guards are all
-`cfg(unix)`-gated. macOS is Unix, so those paths apply there unchanged.
+**Windows is now a shippable artifact.** `cargo build --release --target
+x86_64-pc-windows-gnu` doesn't just check — it *links* a working 22 MB
+`yt-offline.exe` via mingw-w64 (only the upstream egui `f32: From<f64>`
+warnings). `scripts/package.sh win` (and `all`, when the cross toolchain
+is present) cross-compiles and bundles it into
+`yt-offline-<ver>-x86_64-windows.zip` (exe + LICENSE + a README listing
+the yt-dlp/ffmpeg/mpv PATH deps). The Forgejo release workflow installs
+`mingw-w64` + `zip` + the rust target so a tag push produces the Windows
+zip alongside the Linux packages — all from the one Linux container, no
+Windows runner needed.
 
-Remaining for a shipped binary: a real per-OS tray backend (e.g.
-`tray-icon`) if the tray is wanted off Linux; a CI matrix that actually
-*links* (mingw-w64 / an osxcross or macOS runner) and produces artifacts;
-and runtime testing on each OS. The hard part — making the tree compile
-off Linux — is done.
+One Windows-specific runtime fix landed with it: release builds set
+`windows_subsystem = "windows"` (no console window — right for the GUI),
+which would leave a `--web`/CLI run silent. `attach_windows_console()`
+(`main.rs`, `cfg(windows)`, via `windows-sys` `AttachConsole`) reattaches
+to the launching terminal so headless mode prints its logs there, while a
+double-click stays windowless.
+
+The portability groundwork that made this possible: Linux-only deps are
+target-gated in `Cargo.toml` — `ksni` and `rfd`'s `xdg-portal` backend
+are `cfg(target_os = "linux")` only, `rfd` falling back to its native
+Win32/AppKit backend elsewhere; `tray::start` is a no-op `None` stub off
+Linux; `disk_space` (`statvfs`), `plex` (symlinks, with a Windows
+`symlink_file` path), the mpv IPC `UnixStream`, and the
+`chmod`/`PermissionsExt` guards are all `cfg(unix)`-gated.
+
+**macOS is deferred, not blocked.** The code is Unix and cfg-gated, so it
+*should* compile on a Mac unchanged, but it can't be linked from the
+Linux host (no osxcross/SDK) and Codeberg has no macOS runners — so a real
+tested `.app`/binary needs either a GitHub Actions `macos-latest` runner
+(mirror CI there) or a local osxcross setup. Remaining for either OS: a
+real per-OS tray backend (e.g. `tray-icon`) if the tray is wanted off
+Linux, and on-hardware runtime testing.
 
 ### 3.2 Android client
 
@@ -319,14 +335,14 @@ Roughly reverse-chronological. Items that closed out a roadmap line.
   error recovery (2.3), restore (2.4), stability hardening (2.5).
 - **Phase 3** is the "surpass" work now that we're at parity. Shipped so
   far: WebSocket progress (3.3), smart auto-tagging (3.4), federation
-  (3.5), comment viewer (3.6), perceptual-hash dedup (3.7), and
-  full-text search + transcript tooling (3.9). Still open: shipped
-  Windows/macOS binaries (3.1; compile groundwork is done), Android
-  (3.2), and plugin hooks (3.8).
+  (3.5), comment viewer (3.6), perceptual-hash dedup (3.7), full-text
+  search + transcript tooling (3.9), and the **Windows** half of 3.1
+  (cross-compiled .zip + release CI). Still open: a **macOS** binary
+  (3.1; needs a Mac runner), Android (3.2), and plugin hooks (3.8).
 - **Phase 4** items might be valuable, but commit to nothing.
 
 Items inside a phase are loosely ordered by user-visible impact, not strict
-prerequisite. With the easy "surpass" wins banked, the highest-leverage
-remaining moves are **3.1 (Windows/macOS release artifacts)** for reach,
-**3.8 (plugin hooks)** for extensibility, and **3.2 (Android client)** for
-mobile-first consumption.
+prerequisite. With Windows banked, the highest-leverage remaining moves are
+**3.8 (plugin hooks)** for extensibility, **3.2 (Android client)** for
+mobile-first consumption, and the **macOS** half of 3.1 for reach (a Mac
+runner or osxcross).

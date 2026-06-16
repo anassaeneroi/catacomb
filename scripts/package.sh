@@ -2,7 +2,7 @@
 # Build distributable packages for yt-offline.
 #
 # Usage:
-#   scripts/package.sh [deb|rpm|appimage|all]
+#   scripts/package.sh [deb|rpm|appimage|win|all]
 #
 # With no argument, builds everything that's buildable on the current host.
 # Output lands in dist/. Each format is independent — a failure in one
@@ -12,8 +12,12 @@
 #   - .deb     → cargo-deb           (cargo install cargo-deb)
 #   - .rpm     → cargo-generate-rpm  (cargo install cargo-generate-rpm)
 #   - AppImage → appimagetool        (downloaded to dist/tools/ if missing)
+#   - win .zip → x86_64-pc-windows-gnu target + mingw-w64 gcc + zip
 #
-# The release binary is built once up front and reused by every format.
+# The Linux release binary is built once up front and reused by the Linux
+# formats; the Windows .zip cross-compiles a separate target on demand.
+# `all` skips the Windows zip unless the cross toolchain is present, so a
+# plain `all` on a stock Linux box still succeeds.
 
 set -uo pipefail
 
@@ -135,22 +139,110 @@ APPRUN
     rm -rf "$appdir"
 }
 
+# ── Windows .zip (cross-compiled via mingw-w64) ──────────────────────────────
+# Like the AppImage we don't bundle the subprocess deps (yt-dlp / ffmpeg /
+# mpv) — on Windows they're expected on PATH, and the README in the zip says
+# so. The release build links a GUI-subsystem exe (no console window); the
+# binary reattaches to the parent console at runtime for `--web`/CLI use
+# (see attach_windows_console in main.rs).
+WIN_TARGET="x86_64-pc-windows-gnu"
+build_win() {
+    say "building Windows .zip ($WIN_TARGET)"
+    if ! rustup target list --installed 2>/dev/null | grep -qx "$WIN_TARGET"; then
+        RESULT[win]="skip rust target $WIN_TARGET not installed (rustup target add $WIN_TARGET)"
+        return
+    fi
+    if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+        RESULT[win]="skip mingw-w64 gcc not found (install mingw-w64)"
+        return
+    fi
+    if ! command -v zip >/dev/null 2>&1; then
+        RESULT[win]="skip zip not found"
+        return
+    fi
+    if ! cargo build --release --target "$WIN_TARGET"; then
+        RESULT[win]="fail cargo build --target $WIN_TARGET returned nonzero"
+        return
+    fi
+    local exe="target/$WIN_TARGET/release/$PKG.exe"
+    if [[ ! -f "$exe" ]]; then
+        RESULT[win]="fail expected $exe after build"
+        return
+    fi
+
+    local staging="$DIST/${PKG}-win"
+    rm -rf "$staging"
+    mkdir -p "$staging"
+    install -m755 "$exe" "$staging/$PKG.exe"
+    install -m644 LICENSE "$staging/LICENSE.txt"
+    cat > "$staging/README.txt" <<README
+yt-offline ${VERSION} — Windows build
+
+Run the GUI by double-clicking yt-offline.exe.
+
+To run the headless web server, open PowerShell or Command Prompt in this
+folder and run:
+
+    .\\yt-offline.exe --web 8080
+
+then browse to http://localhost:8080. (Launched from a terminal the server
+prints its logs to that terminal; double-clicked it runs windowless.)
+
+Runtime requirements — these external tools must be installed and on your
+PATH (the .exe shells out to them, it does not bundle them):
+
+    yt-dlp    https://github.com/yt-dlp/yt-dlp   (the downloader engine)
+    ffmpeg    https://ffmpeg.org                 (muxing / transcode / dedup)
+    mpv       https://mpv.io                      (desktop playback; optional)
+
+config.toml and cookies.txt are read from the working directory, the same
+as on Linux. See the project README for configuration details.
+
+Licensed under the GNU Affero General Public License v3 or later; see
+LICENSE.txt. Source: https://codeberg.org/${PKG}
+README
+
+    local out="$DIST/${PKG}-${VERSION}-x86_64-windows.zip"
+    rm -f "$out"
+    # -j junks paths so the zip has the three files at its root.
+    if (cd "$staging" && zip -q -j "$out" "$PKG.exe" LICENSE.txt README.txt); then
+        RESULT[win]="ok $out"
+    else
+        RESULT[win]="fail zip returned nonzero"
+    fi
+    rm -rf "$staging"
+}
+
+# Whether to fold the Windows zip into a bare `all` run: only when the cross
+# toolchain is actually present, so `all` on a stock Linux box still passes.
+win_available() {
+    rustup target list --installed 2>/dev/null | grep -qx "$WIN_TARGET" \
+        && command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 \
+        && command -v zip >/dev/null 2>&1
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
-build_binary
+# The Windows zip doesn't need the Linux release binary, so skip that slow
+# build when Windows is all that was asked for.
+if [[ "$WANT" != "win" ]]; then
+    build_binary
+fi
 
 case "$WANT" in
     deb)      build_deb ;;
     rpm)      build_rpm ;;
     appimage) build_appimage ;;
-    all)      build_deb; build_rpm; build_appimage ;;
-    *)        err "unknown target '$WANT' (want: deb|rpm|appimage|all)"; exit 2 ;;
+    win)      build_win ;;
+    all)      build_deb; build_rpm; build_appimage
+              if win_available; then build_win; fi ;;
+    *)        err "unknown target '$WANT' (want: deb|rpm|appimage|win|all)"; exit 2 ;;
 esac
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo
 say "package summary"
 status=0
-for fmt in deb rpm appimage; do
+for fmt in deb rpm appimage win; do
     [[ -v RESULT[$fmt] ]] || continue
     state="${RESULT[$fmt]%% *}"
     detail="${RESULT[$fmt]#* }"

@@ -31,12 +31,19 @@ jobs:
         # libxcb + friends are needed to *link* the eframe/winit GUI even
         # in headless CI. curl + file are used by the packaging script and
         # appimagetool. rpm provides rpmbuild for cargo-generate-rpm's
-        # payload assembly on a Debian host.
+        # payload assembly on a Debian host. mingw-w64 + zip let the same
+        # script cross-compile the Windows .zip from this Linux container.
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            curl file rpm ca-certificates
+            curl file rpm ca-certificates mingw-w64 zip
+
+      - name: Add Windows cross-compile target
+        # package.sh's `all` only builds the Windows zip when this target +
+        # mingw + zip are all present (win_available), so this step is what
+        # opts the release build into producing yt-offline-*-x86_64-windows.zip.
+        run: rustup target add x86_64-pc-windows-gnu
 
       - name: Cache cargo registry + build
         uses: actions/cache@v4
@@ -80,5 +87,7 @@ jobs:
             - `.deb` — Debian / Ubuntu / Mint
             - `.rpm` — Fedora / RHEL / openSUSE
             - `.AppImage` — any Linux (chmod +x and run)
+            - `-x86_64-windows.zip` — Windows 10/11 (unzip, run yt-offline.exe)
 
-            Runtime requirements: yt-dlp, ffmpeg, mpv, xdg-utils on PATH.
+            Runtime requirements: yt-dlp, ffmpeg, mpv on PATH (plus
+            xdg-utils on Linux). The Windows zip's README lists the same.

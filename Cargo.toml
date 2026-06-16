@@ -52,6 +52,14 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "t
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rfd = { version = "0.15", features = ["tokio"] }
 
+# Release Windows builds are linked as a GUI subsystem app (no console window —
+# see the windows_subsystem attribute in main.rs), which is right for the egui
+# GUI but means a `--web`/CLI run launched from a terminal has nowhere to print.
+# windows-sys gives us AttachConsole to reattach to the launching console at
+# runtime (see attach_windows_console in main.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
 [profile.release]
 opt-level = 3
 # Thin LTO does cross-crate inlining without the rust-lld + bundled-sqlite

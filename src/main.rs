@@ -65,7 +65,34 @@ fn renderer_from_args(args: &[String]) -> eframe::Renderer {
     }
 }
 
+/// Reattach stdout/stderr to the parent console on Windows.
+///
+/// Release builds set `windows_subsystem = "windows"`, so the process starts
+/// detached from any console — correct for the GUI (no flashing console
+/// window), but it means a `--web` or other CLI invocation launched from a
+/// terminal would print nothing. `AttachConsole(ATTACH_PARENT_PROCESS)` hooks
+/// us back onto the launching terminal's console when there is one (e.g. run
+/// from PowerShell/cmd). If the process has no parent console (double-clicked
+/// from Explorer) the call fails harmlessly and we stay silent, which is the
+/// desired GUI behavior. No-op on every non-Windows platform.
+#[cfg(windows)]
+fn attach_windows_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: AttachConsole takes no pointers and is safe to call with an
+    // invalid/absent parent console — it just returns 0. We don't touch the
+    // returned handles; the CRT picks up the now-attached console on the next
+    // stdout/stderr write.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_windows_console() {}
+
 fn main() -> eframe::Result<()> {
+    attach_windows_console();
+
     let args: Vec<String> = std::env::args().collect();
 
     // Load the config first — both modes share the channels_root path,
