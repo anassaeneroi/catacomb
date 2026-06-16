@@ -224,10 +224,11 @@ pub fn scan_channels_with_cache(youtube_root: &Path, cache: Option<&Database>) -
         }
     }
 
-    let n_workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .min(dirs.len().max(1));
+    // Leave one core free so a cold/large scan doesn't peg every core and
+    // make the box unresponsive — this runs as a background task and the scan
+    // is mostly disk-I/O-bound anyway, so giving up one thread costs little.
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let n_workers = cores.saturating_sub(1).max(1).min(dirs.len().max(1));
     // Hand each worker its own Database handle via .clone() (Arc inside,
     // cheap). Workers without a cache get None.
     let cache_handle: Option<Database> = cache.cloned();
