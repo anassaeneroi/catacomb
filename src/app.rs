@@ -71,6 +71,9 @@ enum SortMode {
     SizeDesc,
     DateDesc,
     DateAsc,
+    DownloadDesc,
+    DownloadAsc,
+    ChannelAsc,
 }
 
 #[derive(Clone, PartialEq)]
@@ -881,6 +884,19 @@ impl App {
                         (None, Some(_)) => std::cmp::Ordering::Greater,
                         (None, None) => std::cmp::Ordering::Equal,
                     }
+                });
+            }
+            SortMode::DownloadDesc => {
+                // Most-recently-downloaded first (file mtime); missing → end.
+                cards.sort_by(|a, b| b.mtime_unix.unwrap_or(0).cmp(&a.mtime_unix.unwrap_or(0)));
+            }
+            SortMode::DownloadAsc => {
+                cards.sort_by(|a, b| a.mtime_unix.unwrap_or(u64::MAX).cmp(&b.mtime_unix.unwrap_or(u64::MAX)));
+            }
+            SortMode::ChannelAsc => {
+                cards.sort_by(|a, b| {
+                    a.channel_name.to_lowercase().cmp(&b.channel_name.to_lowercase())
+                        .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
                 });
             }
         }
@@ -4131,13 +4147,16 @@ impl App {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.selectable_value(&mut self.sort_mode, SortMode::DateDesc, "Newest");
-                ui.selectable_value(&mut self.sort_mode, SortMode::DateAsc, "Oldest");
                 ui.selectable_value(&mut self.sort_mode, SortMode::SizeDesc, "Largest");
                 ui.selectable_value(&mut self.sort_mode, SortMode::SizeAsc, "Smallest");
                 ui.selectable_value(&mut self.sort_mode, SortMode::DurationDesc, "Longest");
                 ui.selectable_value(&mut self.sort_mode, SortMode::DurationAsc, "Shortest");
+                ui.selectable_value(&mut self.sort_mode, SortMode::ChannelAsc, "Channel");
                 ui.selectable_value(&mut self.sort_mode, SortMode::Title, "Title");
+                ui.selectable_value(&mut self.sort_mode, SortMode::DateAsc, "Oldest");
+                ui.selectable_value(&mut self.sort_mode, SortMode::DateDesc, "Newest");
+                ui.selectable_value(&mut self.sort_mode, SortMode::DownloadAsc, "Oldest DL");
+                ui.selectable_value(&mut self.sort_mode, SortMode::DownloadDesc, "Recent DL");
                 ui.label(egui::RichText::new("Sort:").weak());
             });
         });

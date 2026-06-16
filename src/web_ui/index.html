@@ -216,13 +216,29 @@
   <h1>yt-offline</h1>
   <input type="search" id="search" placeholder="Filter…" oninput="saveUiState();renderGrid()">
   <select id="sort" onchange="saveUiState();renderGrid()">
-    <option value="date-desc">Newest</option>
-    <option value="date-asc">Oldest</option>
-    <option value="title">Title</option>
-    <option value="dur-asc">Shortest</option>
-    <option value="dur-desc">Longest</option>
-    <option value="size-asc">Smallest</option>
-    <option value="size-desc">Largest</option>
+    <optgroup label="Download date">
+      <option value="dl-desc">Recently downloaded</option>
+      <option value="dl-asc">Oldest download</option>
+    </optgroup>
+    <optgroup label="Upload date">
+      <option value="date-desc">Newest</option>
+      <option value="date-asc">Oldest</option>
+    </optgroup>
+    <optgroup label="Title">
+      <option value="title">Title (A→Z)</option>
+      <option value="title-desc">Title (Z→A)</option>
+    </optgroup>
+    <optgroup label="Channel">
+      <option value="channel">Channel (A→Z)</option>
+    </optgroup>
+    <optgroup label="Duration">
+      <option value="dur-asc">Shortest</option>
+      <option value="dur-desc">Longest</option>
+    </optgroup>
+    <optgroup label="Size">
+      <option value="size-asc">Smallest</option>
+      <option value="size-desc">Largest</option>
+    </optgroup>
   </select>
   <span id="hdr-stats"></span>
   <button onclick="openSearch()" title="Search titles, descriptions & transcripts (f)">🔍</button>
@@ -617,6 +633,8 @@ function currentVideos(){
     for(const v of pool)
       if((!q||matchesSearch(v,ch?.name||v.channel,q))&&passesFilter(v))vids.push({...v,channel:ch.name});
   }
+  if(sort==='dl-desc')vids.sort((a,b)=>(b.mtime_unix||0)-(a.mtime_unix||0));
+  if(sort==='dl-asc')vids.sort((a,b)=>(a.mtime_unix||0)-(b.mtime_unix||0));
   if(sort==='date-desc')vids.sort((a,b)=>(b.upload_date||'').localeCompare(a.upload_date||''));
   if(sort==='date-asc')vids.sort((a,b)=>{const ax=a.upload_date||'￿',bx=b.upload_date||'￿';return ax.localeCompare(bx)});
   if(sort==='dur-asc')vids.sort((a,b)=>(a.duration_secs??0)-(b.duration_secs??0));
@@ -624,6 +642,8 @@ function currentVideos(){
   if(sort==='size-asc')vids.sort((a,b)=>(a.file_size??0)-(b.file_size??0));
   if(sort==='size-desc')vids.sort((a,b)=>(b.file_size??0)-(a.file_size??0));
   if(sort==='title')vids.sort((a,b)=>a.title.localeCompare(b.title));
+  if(sort==='title-desc')vids.sort((a,b)=>b.title.localeCompare(a.title));
+  if(sort==='channel')vids.sort((a,b)=>(a.channel||'').localeCompare(b.channel||'')||a.title.localeCompare(b.title));
   return vids;
 }
 
