@@ -2522,10 +2522,31 @@ function renderJobs(jobs,queued,maxConcurrent){
   if(!body)return;
   if(!jobs.length&&!queued.length){
     body.innerHTML=`<div class="empty">No active or recent downloads.</div>`;
+    jobsSig='';
     return;
   }
+  // Diff-aware repaint: a full innerHTML rebuild on every progress tick
+  // (~0.6s while downloading) flickers and collapses any open per-job log.
+  // Only rebuild when the *structure* changes (jobs added/removed/state or
+  // retryability flipped, or the queue length changed); otherwise just patch
+  // the live bits (progress bar, speed/ETA) of the running rows in place.
+  const sig=JSON.stringify([jobs.map(j=>[j.state,j.can_retry]),queued.length]);
+  if(sig===jobsSig&&body.querySelector('.job-row')){
+    jobs.forEach((j,i)=>{
+      if(j.state!=='running')return;
+      const row=body.querySelector(`.job-row[data-job="${i}"]`);
+      if(!row)return;
+      const pr=row.querySelector('progress'); if(pr)pr.value=j.progress||0;
+      const mt=row.querySelector('.job-meta');
+      if(mt)mt.textContent=`${jobMeta(j.last_line)} ${Math.round((j.progress||0)*100)}%`;
+    });
+    return;
+  }
+  jobsSig=sig;
   const fin=jobs.some(j=>j.state!=='running');
-  const hdr=fin?`<div style="padding:4px 14px;display:flex;justify-content:flex-end;border-bottom:1px solid var(--border)"><button onclick="clearFinishedJobs()" style="font-size:11px;padding:2px 8px">✕ Clear finished</button></div>`:'';
+  const anyRetry=jobs.some(j=>j.state!=='running'&&j.can_retry);
+  const hdrBtns=`${anyRetry?`<button onclick="retryAllFailed(this)" style="font-size:11px;padding:2px 8px">↻ Retry all failed</button>`:''}<button onclick="clearFinishedJobs()" style="font-size:11px;padding:2px 8px">✕ Clear finished</button>`;
+  const hdr=fin?`<div style="padding:4px 14px;display:flex;gap:6px;justify-content:flex-end;border-bottom:1px solid var(--border)">${hdrBtns}</div>`:'';
   // Queued jobs map 1:1 to the server's pending-queue index, so the cancel
   // button can DELETE /api/queued/<i>.
   const queuedHtml=queued.map((q,i)=>`<div class="job">
@@ -2592,6 +2613,21 @@ async function retryJob(idx,btn){
 async function cancelQueued(idx){
   try{await api('/api/queued/'+idx,{method:'DELETE'});await pollProgress();}
   catch(e){setStatus('Error: '+e.message)}
+}
+// Retry every retryable failed job. Each retry removes the old row and shifts
+// indices, so we re-snapshot and retry the first match until none remain
+// (capped so a server hiccup can't spin forever).
+async function retryAllFailed(btn){
+  if(btn)btn.disabled=true;
+  try{
+    for(let guard=0;guard<200;guard++){
+      const d=await(await api('/api/progress')).json();
+      const idx=(d.jobs||[]).findIndex(j=>j.state!=='running'&&j.can_retry);
+      if(idx<0)break;
+      await api('/api/jobs/'+idx+'/retry',{method:'POST'});
+    }
+    await pollProgress();
+  }catch(e){setStatus('Error: '+e.message);if(btn)btn.disabled=false}
 }
 // Expand/collapse the full server-side log for one job, fetched on demand.
 async function toggleJobLog(idx,btn){
@@ -2684,6 +2720,9 @@ async function removeJob(idx){try{await api('/api/jobs/'+idx,{method:'DELETE'});
 let wasRunning=false;
 let progressWs=null;
 let pollTimer=null;
+// Structural signature of the last full jobs repaint; lets renderJobs patch
+// progress in place instead of rebuilding (and collapsing open logs) each tick.
+let jobsSig='';
 function applyProgressSnapshot(d){
   if(!d)return;
   renderJobs(d.jobs,d.queued,d.max_concurrent);
