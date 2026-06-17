@@ -327,6 +327,79 @@
 
   @keyframes uiFade{from{opacity:0}to{opacity:1}}
   @keyframes uiDrop{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+  /* ── Stats: "observatory" data dashboard (maximalist) ─────────────────────
+     Scoped under .sx-* and built entirely from the theme variables so it
+     inherits every theme. Reveal animations are gated behind .sx-go (added
+     after the DOM is in place) so they play once per open, not on re-render. */
+  .sx-body{position:relative;font-variant-numeric:tabular-nums}
+  .sx-body::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;opacity:.55;
+    background-image:linear-gradient(var(--hair) 1px,transparent 1px),linear-gradient(90deg,var(--hair) 1px,transparent 1px);
+    background-size:34px 34px;
+    -webkit-mask-image:radial-gradient(120% 90% at 25% 0%,#000,transparent 72%);
+    mask-image:radial-gradient(120% 90% at 25% 0%,#000,transparent 72%)}
+  .sx-body>*{position:relative;z-index:1}
+  .sx-eyebrow{font-size:10px;letter-spacing:.24em;text-transform:uppercase;color:var(--muted);font-weight:700}
+  .sx-sect{margin:20px 0 9px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .sx-sect h3{font-family:var(--font-display);font-weight:400;font-size:1.5rem;letter-spacing:.01em;margin:0;line-height:1}
+  .sx-note{margin-left:auto;font-size:11px;color:var(--muted);letter-spacing:.02em;font-variant-numeric:tabular-nums}
+  .sx-empty{color:var(--muted);font-style:italic;font-family:var(--font-display);font-size:1.1rem;padding:10px 2px}
+
+  .sx-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-top:9px}
+  .sx-card{position:relative;overflow:hidden;border:1px solid var(--hair);border-radius:var(--radius);padding:13px 14px;
+    background:linear-gradient(158deg,color-mix(in srgb,var(--card) 92%,transparent),color-mix(in srgb,var(--panel) 78%,transparent));
+    transition:transform .2s,box-shadow .2s,border-color .2s}
+  .sx-card:hover{transform:translateY(-3px);border-color:var(--accent);box-shadow:var(--shadow)}
+  .sx-card::after{content:'';position:absolute;left:0;top:0;height:2px;width:100%;
+    background:linear-gradient(90deg,var(--accent),transparent)}
+  .sx-card .sx-k{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);font-weight:700}
+  .sx-card .sx-v{font-family:var(--font-display);font-weight:400;font-size:2.1rem;line-height:1.04;margin-top:5px;word-break:break-word}
+  .sx-card .sx-sub{font-size:11px;color:var(--muted);margin-top:3px}
+  .sx-hero{grid-column:span 2;
+    background:radial-gradient(150% 130% at 0% 0%,var(--glow),transparent 58%),linear-gradient(158deg,var(--card),var(--panel))}
+  .sx-hero .sx-v{font-size:3.6rem}
+
+  .sx-chart{width:100%;height:auto;display:block;overflow:visible}
+  .sx-chart .sx-line{fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round;
+    stroke-dasharray:1;stroke-dashoffset:1;transition:stroke-dashoffset 1.3s cubic-bezier(.65,0,.35,1)}
+  .sx-go .sx-chart .sx-line{stroke-dashoffset:0}
+  .sx-chart .sx-fill{opacity:0;transition:opacity .9s ease .45s}
+  .sx-go .sx-chart .sx-fill{opacity:1}
+  .sx-chart .sx-grid{stroke:var(--hair);stroke-width:1}
+  .sx-chart .sx-axis{fill:var(--muted);font-size:11px;font-family:var(--font-body)}
+  .sx-chart .sx-dot{fill:var(--bg);stroke:var(--accent);stroke-width:2;opacity:0;transition:opacity .4s ease .95s,r .15s}
+  .sx-go .sx-chart .sx-dot{opacity:1}
+  .sx-chart .sx-dot:hover{r:5.5;fill:var(--accent)}
+
+  .sx-2col{display:grid;grid-template-columns:1.05fr 1fr;gap:24px;align-items:start}
+  .sx-cols{display:flex;align-items:flex-end;gap:6px;height:150px;padding-top:20px}
+  .sx-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;min-width:0}
+  .sx-bar{width:100%;max-width:46px;height:0;border-radius:5px 5px 0 0;position:relative;
+    background:linear-gradient(180deg,var(--accent),color-mix(in srgb,var(--accent) 28%,transparent));
+    transition:height .95s cubic-bezier(.22,1,.36,1)}
+  .sx-bar::after{content:attr(data-v);position:absolute;top:-17px;left:-4px;right:-4px;text-align:center;
+    font-size:11px;font-weight:700;color:var(--text);opacity:0;transition:opacity .4s ease .6s}
+  .sx-go .sx-bar::after{opacity:1}
+  .sx-cl{font-size:10px;color:var(--muted);margin-top:6px;font-variant-numeric:tabular-nums}
+
+  .sx-seg{margin-left:auto;display:inline-flex;border:1px solid var(--hair);border-radius:999px;overflow:hidden}
+  .sx-seg button{border:none;border-radius:0;background:transparent;color:var(--muted);font-size:11px;padding:4px 13px;font-weight:600}
+  .sx-seg button:hover{color:var(--text);background:transparent}
+  .sx-seg button.on,.sx-seg button.on:hover{background:var(--accent);color:#fff}
+  .sx-lb{display:flex;flex-direction:column;gap:8px}
+  .sx-row{display:grid;grid-template-columns:22px 1fr auto;align-items:center;gap:10px}
+  .sx-rank{font-family:var(--font-display);font-size:1.2rem;color:var(--muted);text-align:center;line-height:1}
+  .sx-lb .sx-row:nth-child(1) .sx-rank{color:#f6c453}
+  .sx-lb .sx-row:nth-child(2) .sx-rank{color:#c7ced8}
+  .sx-lb .sx-row:nth-child(3) .sx-rank{color:#cd8b62}
+  .sx-track{position:relative;height:32px;border-radius:8px;overflow:hidden;display:flex;align-items:center;
+    background:color-mix(in srgb,var(--card) 55%,transparent);border:1px solid var(--hair)}
+  .sx-meter{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:8px;
+    background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 60%,transparent),color-mix(in srgb,var(--accent) 14%,transparent));
+    transition:width 1s cubic-bezier(.22,1,.36,1)}
+  .sx-name{position:relative;z-index:1;padding:0 11px;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sx-val{font-size:12px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+  @media(max-width:760px){.sx-2col{grid-template-columns:1fr;gap:14px}.sx-hero{grid-column:span 2}}
+
   @media(prefers-reduced-motion:reduce){*{animation:none!important;transition-duration:.001ms!important}}
 </style>
 </head>
@@ -2330,9 +2403,9 @@ async function saveSettings(btn){
 /* ── Statistics ─────────────────────────────────────────────────── */
 async function openStats(){
   const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
-  bg.innerHTML=`<div class="modal" style="max-width:760px;width:100%">
-    <div class="modal-hdr"><h2>📊 Library statistics</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
-    <div id="stats-body" style="overflow:auto;max-height:75vh"><em style="color:var(--muted)">Computing…</em></div>
+  bg.innerHTML=`<div class="modal sx-dash" style="max-width:1040px;width:100%">
+    <div class="modal-hdr"><h2>Library statistics</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
+    <div id="stats-body" class="sx-body" style="overflow:auto;max-height:78vh;padding:2px 2px 6px"><em style="color:var(--muted)">Computing…</em></div>
   </div>`;
   document.body.appendChild(bg);
   try{
@@ -2347,75 +2420,164 @@ function fmtHours(secs){
   return h>0?`${h}h ${m}m`:`${m}m`;
 }
 
+// Stash the last stats payload so the leaderboard's Size/Count toggle can
+// re-render without another round-trip.
+let _statsR=null;
+
 function renderStats(r){
   const body=document.getElementById('stats-body');if(!body)return;
-  const tot=fmtHours(r.total_duration_secs);
+  _statsR=r;
+  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
   const wat=fmtHours(r.watched_duration_secs);
-  const tile=(label,value)=>`<div style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px 12px;flex:1;min-width:120px"><div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">${esc(label)}</div><div style="font-size:18px;font-weight:600;margin-top:2px">${esc(value)}</div></div>`;
-  let h=`<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
-    ${tile('Channels',r.total_channels.toLocaleString())}
-    ${tile('Videos',r.total_videos.toLocaleString())}
-    ${tile('Playlists',r.total_playlists.toLocaleString())}
-    ${tile('Disk used',fmtSize(r.total_size_bytes))}
-    ${tile('Total runtime',tot)}
-    ${tile('Watched',`${r.watched_count.toLocaleString()} · ${wat}`)}
-    ${tile('Continue watching',r.continue_watching_count.toLocaleString())}
-  </div>`;
+  const pct=r.total_videos?Math.round(r.watched_count/r.total_videos*100):0;
+  const weeks=r.downloads_per_week||[], years=r.videos_per_year||[];
+  const wkTotal=weeks.reduce((a,w)=>a+w.count,0), wkPeak=Math.max(0,...weeks.map(w=>w.count));
 
-  // Downloads per week — horizontal bar chart.
-  const weeks=r.downloads_per_week||[];
-  const maxWeek=Math.max(1,...weeks.map(w=>w.count));
-  h+=`<h3 style="font-size:13px;margin:4px 0 6px">Downloads — last ${weeks.length} weeks</h3>`;
-  h+=`<div style="display:flex;align-items:flex-end;gap:3px;height:80px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:4px">`;
-  for(const w of weeks){
-    const pct=(w.count/maxWeek)*100;
-    const d=new Date(w.week_start_unix*1000);
-    const lbl=`${d.getMonth()+1}/${d.getDate()}`;
-    const tip=`${lbl}: ${w.count} videos, ${fmtSize(w.size_bytes)}`;
-    h+=`<div title="${esc(tip)}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
-      <div style="width:100%;height:${pct}%;background:var(--accent);border-radius:2px 2px 0 0;min-height:${w.count>0?'2px':'0'}"></div>
-      <div style="font-size:9px;color:var(--muted);margin-top:2px">${esc(lbl)}</div>
+  // A metric card; the number counts up from 0 on reveal (data-target/kind
+  // are read by the post-render pass).
+  const card=(k,target,kind,sub,hero)=>`<div class="sx-card${hero?' sx-hero':''}">
+    <div class="sx-k">${esc(k)}</div>
+    <div class="sx-v" data-target="${target}" data-kind="${kind}">0</div>
+    ${sub?`<div class="sx-sub">${esc(sub)}</div>`:''}</div>`;
+
+  let h=`<div class="sx-eyebrow">Library observatory</div>
+    <div class="sx-metrics">
+      ${card('Videos archived',r.total_videos,'int','across '+r.total_channels.toLocaleString()+' channels',true)}
+      ${card('Disk used',r.total_size_bytes,'size','')}
+      ${card('Total runtime',r.total_duration_secs,'secs','')}
+      ${card('Watched',r.watched_count,'int',pct+'% · '+wat)}
+      ${card('Playlists',r.total_playlists,'int','')}
+      ${card('Continue watching',r.continue_watching_count,'int','in progress')}
+    </div>
+
+    <div class="sx-sect"><h3>Download activity</h3>
+      <span class="sx-note">${weeks.length} weeks · ${wkTotal.toLocaleString()} videos · peak ${wkPeak}/wk</span></div>
+    ${sxArea(weeks)}
+
+    <div class="sx-2col">
+      <div>
+        <div class="sx-sect"><h3>By upload year</h3></div>
+        ${sxCols(years)}
+      </div>
+      <div>
+        <div class="sx-sect"><h3>Top channels</h3>
+          <span class="sx-seg">
+            <button class="on" onclick="sxBoardSwitch('size',this)">Size</button>
+            <button onclick="sxBoardSwitch('count',this)">Count</button>
+          </span></div>
+        <div id="sx-board">${sxBoard(r.top_channels_by_size,'size')}</div>
+      </div>
     </div>`;
-  }
-  h+=`</div>`;
-
-  // Uploads per year.
-  const years=r.videos_per_year||[];
-  if(years.length){
-    const maxYear=Math.max(1,...years.map(y=>y.count));
-    h+=`<h3 style="font-size:13px;margin:4px 0 6px">Videos by upload year</h3>`;
-    h+=`<div style="display:flex;align-items:flex-end;gap:3px;height:60px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:4px">`;
-    for(const y of years){
-      const pct=(y.count/maxYear)*100;
-      h+=`<div title="${esc(y.year+': '+y.count)}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">
-        <div style="width:100%;height:${pct}%;background:var(--accent);opacity:.7;border-radius:2px 2px 0 0;min-height:${y.count>0?'2px':'0'}"></div>
-        <div style="font-size:9px;color:var(--muted);margin-top:2px">${esc(y.year)}</div>
-      </div>`;
-    }
-    h+=`</div>`;
-  }
-
-  // Two side-by-side top-N tables.
-  const topTable=(title,rows)=>{
-    if(!rows||!rows.length)return'';
-    let t=`<h3 style="font-size:13px;margin:4px 0 6px">${esc(title)}</h3>
-      <table style="width:100%;font-size:12px;border-collapse:collapse;margin-bottom:14px"><tbody>`;
-    for(const row of rows){
-      t+=`<tr style="border-bottom:1px solid var(--border)">
-        <td style="padding:4px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px">${esc(row.name)}</td>
-        <td style="padding:4px 6px;text-align:right;color:var(--muted)">${row.count} videos</td>
-        <td style="padding:4px 6px;text-align:right;color:var(--muted)">${fmtSize(row.size_bytes)}</td>
-        <td style="padding:4px 6px;text-align:right;color:var(--muted)">${fmtHours(row.duration_secs)}</td>
-      </tr>`;
-    }
-    t+=`</tbody></table>`;
-    return t;
-  };
-  h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-    <div>${topTable('Top channels by size',r.top_channels_by_size)}</div>
-    <div>${topTable('Top channels by count',r.top_channels_by_count)}</div>
-  </div>`;
   body.innerHTML=h;
+
+  // Trigger the reveal once the DOM is laid out: flip .sx-go (drives the CSS
+  // transitions for the area line, columns and meters) and run the count-ups.
+  requestAnimationFrame(()=>{
+    body.classList.add('sx-go');
+    body.querySelectorAll('.sx-v').forEach(el=>{
+      const tgt=+el.dataset.target, kind=el.dataset.kind;
+      const fmt=v=> kind==='size'?fmtSize(v):kind==='secs'?fmtHours(v):Math.round(v).toLocaleString();
+      if(reduce) el.textContent=fmt(tgt); else sxCount(el,tgt,fmt);
+    });
+    body.querySelectorAll('.sx-bar').forEach(el=>el.style.height=el.dataset.h+'%');
+    body.querySelectorAll('.sx-meter').forEach(el=>el.style.width=el.dataset.w+'%');
+  });
+}
+
+// Ease-out count-up for the headline numbers.
+function sxCount(el,target,fmt,dur=1100){
+  const t0=performance.now();
+  (function tick(now){
+    const p=Math.min(1,(now-t0)/dur), e=1-Math.pow(1-p,3);
+    el.textContent=fmt(target*e);
+    if(p<1) requestAnimationFrame(tick); else el.textContent=fmt(target);
+  })(performance.now());
+}
+
+// Catmull-Rom → cubic-bezier smoothing for the area line.
+function sxSmooth(pts){
+  if(pts.length<2) return pts.length?`M${pts[0][0]},${pts[0][1]}`:'';
+  let d=`M${pts[0][0]},${pts[0][1]}`;
+  for(let i=0;i<pts.length-1;i++){
+    const p0=pts[i-1]||pts[i],p1=pts[i],p2=pts[i+1],p3=pts[i+2]||p2;
+    const c1x=p1[0]+(p2[0]-p0[0])/6, c1y=p1[1]+(p2[1]-p0[1])/6;
+    const c2x=p2[0]-(p3[0]-p1[0])/6, c2y=p2[1]-(p3[1]-p1[1])/6;
+    d+=` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0]},${p2[1]}`;
+  }
+  return d;
+}
+
+// Self-drawing SVG area chart of downloads per week.
+function sxArea(weeks){
+  if(!weeks.length) return '<div class="sx-empty">No download history yet.</div>';
+  const W=1000,H=220,padL=4,padR=4,padT=16,padB=24;
+  const max=Math.max(1,...weeks.map(w=>w.count)), n=weeks.length;
+  const x=i=> padL + (n===1?(W-padL-padR)/2:i*(W-padL-padR)/(n-1));
+  const y=c=> padT + (1-c/max)*(H-padT-padB);
+  const pts=weeks.map((w,i)=>[x(i),y(w.count)]);
+  const line=sxSmooth(pts);
+  const area=`${line} L${x(n-1).toFixed(1)},${H-padB} L${x(0).toFixed(1)},${H-padB} Z`;
+  let grid='',ax='';
+  for(let g=0;g<=3;g++){
+    const val=Math.round(max*(3-g)/3), yy=padT+(g/3)*(H-padT-padB);
+    grid+=`<line class="sx-grid" x1="${padL}" y1="${yy.toFixed(1)}" x2="${W-padR}" y2="${yy.toFixed(1)}"/>`;
+    ax+=`<text class="sx-axis" x="${padL}" y="${(yy-4).toFixed(1)}">${val}</text>`;
+  }
+  let xlab=''; const step=Math.max(1,Math.round(n/6));
+  for(let i=0;i<n;i+=step){
+    const d=new Date(weeks[i].week_start_unix*1000);
+    xlab+=`<text class="sx-axis" x="${x(i).toFixed(1)}" y="${H-7}" text-anchor="middle">${d.getMonth()+1}/${String(d.getDate()).padStart(2,'0')}</text>`;
+  }
+  let dots=''; weeks.forEach((w,i)=>{
+    const d=new Date(w.week_start_unix*1000);
+    dots+=`<circle class="sx-dot" cx="${x(i).toFixed(1)}" cy="${y(w.count).toFixed(1)}" r="3"><title>${esc((d.getMonth()+1)+'/'+d.getDate()+': '+w.count+' videos · '+fmtSize(w.size_bytes))}</title></circle>`;
+  });
+  return `<svg class="sx-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Downloads per week">
+    <defs><linearGradient id="sxg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--accent)" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
+    ${grid}
+    <path class="sx-fill" d="${area}" fill="url(#sxg)"/>
+    <path class="sx-line" d="${line}" pathLength="1"/>
+    ${dots}${ax}${xlab}
+  </svg>`;
+}
+
+// Growing-column histogram for videos-by-year.
+function sxCols(years){
+  if(!years.length) return '<div class="sx-empty">No upload-year data.</div>';
+  const max=Math.max(1,...years.map(y=>y.count));
+  let h='<div class="sx-cols">';
+  for(const y of years){
+    const ph=(y.count/max)*100;
+    h+=`<div class="sx-col"><div class="sx-bar" data-h="${ph.toFixed(1)}" data-v="${y.count}"></div><div class="sx-cl">${esc(y.year)}</div></div>`;
+  }
+  return h+'</div>';
+}
+
+// Ranked, animated channel leaderboard. metric: 'size' | 'count'.
+function sxBoard(rows,metric){
+  if(!rows||!rows.length) return '<div class="sx-empty">No channels.</div>';
+  const val=row=> metric==='size'?row.size_bytes:row.count;
+  const lbl=row=> metric==='size'?fmtSize(row.size_bytes):row.count.toLocaleString()+' videos';
+  const max=Math.max(1,...rows.map(val));
+  let h='<div class="sx-lb">';
+  rows.forEach((row,i)=>{
+    const w=(val(row)/max)*100;
+    h+=`<div class="sx-row"><div class="sx-rank">${i+1}</div>
+      <div class="sx-track"><div class="sx-meter" data-w="${w.toFixed(1)}"></div><div class="sx-name" title="${esc(row.name)}">${esc(row.name)}</div></div>
+      <div class="sx-val">${esc(lbl(row))}</div></div>`;
+  });
+  return h+'</div>';
+}
+
+// Segmented Size/Count toggle for the leaderboard.
+function sxBoardSwitch(metric,btn){
+  const wrap=document.getElementById('sx-board'); if(!wrap||!_statsR) return;
+  btn.parentNode.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===btn));
+  const rows= metric==='count'?_statsR.top_channels_by_count:_statsR.top_channels_by_size;
+  wrap.innerHTML=sxBoard(rows,metric);
+  requestAnimationFrame(()=>wrap.querySelectorAll('.sx-meter').forEach(m=>m.style.width=m.dataset.w+'%'));
 }
 
 /* ── Maintenance (library health) ───────────────────────────────── */
