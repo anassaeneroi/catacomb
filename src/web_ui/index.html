@@ -400,6 +400,52 @@
   .sx-val{font-size:12px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
   @media(max-width:760px){.sx-2col{grid-template-columns:1fr;gap:14px}.sx-hero{grid-column:span 2}}
 
+  /* ── Maintenance: "diagnostics console" ───────────────────────────────────
+     Shares the sx-* section/eyebrow language but reads as a systems-health
+     readout: a pulsing verdict, per-subsystem status tiles, and instrument
+     panels. Status colour flows through --mx-c off a data-status attribute,
+     scoped to .mx-body so it can't leak onto other data-status nodes. */
+  .mx-body{position:relative}
+  .mx-body [data-status=ok]{--mx-c:#4ade80}
+  .mx-body [data-status=warn]{--mx-c:#facc15}
+  .mx-body [data-status=bad]{--mx-c:#f87171}
+  .mx-body [data-status=pending]{--mx-c:var(--muted)}
+  .mx-hero{display:flex;align-items:center;gap:15px;border:1px solid var(--hair);border-radius:var(--radius);
+    padding:15px 17px;margin:9px 0 13px;position:relative;overflow:hidden;
+    background:radial-gradient(150% 130% at 0% 0%,color-mix(in srgb,var(--mx-c,var(--accent)) 16%,transparent),transparent 60%),linear-gradient(158deg,var(--card),var(--panel))}
+  .mx-pulse{flex-shrink:0;width:14px;height:14px;border-radius:50%;background:var(--mx-c,#4ade80);
+    box-shadow:0 0 10px var(--mx-c,#4ade80);animation:mxPulse 2.4s ease-out infinite}
+  @keyframes mxPulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--mx-c,#4ade80) 55%,transparent),0 0 10px var(--mx-c,#4ade80)}70%{box-shadow:0 0 0 13px transparent,0 0 10px var(--mx-c,#4ade80)}100%{box-shadow:0 0 0 0 transparent,0 0 10px var(--mx-c,#4ade80)}}
+  .mx-verdict{font-family:var(--font-display);font-weight:400;font-size:2.1rem;line-height:1}
+  .mx-verdict-sub{font-size:11px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;margin-top:3px}
+
+  .mx-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:4px}
+  .mx-tile{position:relative;overflow:hidden;border:1px solid var(--hair);border-radius:var(--radius);padding:11px 13px;
+    background:linear-gradient(158deg,color-mix(in srgb,var(--card) 90%,transparent),color-mix(in srgb,var(--panel) 78%,transparent))}
+  .mx-tile::after{content:'';position:absolute;left:0;top:0;height:2px;width:100%;background:var(--mx-c,var(--muted))}
+  .mx-th{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);font-weight:700}
+  .mx-dot{width:8px;height:8px;border-radius:50%;background:var(--mx-c,var(--muted));flex-shrink:0;box-shadow:0 0 7px var(--mx-c,transparent)}
+  .mx-tv{font-family:var(--font-display);font-weight:400;font-size:1.95rem;line-height:1.05;margin-top:5px}
+
+  .mx-group{border:1px solid var(--hair);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:9px;
+    background:color-mix(in srgb,var(--card) 28%,transparent)}
+  .mx-group-h{font-weight:700;font-size:12.5px;margin-bottom:7px;display:flex;align-items:center;gap:8px}
+  .mx-group-h .mx-id{color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums}
+  .mx-item{display:flex;align-items:center;gap:9px;font-size:12px;padding:5px 0;
+    border-bottom:1px solid color-mix(in srgb,var(--hair) 55%,transparent)}
+  .mx-group .mx-item:last-child{border-bottom:none}
+  .mx-item input[type=checkbox]{accent-color:var(--accent);flex-shrink:0}
+  .mx-item .mx-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mx-item .mx-sub{color:var(--muted)}
+  .mx-conf{width:9px;height:9px;border-radius:50%;flex-shrink:0;box-shadow:0 0 6px currentColor}
+  .mx-pill{flex-shrink:0;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+    padding:2px 9px;border-radius:999px;border:1px solid}
+  .mx-pill.keep{color:#4ade80;border-color:color-mix(in srgb,#4ade80 50%,transparent);background:color-mix(in srgb,#4ade80 13%,transparent)}
+  .mx-pill.remove{color:#f87171;border-color:color-mix(in srgb,#f87171 50%,transparent);background:color-mix(in srgb,#f87171 13%,transparent)}
+  .mx-prog{height:9px;border-radius:6px;overflow:hidden;border:1px solid var(--hair);background:color-mix(in srgb,var(--card) 55%,transparent)}
+  .mx-prog>i{display:block;height:100%;border-radius:6px;transition:width .35s ease;
+    background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 38%,transparent))}
+
   @media(prefers-reduced-motion:reduce){*{animation:none!important;transition-duration:.001ms!important}}
 </style>
 </head>
@@ -2583,9 +2629,9 @@ function sxBoardSwitch(metric,btn){
 /* ── Maintenance (library health) ───────────────────────────────── */
 async function openMaintenance(){
   const bg=document.createElement('div');bg.className='modal-bg';bg.onclick=e=>{if(e.target===bg)bg.remove()};
-  bg.innerHTML=`<div class="modal" style="max-width:760px;width:100%">
+  bg.innerHTML=`<div class="modal sx-dash" style="max-width:920px;width:100%">
     <div class="modal-hdr"><h2>Library health</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
-    <div id="maint-body" style="overflow:auto;max-height:75vh"><em style="color:var(--muted)">Scanning…</em></div>
+    <div id="maint-body" class="mx-body" style="overflow:auto;max-height:78vh;padding:2px 2px 6px"><em style="color:var(--muted)">Scanning…</em></div>
   </div>`;
   document.body.appendChild(bg);
   try{
@@ -2594,48 +2640,90 @@ async function openMaintenance(){
   }catch(e){document.getElementById('maint-body').innerHTML=`<div style="color:#f87171">Scan failed: ${esc(e.message)}</div>`}
 }
 
+// Live health counts for the verdict + status tiles. sim/at start null
+// (async) and are filled by their render functions.
+let _mx={dup:0,miss:0,sim:null,at:null};
+function mxTile(key,count,status){
+  const el=document.getElementById('mx-tile-'+key);if(!el)return;
+  const v=el.querySelector('.mx-tv');if(v)v.textContent=(count==null?'—':count);
+  el.dataset.status=status||(count>0?'warn':'ok');
+}
+function mxVerdict(){
+  const box=document.getElementById('mx-verdict-box'),el=document.getElementById('mx-verdict');
+  if(!box||!el)return;
+  const issues=_mx.dup+_mx.miss+(_mx.sim||0);
+  if(issues>0){el.textContent=`${issues} item${issues===1?'':'s'} to review`;box.dataset.status='warn';}
+  else{el.textContent=_mx.sim===null?'Healthy':'All clear';box.dataset.status='ok';}
+}
+
 function renderMaintenance(r){
   const body=document.getElementById('maint-body');if(!body)return;
   const dups=r.duplicates||[],miss=r.missing||[];
-  let h='';
-  h+=`<h3 style="font-size:13px;margin:4px 0 8px">Duplicates (${dups.length})</h3>`;
-  if(!dups.length){h+='<div style="color:var(--muted);font-size:12px;margin-bottom:12px">No duplicate video IDs found.</div>'}
+  _mx={dup:dups.length,miss:miss.length,sim:null,at:null};
+  const tile=(key,label,count,status)=>`<div class="mx-tile" id="mx-tile-${key}" data-status="${status}">
+    <div class="mx-th"><span class="mx-dot"></span>${esc(label)}</div>
+    <div class="mx-tv">${count==null?'—':count}</div></div>`;
+
+  let h=`<div class="sx-eyebrow">System diagnostics</div>
+    <div class="mx-hero" id="mx-verdict-box" data-status="ok">
+      <span class="mx-pulse"></span>
+      <div><div class="mx-verdict" id="mx-verdict">Scanning…</div>
+        <div class="mx-verdict-sub">duplicates · missing assets · perceptual twins · filing</div></div>
+    </div>
+    <div class="mx-tiles">
+      ${tile('dup','Duplicate IDs',dups.length,dups.length?'warn':'ok')}
+      ${tile('miss','Missing assets',miss.length,miss.length?'warn':'ok')}
+      ${tile('sim','Similar content',null,'pending')}
+      ${tile('at','Unfiled groups',null,'pending')}
+    </div>`;
+
+  // ── Duplicate IDs ──
+  h+=`<div class="sx-sect"><h3>Duplicate IDs</h3><span class="sx-note">${dups.length} group${dups.length===1?'':'s'}</span></div><div>`;
+  if(!dups.length) h+=`<div class="sx-empty">No duplicate video IDs — every clip is unique.</div>`;
   else{
     for(const g of dups){
-      h+=`<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px">
-        <div style="font-weight:600;font-size:12px;margin-bottom:6px">${esc(g.title)} <span style="color:var(--muted)">[${esc(g.id)}]</span></div>`;
-      g.copies.forEach((c,i)=>{
-        const tag=c.recommended_keep?'<span style="color:#4ade80">keep</span>':'<span style="color:#f87171">remove</span>';
+      h+=`<div class="mx-group"><div class="mx-group-h">${esc(g.title)} <span class="mx-id">[${esc(g.id)}]</span></div>`;
+      g.copies.forEach(c=>{
         const size=c.file_size?fmtSize(c.file_size):'no video';
-        h+=`<label style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
+        h+=`<label class="mx-item">
           <input type="checkbox" class="dup-chk" data-files='${esc(JSON.stringify(c.files))}' ${c.recommended_keep?'':'checked'}>
-          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.location||'(unknown)')} · ${size} · ${c.files.length} files</span>
-          ${tag}
+          <span class="mx-label">${esc(c.location||'(unknown)')} <span class="mx-sub">· ${size} · ${c.files.length} files</span></span>
+          <span class="mx-pill ${c.recommended_keep?'keep':'remove'}">${c.recommended_keep?'keep':'remove'}</span>
         </label>`;
       });
       h+=`</div>`;
     }
     h+=`<button class="primary" onclick="removeDuplicates(this)">🗑 Remove checked copies</button>`;
   }
-  h+=`<h3 style="font-size:13px;margin:16px 0 8px">Missing assets (${miss.length})</h3>`;
-  if(!miss.length){h+='<div style="color:var(--muted);font-size:12px">Every video has its thumbnail, metadata, and description.</div>'}
+  h+=`</div>`;
+
+  // ── Missing assets ──
+  h+=`<div class="sx-sect"><h3>Missing assets</h3><span class="sx-note">${miss.length} video${miss.length===1?'':'s'}</span></div><div>`;
+  if(!miss.length) h+=`<div class="sx-empty">Every video has its thumbnail, metadata, and description.</div>`;
   else{
-    if(miss.length>1)h+=`<button onclick="repairAll(this)" style="margin-bottom:8px">⬇ Fetch all missing (${miss.length})</button>`;
+    if(miss.length>1)h+=`<button onclick="repairAll(this)" style="margin-bottom:9px">⬇ Fetch all missing (${miss.length})</button>`;
     for(const m of miss){
       const need=[m.missing_thumbnail?'thumbnail':null,m.missing_info?'metadata':null,m.missing_description?'description':null].filter(Boolean).join(', ');
-      h+=`<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.title)} <span style="color:var(--muted)">— missing ${need}</span></span>
+      h+=`<div class="mx-item">
+        <span class="mx-label">${esc(m.title)} <span class="mx-sub">— missing ${esc(need)}</span></span>
         <button onclick="repairVideo('${esc(m.id)}',this)">⬇ Fetch</button>
       </div>`;
     }
   }
-  h+=`<h3 style="font-size:13px;margin:16px 0 8px">Similar content (perceptual)</h3>
-    <div class="settings-hint" style="margin-bottom:8px">Finds the same video re-uploaded under a different ID — mirrors, re-encodes, resolution changes — by comparing sampled frames. The first scan fingerprints your library (a few minutes); after that it's cached, so re-scans are quick.</div>
+  h+=`</div>`;
+
+  // ── Similar content (perceptual) ──
+  h+=`<div class="sx-sect"><h3>Similar content</h3><span class="sx-note">perceptual</span></div>
+    <div class="settings-hint" style="margin-bottom:9px">Finds the same video re-uploaded under a different ID — mirrors, re-encodes, resolution changes — by comparing sampled frames. The first scan fingerprints your library (a few minutes); after that it's cached, so re-scans are quick.</div>
     <div id="dedup-area"></div>`;
-  h+=`<h3 style="font-size:13px;margin:16px 0 8px">🏷 Auto-tag suggestions</h3>
-    <div class="settings-hint" style="margin-bottom:8px">Groups your <b>unfiled</b> channels by source platform and typical video length. Review a group and apply it to drop those channels into a folder — nothing moves until you click Apply.</div>
+
+  // ── Auto-tag suggestions ──
+  h+=`<div class="sx-sect"><h3>🏷 Auto-tag suggestions</h3></div>
+    <div class="settings-hint" style="margin-bottom:9px">Groups your <b>unfiled</b> channels by source platform and typical video length. Review a group and apply it to drop those channels into a folder — nothing moves until you click Apply.</div>
     <div id="autotag-area"><em style="color:var(--muted);font-size:12px">Analyzing…</em></div>`;
+
   body.innerHTML=h;
+  mxVerdict();
   initDedupArea();
   initAutotagArea();
 }
@@ -2650,21 +2738,21 @@ async function initAutotagArea(){
 }
 function renderAutotag(groups){
   const area=document.getElementById('autotag-area');if(!area)return;
-  if(!groups||!groups.length){area.innerHTML='<div style="color:var(--muted);font-size:12px">No grouping suggestions — every channel is already filed or too ambiguous to call.</div>';return}
+  _mx.at=(groups&&groups.length)||0;mxTile('at',_mx.at,_mx.at?'warn':'ok');
+  if(!groups||!groups.length){area.innerHTML='<div class="sx-empty">No grouping suggestions — every channel is already filed or too ambiguous to call.</div>';return}
   // Confidence → dot colour: strong (green) ≥ .85, medium (amber) ≥ .7, else grey.
-  const dot=c=>{const col=c>=0.85?'#4ade80':c>=0.7?'#facc15':'#9ca3af';return `<span title="confidence ${(c*100).toFixed(0)}%" style="flex-shrink:0;width:8px;height:8px;border-radius:50%;background:${col};display:inline-block"></span>`};
+  const dot=c=>{const col=c>=0.85?'#4ade80':c>=0.7?'#facc15':'#9ca3af';return `<span class="mx-conf" title="confidence ${(c*100).toFixed(0)}%" style="color:${col};background:${col}"></span>`};
   let h='';
   groups.forEach((g,gi)=>{
-    h+=`<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px" data-grp="${gi}">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-        <span style="font-weight:600;font-size:12px;flex:1">📁 ${esc(g.group)} <span style="color:var(--muted)">(${g.channels.length})</span></span>
+    h+=`<div class="mx-group" data-grp="${gi}">
+      <div class="mx-group-h"><span style="flex:1">📁 ${esc(g.group)} <span class="mx-id">(${g.channels.length})</span></span>
         <button class="primary" onclick="applyAutotag(${gi},this)">Apply → ${esc(g.group)}</button>
       </div>`;
     g.channels.forEach((c,ci)=>{
-      h+=`<label style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
+      h+=`<label class="mx-item">
         <input type="checkbox" class="at-chk" data-grp="${gi}" data-ci="${ci}" checked>
         ${dot(c.confidence)}
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.display_name)} <span style="color:var(--muted)">· ${esc(c.platform_label)} · ${esc(c.reason)}</span></span>
+        <span class="mx-label">${esc(c.display_name)} <span class="mx-sub">· ${esc(c.platform_label)} · ${esc(c.reason)}</span></span>
       </label>`;
     });
     h+=`</div>`;
@@ -2732,26 +2820,26 @@ function startDedupPoll(){
 }
 function renderDedupProgress(s){
   const a=document.getElementById('dedup-area');if(!a)return;
+  mxTile('sim',null,'pending');
   const pct=s.total?Math.round(100*s.done/s.total):0;
-  a.innerHTML=`<div style="font-size:12px;color:var(--muted);margin-bottom:6px">Fingerprinting ${s.done} / ${s.total||'…'} new videos…</div>
-    <div style="height:6px;background:var(--bg);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--accent);transition:width .3s"></div></div>`;
+  a.innerHTML=`<div style="font-size:12px;color:var(--muted);margin-bottom:7px">Fingerprinting ${s.done} / ${s.total||'…'} new videos…</div>
+    <div class="mx-prog"><i style="width:${pct}%"></i></div>`;
 }
 function renderSimilarGroups(groups){
   const a=document.getElementById('dedup-area');if(!a)return;
-  let h=`<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+  _mx.sim=groups.length;mxTile('sim',groups.length,groups.length?'warn':'ok');mxVerdict();
+  let h=`<div style="display:flex;gap:8px;align-items:center;margin-bottom:9px">
     <span style="font-size:12px;color:var(--muted)">${groups.length} similar group${groups.length===1?'':'s'}</span>
     <button onclick="startDedup(this)">⟳ Re-scan</button></div>`;
-  if(!groups.length){h+='<div style="color:var(--muted);font-size:12px">No visually-similar duplicates found across different IDs. 🎉</div>';a.innerHTML=h;return}
+  if(!groups.length){h+='<div class="sx-empty">No visually-similar duplicates across different IDs. 🎉</div>';a.innerHTML=h;return}
   groups.forEach((g,gi)=>{
-    h+=`<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px">
-      <div style="font-weight:600;font-size:12px;margin-bottom:6px">Group ${gi+1} — ${g.videos.length} copies</div>`;
+    h+=`<div class="mx-group"><div class="mx-group-h">Group ${gi+1} <span class="mx-id">— ${g.videos.length} copies</span></div>`;
     g.videos.forEach(v=>{
-      const tag=v.recommended_keep?'<span style="color:#4ade80">keep</span>':'<span style="color:#f87171">remove</span>';
       const size=v.file_size?fmtSize(v.file_size):'no video';
-      h+=`<label style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0">
+      h+=`<label class="mx-item">
         <input type="checkbox" class="sim-chk" data-files='${esc(JSON.stringify(v.files))}' ${v.recommended_keep?'':'checked'}>
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v.location)}">${esc(v.title)} <span style="color:var(--muted)">· ${esc(v.channel)} · ${size} · [${esc(v.video_id)}]</span></span>
-        ${tag}
+        <span class="mx-label" title="${esc(v.location)}">${esc(v.title)} <span class="mx-sub">· ${esc(v.channel)} · ${size} · [${esc(v.video_id)}]</span></span>
+        <span class="mx-pill ${v.recommended_keep?'keep':'remove'}">${v.recommended_keep?'keep':'remove'}</span>
       </label>`;
     });
     h+=`</div>`;
