@@ -107,9 +107,11 @@ pub struct WebState {
     pub config: Mutex<Config>,
     /// Whether to transcode MKV→mp4 on the fly for playback (requires ffmpeg).
     pub transcode: AtomicBool,
-    /// Active session tokens mapped to their issued-at `Instant`. Tokens older
-    /// than [`SESSION_TTL`] are rejected and pruned lazily on each touch.
-    pub sessions: Mutex<HashMap<String, std::time::Instant>>,
+    /// Active session tokens mapped to their issued-at UNIX time (seconds).
+    /// Tokens older than [`SESSION_TTL`] are rejected and pruned lazily on each
+    /// touch. Mirrored to the `sessions` DB table so logins survive a restart
+    /// (the map is the runtime source of truth; the DB is its durable backing).
+    pub sessions: Mutex<HashMap<String, u64>>,
     /// When the last scheduled channel check ran; used to compute the next due time.
     pub last_scheduled_check: Mutex<Option<std::time::Instant>>,
     /// Cached "is password required" — refreshed when the password is changed.
@@ -1010,9 +1012,11 @@ fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
 fn is_authed(state: &WebState, headers: &HeaderMap) -> bool {
     let Some(token) = session_token_from_headers(headers) else { return false };
     let mut sessions = state.sessions.lock_recover();
-    let now = std::time::Instant::now();
-    // Lazy prune: drop anything older than the TTL.
-    sessions.retain(|_, issued| now.duration_since(*issued) < SESSION_TTL);
+    let now = crate::stats::now_unix();
+    let ttl = SESSION_TTL.as_secs();
+    // Lazy prune: drop anything older than the TTL (in-memory only; the DB rows
+    // are pruned at startup in load_sessions and on the next login).
+    sessions.retain(|_, issued| now.saturating_sub(*issued) < ttl);
     sessions.contains_key(&token)
 }
 
@@ -1115,7 +1119,13 @@ async fn post_login(
     state.login_attempts.lock_recover().remove(&ip);
 
     let token = generate_session_token();
-    state.sessions.lock_recover().insert(token.clone(), now);
+    let issued = crate::stats::now_unix();
+    state.sessions.lock_recover().insert(token.clone(), issued);
+    // Mirror to the DB so the session survives a restart. Best-effort: a failed
+    // write only means this token won't outlive a restart, not that login fails.
+    if let Err(e) = state.db.insert_session(&token, issued) {
+        eprintln!("warning: could not persist session: {e}");
+    }
     let cookie = session_cookie(&token, &headers, SESSION_TTL.as_secs());
     ([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response()
 }
@@ -1127,6 +1137,7 @@ async fn post_logout(
 ) -> Response {
     if let Some(token) = session_token_from_headers(&headers) {
         state.sessions.lock_recover().remove(&token);
+        let _ = state.db.delete_session(&token);
     }
     let cookie = session_cookie("", &headers, 0);
     ([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response()
@@ -1689,6 +1700,7 @@ async fn post_settings(
         }
         // Password changed: drop all existing sessions so they must re-authenticate.
         state.sessions.lock_recover().clear();
+        let _ = state.db.clear_sessions();
         refresh_password_cache(&state);
     }
 
@@ -3160,6 +3172,13 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         let _ = db.set_setting("feed_token", Some(&t));
         t
     });
+    // Rehydrate persisted login sessions (pruning any past the TTL) so a server
+    // restart or upgrade doesn't log everyone out.
+    let sessions_initial: HashMap<String, u64> = db
+        .load_sessions(crate::stats::now_unix().saturating_sub(SESSION_TTL.as_secs()))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     // Capacity 16 is plenty — only a small number of browser tabs ever
     // subscribe and the broadcast is lossy by design (subscribers that lag
     // get a Lagged error and just resubscribe).
@@ -3182,7 +3201,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         config_path,
         config: Mutex::new(config),
         transcode,
-        sessions: Mutex::new(HashMap::new()),
+        sessions: Mutex::new(sessions_initial),
         last_scheduled_check: Mutex::new(None),
         password_required_cache: AtomicBool::new(password_required_initial),
         library_version: AtomicU64::new(1),

@@ -198,6 +198,10 @@ impl Database {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sessions (
+                token     TEXT PRIMARY KEY,
+                issued_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS channel_options (
                 platform TEXT NOT NULL,
                 handle   TEXT NOT NULL,
@@ -622,6 +626,46 @@ impl Database {
         let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
         let mut rows = stmt.query([key])?;
         Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
+    // ── Web sessions ────────────────────────────────────────────────────────
+    // Login tokens are mirrored here so they survive a restart/upgrade instead
+    // of logging everyone out. `issued_at` is a UNIX timestamp (seconds); the
+    // in-memory map in web.rs stays the runtime source of truth and this is its
+    // durable backing store. See `web::auth_middleware` / `post_login`.
+
+    /// Persist (or refresh) a session token with its issued-at time.
+    pub fn insert_session(&self, token: &str, issued_at: u64) -> Result<()> {
+        self.conn().execute(
+            "INSERT OR REPLACE INTO sessions (token, issued_at) VALUES (?1, ?2)",
+            rusqlite::params![token, issued_at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a single session (logout).
+    pub fn delete_session(&self, token: &str) -> Result<()> {
+        self.conn().execute("DELETE FROM sessions WHERE token = ?1", [token])?;
+        Ok(())
+    }
+
+    /// Drop every session (password change / disable).
+    pub fn clear_sessions(&self) -> Result<()> {
+        self.conn().execute("DELETE FROM sessions", [])?;
+        Ok(())
+    }
+
+    /// Prune sessions issued before `min_issued` (i.e. older than the TTL) and
+    /// return the survivors as `(token, issued_at)`. Called once at startup to
+    /// rehydrate the in-memory session map.
+    pub fn load_sessions(&self, min_issued: u64) -> Result<Vec<(String, u64)>> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM sessions WHERE issued_at < ?1", [min_issued as i64])?;
+        let mut stmt = conn.prepare("SELECT token, issued_at FROM sessions")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     pub fn set_setting(&self, key: &str, value: Option<&str>) -> Result<()> {
