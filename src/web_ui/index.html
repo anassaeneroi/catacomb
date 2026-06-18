@@ -549,7 +549,19 @@ function toggleSidebar(){document.getElementById('sidebar').classList.toggle('op
 function closeSidebar(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sidebar-overlay').classList.remove('open')}
 
 /* ── API ────────────────────────────────────────────────────────── */
-async function api(path,opts){const r=await fetch(path,opts);if(!r.ok)throw new Error(await r.text());return r}
+async function api(path,opts){
+  const r=await fetch(path,opts);
+  // Session gone (expired, or the server restarted — sessions are in-memory):
+  // the cached SPA would otherwise just throw cryptic "authentication required"
+  // toasts on every action. Reload instead so the server serves the login page.
+  if(r.status===401){
+    try{setStatus('Session expired — reloading to sign in…')}catch{}
+    location.reload();
+    throw new Error('session expired');
+  }
+  if(!r.ok)throw new Error(await r.text());
+  return r;
+}
 
 /* ── Library ────────────────────────────────────────────────────── */
 // Cache the ETag of the most-recent library response so subsequent polls
