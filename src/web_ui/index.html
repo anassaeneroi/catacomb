@@ -446,6 +446,53 @@
   .mx-prog>i{display:block;height:100%;border-radius:6px;transition:width .35s ease;
     background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 38%,transparent))}
 
+  /* ── Cinematic video player ───────────────────────────────────────────────
+     One custom player for both the direct (/files/) and transcode streams,
+     replacing the browser's native controls so the chrome matches the rest of
+     the UI and gains speed/captions/PiP/scrubbing it didn't have. */
+  .vid-wrap{position:relative;flex:1;min-width:0;display:flex;align-items:center;justify-content:center;background:#000;border-radius:var(--radius-sm);overflow:hidden}
+  .vid-wrap video{width:100%;height:100%;max-height:72vh;background:#000;display:block;object-fit:contain}
+  .vid-wrap:fullscreen{border-radius:0}
+  .vid-wrap:fullscreen video{max-height:100vh;height:100%}
+  .vid-wrap.pl-idle{cursor:none}
+  .pl-center{position:absolute;top:50%;left:50%;width:88px;height:88px;border-radius:50%;z-index:3;
+    background:rgba(0,0,0,.5);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;
+    font-size:36px;color:#fff;opacity:0;pointer-events:none;transform:translate(-50%,-50%) scale(.7)}
+  .pl-center.flash{animation:plFlash .55s ease-out}
+  @keyframes plFlash{0%{opacity:.95;transform:translate(-50%,-50%) scale(.7)}100%{opacity:0;transform:translate(-50%,-50%) scale(1.18)}}
+  .pl-scrim{position:absolute;left:0;right:0;bottom:0;height:130px;z-index:1;pointer-events:none;transition:opacity .3s;
+    background:linear-gradient(to top,rgba(0,0,0,.8),rgba(0,0,0,.22) 62%,transparent)}
+  .pl-controls{position:absolute;left:0;right:0;bottom:0;z-index:2;padding:6px 12px 9px;display:flex;flex-direction:column;gap:5px;
+    opacity:1;transform:translateY(0);transition:opacity .3s,transform .3s;font-variant-numeric:tabular-nums}
+  .pl-idle .pl-controls{opacity:0;pointer-events:none;transform:translateY(8px)}
+  .pl-idle .pl-scrim{opacity:0}
+  .pl-btnrow{display:flex;align-items:center;gap:5px}
+  .pl-controls button{background:transparent;border:none;color:#fff;cursor:pointer;font-size:16px;line-height:1;padding:5px 7px;border-radius:6px;transition:background .12s}
+  .pl-controls button:hover{background:rgba(255,255,255,.17);color:#fff}
+  .pl-time{font-size:12.5px;color:#e9e9e9;white-space:nowrap;margin:0 5px;letter-spacing:.02em}
+  .pl-spacer{flex:1}
+  .pl-vol{width:80px;accent-color:var(--accent);cursor:pointer;height:4px}
+  .pl-track{position:relative;height:17px;display:flex;align-items:center;cursor:pointer;touch-action:none}
+  .pl-rail{position:absolute;left:0;right:0;height:4px;border-radius:3px;background:rgba(255,255,255,.26);transition:height .12s}
+  .pl-track:hover .pl-rail,.pl-track.pl-drag .pl-rail{height:6px}
+  .pl-buffered{position:absolute;left:0;top:0;bottom:0;width:0;background:rgba(255,255,255,.34);border-radius:3px}
+  .pl-played{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--accent);border-radius:3px}
+  .pl-thumb{position:absolute;right:-7px;top:50%;width:14px;height:14px;border-radius:50%;background:var(--accent);
+    transform:translateY(-50%) scale(0);transition:transform .12s;box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 28%,transparent)}
+  .pl-track:hover .pl-thumb,.pl-track.pl-drag .pl-thumb{transform:translateY(-50%) scale(1)}
+  .pl-tick{position:absolute;top:50%;width:2px;height:10px;transform:translate(-50%,-50%);background:rgba(255,255,255,.7);border-radius:1px;pointer-events:none}
+  .pl-hover{position:absolute;bottom:20px;transform:translateX(-50%);background:rgba(0,0,0,.86);color:#fff;font-size:11px;
+    padding:2px 7px;border-radius:5px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .12s}
+  .pl-track:hover .pl-hover,.pl-track.pl-drag .pl-hover{opacity:1}
+  .pl-speed{position:relative;display:flex}
+  .pl-speed-btn{font-size:13px!important;font-weight:600;min-width:40px}
+  .pl-menu{position:absolute;bottom:40px;right:0;background:rgba(14,14,20,.97);border:1px solid var(--hair);border-radius:9px;
+    padding:5px;display:none;flex-direction:column;gap:1px;min-width:76px;backdrop-filter:blur(8px);box-shadow:var(--shadow)}
+  .pl-menu.open{display:flex}
+  .pl-menu button{font-size:12px!important;text-align:left;padding:5px 10px;border-radius:5px;color:#dcdcdc}
+  .pl-menu button.on{color:var(--accent);font-weight:700}
+  #v-cc.on{color:var(--accent);background:color-mix(in srgb,var(--accent) 22%,transparent)}
+
   @media(prefers-reduced-motion:reduce){*{animation:none!important;transition-duration:.001ms!important}}
 </style>
 </head>
@@ -1602,26 +1649,86 @@ function playerSeek(t){
   else{v.currentTime=t;v.play().catch(()=>{});}
   updateVctrl();
 }
-function vTogglePlay(){const v=document.getElementById('player-video');if(!v)return;if(v.paused)v.play().catch(()=>{});else v.pause();}
+// Persisted player preferences (volume / speed / captions), shared across videos.
+let plPrefs=(()=>{try{return JSON.parse(localStorage.getItem('plPrefs'))||{}}catch{return{}}})();
+function savePlPrefs(){try{localStorage.setItem('plPrefs',JSON.stringify(plPrefs))}catch{}}
+const PL_SPEEDS=[0.5,0.75,1,1.25,1.5,1.75,2];
+let plDragging=false, plIdleTimer=null;
+function plPct(a,b){return b>0?Math.max(0,Math.min(100,a/b*100)):0;}
+
+function plFlash(icon){const c=document.getElementById('pl-center');if(!c)return;c.textContent=icon;c.classList.remove('flash');void c.offsetWidth;c.classList.add('flash');}
+function vTogglePlay(){const v=document.getElementById('player-video');if(!v)return;if(v.paused){v.play().catch(()=>{});plFlash('⏵');}else{v.pause();plFlash('⏸');}plActivity();}
 function vToggleMute(){const v=document.getElementById('player-video');if(!v)return;v.muted=!v.muted;updateVctrl();}
-function vFullscreen(){const w=document.querySelector('.vid-wrap');if(w){if(document.fullscreenElement)document.exitFullscreen();else w.requestFullscreen&&w.requestFullscreen();}}
+function vFullscreen(){const w=document.getElementById('pl-wrap')||document.querySelector('.vid-wrap');if(w){if(document.fullscreenElement)document.exitFullscreen();else w.requestFullscreen&&w.requestFullscreen();}}
+function vPip(){const v=document.getElementById('player-video');if(!v)return;try{if(document.pictureInPictureElement)document.exitPictureInPicture();else v.requestPictureInPicture();}catch{}}
+function vToggleCaptions(){
+  const v=document.getElementById('player-video');if(!v||!v.textTracks||!v.textTracks.length)return;
+  const on=[...v.textTracks].some(t=>t.mode==='showing');
+  for(const t of v.textTracks)t.mode='disabled';
+  if(!on)v.textTracks[0].mode='showing';
+  plPrefs.cc=!on;savePlPrefs();
+  const b=document.getElementById('v-cc');if(b)b.classList.toggle('on',!on);
+}
+function vSpeedMenu(e){if(e)e.stopPropagation();const m=document.getElementById('v-speed-menu');if(!m)return;if(m.classList.toggle('open')){const v=document.getElementById('player-video');const cur=v?v.playbackRate:1;m.innerHTML=PL_SPEEDS.map(s=>`<button class="${s===cur?'on':''}" onclick="setSpeed(${s})">${s}×</button>`).join('');}}
+function setSpeed(r){const v=document.getElementById('player-video');if(v)v.playbackRate=r;plPrefs.speed=r;savePlPrefs();const b=document.getElementById('v-speed');if(b)b.textContent=r+'×';const m=document.getElementById('v-speed-menu');if(m)m.classList.remove('open');}
+// Close the speed popover on any outside click.
+document.addEventListener('click',e=>{const m=document.getElementById('v-speed-menu');if(m&&m.classList.contains('open')&&!e.target.closest('.pl-speed'))m.classList.remove('open');});
+
 function updateVctrl(){
-  const v=document.getElementById('player-video');if(!v||!player.isTranscode)return;
-  const t=effTime(),d=player.duration||0;
+  const v=document.getElementById('player-video');if(!v)return;
+  const d=player.duration||(isFinite(v.duration)?v.duration:0), t=effTime();
   const tl=document.getElementById('v-time');if(tl)tl.textContent=fmtDur(t)+' / '+fmtDur(d);
-  const sk=document.getElementById('v-seek');if(sk&&!sk._drag)sk.value=Math.floor(t);
+  const pl=document.getElementById('pl-played');if(pl&&!plDragging)pl.style.width=plPct(t,d)+'%';
+  let bend=0;try{if(v.buffered&&v.buffered.length){const base=player.isTranscode?player.seekBase:0;bend=base+v.buffered.end(v.buffered.length-1);}}catch{}
+  const bf=document.getElementById('pl-buf');if(bf)bf.style.width=plPct(bend,d)+'%';
   const pb=document.getElementById('v-play');if(pb)pb.textContent=v.paused?'⏵':'⏸';
   const mb=document.getElementById('v-mute');if(mb)mb.textContent=(v.muted||v.volume===0)?'🔇':'🔊';
 }
+
+// Custom scrubber: click/drag to seek, hover for a time tooltip. Works for both
+// modes because it routes through playerSeek (which reloads the transcode pipe).
+function plBindScrubber(track){
+  if(!track)return;
+  const rail=track.querySelector('.pl-rail'), played=document.getElementById('pl-played'), hover=document.getElementById('pl-hover');
+  const frac=cx=>{const r=rail.getBoundingClientRect();return r.width?Math.max(0,Math.min(1,(cx-r.left)/r.width)):0;};
+  const show=cx=>{const r=rail.getBoundingClientRect();const f=frac(cx);if(hover){hover.style.left=(f*r.width)+'px';hover.textContent=fmtDur(f*(player.duration||0));}};
+  track.addEventListener('pointermove',e=>{show(e.clientX);if(plDragging&&played)played.style.width=(frac(e.clientX)*100)+'%';});
+  track.addEventListener('pointerdown',e=>{plDragging=true;track.classList.add('pl-drag');try{track.setPointerCapture(e.pointerId)}catch{};show(e.clientX);if(played)played.style.width=(frac(e.clientX)*100)+'%';e.preventDefault();});
+  const end=e=>{if(!plDragging)return;plDragging=false;track.classList.remove('pl-drag');playerSeek(frac(e.clientX)*(player.duration||0));};
+  track.addEventListener('pointerup',end);
+  track.addEventListener('pointercancel',()=>{plDragging=false;track.classList.remove('pl-drag');});
+}
+
+// Auto-hide the controls (and cursor) after a short idle while playing.
+function plActivity(){
+  const w=document.getElementById('pl-wrap');if(!w)return;
+  w.classList.remove('pl-idle');clearTimeout(plIdleTimer);
+  const v=document.getElementById('player-video');
+  if(v&&!v.paused)plIdleTimer=setTimeout(()=>{const ww=document.getElementById('pl-wrap');if(ww&&!plDragging)ww.classList.add('pl-idle');},2600);
+}
+
+function syncVol(){const v=document.getElementById('player-video');if(!v)return;const s=document.getElementById('v-vol');if(s)s.value=v.volume;plPrefs.volume=v.volume;savePlPrefs();updateVctrl();}
+
 function playerKey(e){
   if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;
   const v=document.getElementById('player-video');if(!v)return;
-  if(e.key===' '||e.key==='k'){e.preventDefault();vTogglePlay();}
-  else if(e.key==='f'){e.preventDefault();vFullscreen();}
-  else if(player.isTranscode&&e.key==='ArrowLeft'){e.preventDefault();playerSeek(effTime()-5);}
-  else if(player.isTranscode&&e.key==='ArrowRight'){e.preventDefault();playerSeek(effTime()+5);}
-  else if(player.isTranscode&&e.key==='j'){e.preventDefault();playerSeek(effTime()-10);}
-  else if(player.isTranscode&&e.key==='l'){e.preventDefault();playerSeek(effTime()+10);}
+  const k=e.key;
+  if(k===' '||k==='k'){e.preventDefault();vTogglePlay();}
+  else if(k==='f'){e.preventDefault();vFullscreen();}
+  else if(k==='m'){e.preventDefault();vToggleMute();}
+  else if(k==='c'){e.preventDefault();vToggleCaptions();}
+  else if(k==='p'){e.preventDefault();vPip();}
+  else if(k==='ArrowLeft'){e.preventDefault();playerSeek(effTime()-5);}
+  else if(k==='ArrowRight'){e.preventDefault();playerSeek(effTime()+5);}
+  else if(k==='j'){e.preventDefault();playerSeek(effTime()-10);}
+  else if(k==='l'){e.preventDefault();playerSeek(effTime()+10);}
+  else if(k==='ArrowUp'){e.preventDefault();v.muted=false;v.volume=Math.min(1,v.volume+0.1);syncVol();}
+  else if(k==='ArrowDown'){e.preventDefault();v.volume=Math.max(0,v.volume-0.1);syncVol();}
+  else if(k===','||k==='<'){e.preventDefault();setSpeed(Math.max(0.25,Math.round((v.playbackRate-0.25)*100)/100));}
+  else if(k==='.'||k==='>'){e.preventDefault();setSpeed(Math.min(3,Math.round((v.playbackRate+0.25)*100)/100));}
+  else if(k>='0'&&k<='9'){e.preventDefault();playerSeek((player.duration||0)*(+k/10));}
+  else return;
+  plActivity();
 }
 function playVideo(id){
   const v=findVideo(id);if(!v||!v.video_url)return;
@@ -1629,7 +1736,9 @@ function playVideo(id){
   transcript={cues:[],loaded:false}; // reset for the new video
   const bg=document.createElement('div');bg.className='modal-bg';
   bg.onclick=e=>{if(e.target===bg)closeModal(bg)};
-  const tracks=(v.subtitles||[]).map((s,i)=>`<track kind="subtitles" src="${esc(safeUrl(s.url))}" srclang="${esc(s.lang)}" label="${esc(s.label)}"${i===0?' default':''}>`).join('');
+  // No `default` — overlaid captions start off and are toggled by the CC button
+  // (the separate 📄 transcript pane is the searchable view).
+  const tracks=(v.subtitles||[]).map(s=>`<track kind="subtitles" src="${esc(safeUrl(s.url))}" srclang="${esc(s.lang)}" label="${esc(s.label)}">`).join('');
   const chapPane=v.has_chapters?`<div class="chapters-pane" id="chapters-pane"><h4>Chapters</h4><div id="chapters-list"><em style="padding:10px;display:block;color:var(--muted)">Loading…</em></div></div>`:'';
   const hasSubs=v.subtitles&&v.subtitles.length;
   const transcriptPane=hasSubs?`<div class="transcript-pane" id="transcript-pane" style="display:none">
@@ -1648,17 +1757,29 @@ function playVideo(id){
   const resume=(v.resume_pos&&v.resume_pos>5)?v.resume_pos:0;
   player={isTranscode:isT,base:v.video_url,seekBase:isT?resume:0,duration:v.duration_secs||0};
   const initSrc=isT?transcodeUrlAt(player.seekBase):esc(safeUrl(v.video_url));
-  const dmax=Math.max(1,Math.floor(player.duration||0));
-  const bar=isT?`<div class="vctrl" id="vctrl">
-      <button class="vbtn" id="v-play" onclick="vTogglePlay()" title="Play / Pause (space)">⏸</button>
-      <button class="vbtn" onclick="playerSeek(effTime()-10)" title="Back 10s (j)">« 10</button>
-      <button class="vbtn" onclick="playerSeek(effTime()+10)" title="Forward 10s (l)">10 »</button>
-      <span class="vtime" id="v-time">0:00 / ${fmtDur(player.duration)}</span>
-      <input type="range" class="vseek" id="v-seek" min="0" max="${dmax}" step="1" value="${Math.floor(player.seekBase)}" title="Seek">
-      <button class="vbtn" id="v-mute" onclick="vToggleMute()" title="Mute">🔊</button>
-      <input type="range" class="vvol" id="v-vol" min="0" max="1" step="0.05" value="1" title="Volume">
-      <button class="vbtn" onclick="vFullscreen()" title="Fullscreen (f)">⛶</button>
-    </div>`:'';
+  const pip=!!document.pictureInPictureEnabled;
+  const controls=`
+    <div class="pl-center" id="pl-center">⏵</div>
+    <div class="pl-scrim"></div>
+    <div class="pl-controls" id="pl-controls">
+      <div class="pl-track" id="pl-track">
+        <div class="pl-rail"><div class="pl-buffered" id="pl-buf"></div><div class="pl-played" id="pl-played"><div class="pl-thumb"></div></div><div id="pl-ticks"></div></div>
+        <div class="pl-hover" id="pl-hover">0:00</div>
+      </div>
+      <div class="pl-btnrow">
+        <button id="v-play" onclick="vTogglePlay()" title="Play / Pause (k / space)">⏸</button>
+        <button onclick="playerSeek(effTime()-10)" title="Back 10s (j)">«10</button>
+        <button onclick="playerSeek(effTime()+10)" title="Forward 10s (l)">10»</button>
+        <span class="pl-time" id="v-time">0:00 / ${fmtDur(player.duration)}</span>
+        <span class="pl-spacer"></span>
+        ${hasSubs?`<button id="v-cc" onclick="vToggleCaptions()" title="Captions (c)">CC</button>`:''}
+        <div class="pl-speed"><button class="pl-speed-btn" id="v-speed" onclick="vSpeedMenu(event)" title="Playback speed (< >)">1×</button><div class="pl-menu" id="v-speed-menu"></div></div>
+        <button id="v-mute" onclick="vToggleMute()" title="Mute (m)">🔊</button>
+        <input type="range" class="pl-vol" id="v-vol" min="0" max="1" step="0.05" value="1" title="Volume (↑ ↓)">
+        ${pip?`<button onclick="vPip()" title="Picture-in-picture (p)">🗗</button>`:''}
+        <button onclick="vFullscreen()" title="Fullscreen (f)">⛶</button>
+      </div>
+    </div>`;
   bg.innerHTML=`<div class="modal">
     <div class="modal-hdr">
       <h2>${esc(v.title)}${metaLine}</h2>
@@ -1666,21 +1787,32 @@ function playVideo(id){
       <button onclick="openComments('${esc(id)}')" title="Comments">💬</button>
       <button onclick="closeModal(this.closest('.modal-bg'))">✕ Close</button>
     </div>
-    <div class="modal-body"><div class="vid-wrap"><video id="player-video" src="${initSrc}" ${isT?'':'controls'} autoplay crossorigin="anonymous">${tracks}</video>${bar}</div>${chapPane}${transcriptPane}</div>
+    <div class="modal-body"><div class="vid-wrap" id="pl-wrap"><video id="player-video" src="${initSrc}" autoplay playsinline crossorigin="anonymous">${tracks}</video>${controls}</div>${chapPane}${transcriptPane}</div>
   </div>`;
   document.body.appendChild(bg);
   const vid=bg.querySelector('#player-video');
+  // Restore the viewer's last volume + speed.
+  vid.volume=(plPrefs.volume!=null)?plPrefs.volume:1;
+  vid.playbackRate=plPrefs.speed||1;
+  const volEl=bg.querySelector('#v-vol'); if(volEl)volEl.value=vid.volume;
+  const spEl=bg.querySelector('#v-speed'); if(spEl)spEl.textContent=(plPrefs.speed||1)+'×';
   // Direct (seekable) videos resume via currentTime; a transcode stream was
-  // already started at the resume offset above.
-  if(!isT&&resume)vid.addEventListener('loadedmetadata',()=>{vid.currentTime=resume},{once:true});
-  if(isT){
-    const sk=bg.querySelector('#v-seek');
-    sk.addEventListener('input',()=>{sk._drag=true;const tl=document.getElementById('v-time');if(tl)tl.textContent=fmtDur(+sk.value)+' / '+fmtDur(player.duration);});
-    sk.addEventListener('change',()=>{sk._drag=false;playerSeek(+sk.value);});
-    bg.querySelector('#v-vol').addEventListener('input',function(){vid.volume=+this.value;vid.muted=(+this.value===0);updateVctrl();});
-    ['timeupdate','play','pause','volumechange'].forEach(ev=>vid.addEventListener(ev,updateVctrl));
+  // already started at the resume offset above. Pick up the real duration for
+  // direct streams, and honour a saved captions-on preference.
+  vid.addEventListener('loadedmetadata',()=>{
+    if(!isT&&resume)vid.currentTime=resume;
+    if(!player.duration&&isFinite(vid.duration))player.duration=vid.duration;
+    if(hasSubs&&plPrefs.cc&&vid.textTracks&&vid.textTracks[0]){vid.textTracks[0].mode='showing';const b=document.getElementById('v-cc');if(b)b.classList.add('on');}
     updateVctrl();
-  }
+  },{once:true});
+  plBindScrubber(bg.querySelector('#pl-track'));
+  if(volEl)volEl.addEventListener('input',function(){vid.volume=+this.value;vid.muted=(+this.value===0);plPrefs.volume=vid.volume;savePlPrefs();updateVctrl();});
+  ['timeupdate','play','pause','volumechange','progress','ratechange','seeked','loadeddata'].forEach(ev=>vid.addEventListener(ev,updateVctrl));
+  const wrap=bg.querySelector('#pl-wrap');
+  wrap.addEventListener('pointermove',plActivity);
+  vid.addEventListener('play',plActivity); vid.addEventListener('pause',plActivity);
+  vid.addEventListener('click',()=>vTogglePlay());
+  updateVctrl(); plActivity();
   bg.tabIndex=-1;bg.addEventListener('keydown',playerKey);bg.focus();
   if(saveTimer)clearInterval(saveTimer);
   saveTimer=setInterval(()=>savePosition(vid),5000);
@@ -1702,6 +1834,8 @@ async function savePosition(vid){
 
 function closeModal(el){
   if(saveTimer){clearInterval(saveTimer);saveTimer=null}
+  if(plIdleTimer){clearTimeout(plIdleTimer);plIdleTimer=null}
+  plDragging=false;
   const vid=el.querySelector('video');
   if(vid){savePosition(vid);vid.pause();vid.src=''}
   currentPlayingId=null;
@@ -1715,6 +1849,9 @@ async function loadChapters(id){
     const list=document.getElementById('chapters-list');if(!list)return;
     if(!chapters.length){list.innerHTML='<em style="padding:10px;display:block;color:var(--muted)">No chapters</em>';return}
     list.innerHTML=chapters.map(c=>`<div class="chapter" onclick="jumpToChapter(${c.start})"><div class="ch-time">${fmtDur(c.start)}</div><div class="ch-title">${esc(c.title)}</div></div>`).join('');
+    // Chapter markers on the scrubber.
+    const ticks=document.getElementById('pl-ticks');
+    if(ticks&&player.duration)ticks.innerHTML=chapters.map(c=>`<div class="pl-tick" style="left:${plPct(c.start,player.duration)}%" title="${esc(c.title)}"></div>`).join('');
     const vid=document.getElementById('player-video');
     if(vid)vid.addEventListener('timeupdate',()=>{
       const t=effTime();let ai=-1;
