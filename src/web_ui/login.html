@@ -4,19 +4,52 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>yt-offline — Sign in</title>
 <style>
+  /* Standalone page (the SPA's embedded fonts aren't available here), so the
+     display face is a system serif stack — editorial without extra bytes. The
+     palette mirrors the default midnight theme + cinematheque atmosphere. */
+  :root{--bg:#1a1a2e;--panel:#16213e;--card:#0f3460;--accent:#e94560;--text:#eee;--muted:#9aa0b4;--border:#334;
+    --font-display:Georgia,'Iowan Old Style','Times New Roman',serif;
+    --font-body:system-ui,-apple-system,'Segoe UI',sans-serif}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:#1a1a2e;color:#eee;font:14px/1.5 system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh}
-  .box{background:#16213e;border:1px solid #334;border-radius:8px;padding:28px;width:300px;display:flex;flex-direction:column;gap:12px}
-  h1{font-size:1.1em;text-align:center}
-  input{background:#0f3460;border:1px solid #334;color:#eee;padding:9px 11px;border-radius:4px;font-size:14px}
-  button{background:#e94560;border:none;color:#fff;padding:9px;border-radius:4px;cursor:pointer;font-size:14px;font-weight:600}
-  .err{color:#f87171;font-size:12px;text-align:center;min-height:16px}
+  body{background:var(--bg);color:var(--text);font:14px/1.5 var(--font-body);
+    display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;overflow:hidden}
+  /* Accent aurora + fine film grain, fixed behind everything. */
+  body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:
+      radial-gradient(120% 85% at 18% -5%, color-mix(in srgb,var(--accent) 22%,transparent), transparent 55%),
+      radial-gradient(90% 75% at 105% 105%, color-mix(in srgb,var(--accent) 12%,transparent), transparent 60%);}
+  body::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.05;mix-blend-mode:overlay;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
+  .box{position:relative;z-index:1;width:330px;max-width:100%;padding:30px 28px 26px;display:flex;flex-direction:column;gap:14px;
+    background:radial-gradient(140% 120% at 0% 0%, color-mix(in srgb,var(--accent) 9%,transparent), transparent 60%),
+      linear-gradient(158deg, var(--panel), color-mix(in srgb,var(--panel) 80%, #000));
+    border:1px solid color-mix(in srgb,var(--border) 75%,transparent);border-radius:14px;
+    box-shadow:0 24px 60px -24px rgba(0,0,0,.75);animation:rise .5s cubic-bezier(.22,1,.36,1) both}
+  @keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  .brand{display:flex;align-items:center;gap:10px;justify-content:center}
+  .dot{width:10px;height:10px;border-radius:3px;background:var(--accent);
+    box-shadow:0 0 12px var(--accent),0 0 3px var(--accent);animation:rec 2.6s ease-in-out infinite}
+  @keyframes rec{0%,100%{opacity:1}50%{opacity:.34}}
+  h1{font-family:var(--font-display);font-weight:400;font-size:1.9rem;letter-spacing:.01em;line-height:1}
+  .tag{font-family:var(--font-display);font-style:italic;font-size:.95rem;color:var(--muted);text-align:center;margin:-4px 0 6px}
+  .field{position:relative;display:flex;flex-direction:column;gap:0}
+  input{width:100%;background:color-mix(in srgb,var(--card) 70%,#000);border:1px solid var(--border);color:var(--text);
+    padding:11px 13px;border-radius:9px;font-size:14px;font-family:var(--font-body);transition:border-color .15s,box-shadow .15s}
+  input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 45%,transparent)}
+  button{background:var(--accent);border:1px solid var(--accent);color:#fff;padding:11px;border-radius:9px;cursor:pointer;
+    font-size:14px;font-weight:600;font-family:var(--font-body);letter-spacing:.02em;
+    transition:filter .15s,transform .06s}
+  button:hover{filter:brightness(1.08)}
+  button:active{transform:translateY(1px)}
+  .err{color:#f87171;font-size:12px;text-align:center;min-height:16px;letter-spacing:.01em}
+  @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
 <div class="box">
-  <h1>yt-offline</h1>
-  <input type="password" id="pwd" placeholder="Password" autofocus onkeydown="if(event.key==='Enter')login()">
+  <div class="brand"><span class="dot"></span><h1>yt-offline</h1></div>
+  <div class="tag">your private archive</div>
+  <div class="field"><input type="password" id="pwd" placeholder="Password" autofocus onkeydown="if(event.key==='Enter')login()"></div>
   <button onclick="login()">Sign in</button>
   <div class="err" id="err"></div>
 </div>
