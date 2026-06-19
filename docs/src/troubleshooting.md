@@ -1,6 +1,6 @@
 # Troubleshooting
 
-yt-offline classifies failed downloads into one of nine classes and shows
+catacomb classifies failed downloads into one of nine classes and shows
 a one-line suggested fix next to the failed job. This page expands on the
 most common ones, plus a few non-download issues.
 
@@ -15,7 +15,7 @@ wall. In order of effectiveness:
 2. **Switch to bundled (nightly) yt-dlp** if you're on system stable.
 3. **Enable the POT token provider.**
 4. **Try a player-client override** of `tv,mweb` for that channel.
-5. If it's a one-off, just wait — yt-offline auto-retries transient
+5. If it's a one-off, just wait — catacomb auto-retries transient
    rate-limits after a cooldown.
 
 ## Impersonate targets show "(unavailable)"
@@ -40,7 +40,7 @@ major versions are mismatched"* warning.
 **Cause:** the yt-dlp plugin came from PyPI (Brainicism's package, which
 versions independently) instead of the jim60105 Rust server's release.
 
-**Fix:** re-run the POT **Install/Update** button — yt-offline installs
+**Fix:** re-run the POT **Install/Update** button — catacomb installs
 the version-matched plugin zip from the same release as the server
 binary. Don't `pip install bgutil-ytdlp-pot-provider` yourself.
 
@@ -68,14 +68,14 @@ see [Anti-bot](./anti-bot.md).
 
 ## Downloads stall forever
 
-A job sits running with no progress. yt-offline's **hang watchdog**
+A job sits running with no progress. catacomb's **hang watchdog**
 auto-kills any job silent for 5 minutes and re-queues it, so this should
 self-heal. If it recurs on a specific URL, it's usually a server-side
 issue with that source; check the job log in the Downloads panel.
 
 ## Disk fills up / downloads fail with ENOSPC
 
-yt-offline runs a **disk-full preflight** and refuses to start a download
+catacomb runs a **disk-full preflight** and refuses to start a download
 when the target filesystem has less than ~500 MB free, surfacing it as a
 clear "disk full" failure rather than a half-written file. Free space and
 retry.
@@ -103,13 +103,13 @@ broken Vulkan stack, the OS can create the window while wgpu never
 presents a frame. Try the OpenGL renderer:
 
 ```bash
-YT_OFFLINE_RENDERER=glow yt-offline
+YT_OFFLINE_RENDERER=glow catacomb
 ```
 
 or:
 
 ```bash
-yt-offline --renderer glow
+catacomb --renderer glow
 ```
 
 If that works, update/reinstall your Vulkan driver later and switch back
@@ -129,6 +129,6 @@ UI until restarted.
 
 - **The job log** — every download/transcode job keeps its full yt-dlp /
   ffmpeg output in the Downloads panel (expand the job).
-- **`yt-offline.crash.log`** — next to your `yt-offline.db`. A panic in
+- **`catacomb.crash.log`** — next to your `catacomb.db`. A panic in
   any thread (UI, web worker, download) is appended here with a
   timestamp, so it survives a GUI launched without a terminal.

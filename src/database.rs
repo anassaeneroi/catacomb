@@ -1,6 +1,7 @@
-//! Persistent storage for watched status, playback positions, and settings.
+//! Persistent storage for watched status, playback positions, settings, and
+//! restart-persistent web sessions.
 //!
-//! Backed by a bundled SQLite database (`yt-offline.db`). Access goes through
+//! Backed by a bundled SQLite database (`catacomb.db`). Access goes through
 //! a small `r2d2`-managed pool of connections rather than a single shared
 //! `Connection` — that way concurrent read queries from different axum
 //! handlers don't serialize on a mutex, and write queries still take their
@@ -13,6 +14,7 @@
 //! | `watched` | `video_id` (PK), `watched_at` | Records videos the user has marked watched |
 //! | `positions` | `video_id` (PK), `position_secs`, `updated_at` | Stores resume positions |
 //! | `settings` | `key` (PK), `value` | Persistent app settings (password hash, etc.) |
+//! | `sessions` | `token` (PK), `issued_at` | Restart-persistent web login sessions |
 
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, Result};
@@ -790,7 +792,7 @@ impl Database {
         );
     }
 
-    /// Idempotently merge another yt-offline database into this one.
+    /// Idempotently merge another catacomb database into this one.
     ///
     /// Designed for "Import library backup…" — the user uploads a snapshot
     /// produced by `GET /api/backup/db`, and we merge its rows in without
@@ -858,7 +860,7 @@ impl Database {
                         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
                         Some(format!(
                             "backup is missing required table `{table}` — \
-                             not a yt-offline snapshot, or from an incompatible version"
+                             not a catacomb snapshot, or from an incompatible version"
                         )),
                     ));
                 }
@@ -1392,7 +1394,7 @@ mod restore_tests {
             use std::sync::atomic::{AtomicU64, Ordering};
             static N: AtomicU64 = AtomicU64::new(0);
             let id = N.fetch_add(1, Ordering::Relaxed);
-            p.push(format!("yt-offline-test-{}-{}-{}", std::process::id(), id, name));
+            p.push(format!("catacomb-test-{}-{}-{}", std::process::id(), id, name));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             ScratchDir(p)
@@ -1478,7 +1480,7 @@ mod restore_tests {
         let live = Database::open(&dir.join("live.db")).unwrap();
 
         // Create a SQLite file with a completely different schema.
-        let bad = dir.join("not-yt-offline.db");
+        let bad = dir.join("not-catacomb.db");
         let conn = Connection::open(&bad).unwrap();
         conn.execute("CREATE TABLE foo (x INT)", []).unwrap();
         drop(conn);

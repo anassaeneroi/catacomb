@@ -1,4 +1,4 @@
-# Packaging yt-offline
+# Packaging Catacomb
 
 This document covers building distributable packages. The one-liner:
 
@@ -23,7 +23,7 @@ on demand. Runtime deps declared: `yt-dlp`, `ffmpeg`, `mpv`, `xdg-utils`,
 
 ```sh
 scripts/package.sh deb
-sudo apt install ./dist/yt-offline_*_amd64.deb
+sudo apt install ./dist/catacomb_*_amd64.deb
 ```
 
 ### .rpm (Fedora / RHEL / openSUSE)
@@ -34,7 +34,7 @@ already-built (and release-profile-stripped) binary.
 
 ```sh
 scripts/package.sh rpm
-sudo dnf install ./dist/yt-offline-*.x86_64.rpm
+sudo dnf install ./dist/catacomb-*.x86_64.rpm
 ```
 
 Note: `ffmpeg` on Fedora lives in [RPM Fusion](https://rpmfusion.org/);
@@ -50,8 +50,8 @@ would balloon the image and tangle the licensing.
 
 ```sh
 scripts/package.sh appimage
-chmod +x dist/yt-offline-*-x86_64.AppImage
-./dist/yt-offline-*-x86_64.AppImage
+chmod +x dist/catacomb-*-x86_64.AppImage
+./dist/catacomb-*-x86_64.AppImage
 ```
 
 ## Arch Linux
@@ -82,11 +82,11 @@ sudo apt install mingw-w64 zip          # or your distro's equivalent
 scripts/package.sh win
 ```
 
-This produces `dist/yt-offline-<ver>-x86_64-windows.zip` containing
-`yt-offline.exe`, `LICENSE.txt`, and a `README.txt` listing the runtime
+This produces `dist/catacomb-<ver>-x86_64-windows.zip` containing
+`catacomb.exe`, `LICENSE.txt`, and a `README.txt` listing the runtime
 PATH deps (yt-dlp / ffmpeg / mpv). Release builds link as a GUI-subsystem
 app (no console window); the binary reattaches to the launching terminal
-at runtime (`attach_windows_console` in `main.rs`) so `yt-offline.exe
+at runtime (`attach_windows_console` in `main.rs`) so `catacomb.exe
 --web 8080` from PowerShell prints its logs, while a double-click stays
 windowless.
 
@@ -110,12 +110,12 @@ rustup target add aarch64-apple-darwin   # or x86_64-apple-darwin
 MAC_ARCH=arm64 scripts/package.sh mac     # arm64 (default) | x86_64
 ```
 
-This cross-compiles, assembles an unsigned `yt-offline.app`
+This cross-compiles, assembles an unsigned `catacomb.app`
 (`Info.plist` + the Mach-O binary; an `.icns` icon too if `png2icns` is
-available), and zips it to `dist/yt-offline-<ver>-<arch>-macos.zip`. The
+available), and zips it to `dist/catacomb-<ver>-<arch>-macos.zip`. The
 `.app` is **not codesigned or notarized**, so on the target Mac it must be
 opened the first time via right-click → Open, or cleared with `xattr -dr
-com.apple.quarantine yt-offline.app`. Runtime deps (yt-dlp / ffmpeg / mpv)
+com.apple.quarantine catacomb.app`. Runtime deps (yt-dlp / ffmpeg / mpv)
 are expected on PATH as on the other platforms.
 
 A `.dmg` and codesigning/notarization (and a `tray-icon`-based macOS tray)

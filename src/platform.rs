@@ -355,9 +355,9 @@ fn extract_after<'a>(url: &'a str, marker: &str) -> Option<&'a str> {
 ///
 /// All platforms (including YouTube) are nested as subdirectories of the
 /// configured `channels_root`. So a config with
-/// `directory = "/mnt/library/yt-offline"` puts YouTube channels at
-/// `/mnt/library/yt-offline/channels/<creator>/` and Bandcamp artists at
-/// `/mnt/library/yt-offline/bandcamp/<artist>/`. This keeps everything a
+/// `directory = "/mnt/library/catacomb"` puts YouTube channels at
+/// `/mnt/library/catacomb/channels/<creator>/` and Bandcamp artists at
+/// `/mnt/library/catacomb/bandcamp/<artist>/`. This keeps everything a
 /// user might want to archive under one tidy umbrella directory.
 ///
 /// The function's name predates the layout change — `channels_root` is

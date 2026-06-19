@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>yt-offline</title>
+<title>Catacomb</title>
 <!-- Embedded UI fonts (base64 below, offline-safe — no CDN): Instrument Serif
      by Rodrigo Fuenzalida and Hanken Grotesk by Alfredo Marco Pradil, both
      under the SIL Open Font License 1.1. -->
@@ -87,9 +87,9 @@
   .modal-hdr h2{flex:1;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .modal-body{display:flex;gap:12px;overflow:hidden;flex:1;min-height:0}
   .modal video{flex:1;min-width:0;max-height:75vh;background:#000}
-  /* Custom player (used for non-seekable transcode streams): the live ffmpeg
-     pipe has no byte ranges, so we drive a scrubber off the known duration and
-     re-request the stream at an offset on seek. */
+  /* Custom player: direct files and non-seekable transcode streams now share
+     the same chrome. The ffmpeg pipe has no byte ranges, so transcode scrubbing
+     re-requests the stream at an offset while direct files set currentTime. */
   .vid-wrap{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
   .vid-wrap video{flex:1;min-height:0;max-height:72vh;width:100%;background:#000}
   .vctrl{display:flex;align-items:center;gap:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;flex-wrap:wrap}
@@ -499,7 +499,7 @@
 <body>
 <header>
   <button id="menu-btn" onclick="toggleSidebar()">☰</button>
-  <h1>yt-offline</h1>
+  <h1>Catacomb</h1>
   <input type="search" id="search" placeholder="Filter…" oninput="saveUiState();renderGrid()">
   <select id="sort" onchange="saveUiState();renderGrid()">
     <optgroup label="Download date">
@@ -598,7 +598,7 @@ function closeSidebar(){document.getElementById('sidebar').classList.remove('ope
 /* ── API ────────────────────────────────────────────────────────── */
 async function api(path,opts){
   const r=await fetch(path,opts);
-  // Session gone (expired, or the server restarted — sessions are in-memory):
+  // Session gone (expired, cleared by password change/logout, or otherwise absent):
   // the cached SPA would otherwise just throw cryptic "authentication required"
   // toasts on every action. Reload instead so the server serves the login page.
   if(r.status===401){
@@ -1632,8 +1632,8 @@ function shufflePlay(){
   }
   playVideo(pick.id);
 }
-// Player state for the custom transcode controls. For direct /files/ videos
-// `isTranscode` is false and native <video controls> handle everything.
+// Player state for the custom controls. For direct /files/ videos `isTranscode`
+// is false and seeking sets currentTime; transcode seeks by reloading at start=.
 let player={isTranscode:false,base:'',seekBase:0,duration:0};
 function transcodeUrlAt(t){const u=player.base;const sep=u.includes('?')?'&':'?';return safeUrl(u+sep+'start='+Math.max(0,t).toFixed(2));}
 // Effective playback position: a transcode element's currentTime restarts at 0
@@ -2289,7 +2289,7 @@ async function openSettings(){
       <label for="cf-ytdlp-bundled">Use bundled yt-dlp + deno</label>
       <input type="checkbox" id="cf-ytdlp-bundled" ${cur.use_bundled_ytdlp?'checked':''}>
     </div>
-    <div class="settings-hint" style="margin-bottom:6px">Bundled binaries live in ~/.local/share/yt-offline/bin/ and include a JS runtime (deno) needed for YouTube signature deciphering. When off, the yt-dlp on your PATH is used.</div>
+    <div class="settings-hint" style="margin-bottom:6px">Bundled binaries live in ~/.local/share/catacomb/bin/ and include a JS runtime (deno) needed for YouTube signature deciphering. When off, the yt-dlp on your PATH is used.</div>
     <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
       <button onclick="updateYtdlp(this)">${cur.bundled_ytdlp_installed?'⟳ Update bundled':'⤓ Install bundled'}</button>
       <span style="font-size:11px;color:var(--muted)">${cur.bundled_ytdlp_installed?'✓ installed':'not installed'}</span>

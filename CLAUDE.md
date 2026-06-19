@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`yt-offline` — a single Rust binary that is **both** a desktop GUI (eframe/egui)
+`catacomb` — a single Rust binary that is **both** a desktop GUI (eframe/egui)
 and a headless web server (axum), wrapping `yt-dlp` to archive YouTube/TikTok/
 Twitch/etc. AGPL-3.0. North-star goal and feature-parity tracking live in
 [ROADMAP.md](ROADMAP.md); a structured analysis of the Tartube benchmark is in
@@ -17,8 +17,8 @@ cargo build --release           # the binary (release profile is opt-level=3 + t
 cargo test --release            # unit tests + tests/api.rs integration tests (no network)
 cargo test --release <name>     # single test by substring, e.g. `cargo test --release subs_disabled`
 cargo test --release real_ffmpeg -- --ignored   # opt-in: real-ffmpeg fingerprint accuracy/speed check
-./target/release/yt-offline           # desktop GUI mode (default)
-./target/release/yt-offline --web 8080  # headless web server on a port
+./target/release/catacomb           # desktop GUI mode (default)
+./target/release/catacomb --web 8080  # headless web server on a port
 
 scripts/package.sh [deb|rpm|appimage|all]   # build distro packages → dist/ (see docs/PACKAGING.md)
 ```
@@ -103,6 +103,12 @@ in memory and mutating endpoints mirror DB writes onto those caches +
 `bump_library_version()` (the ETag) so `/api/library` stays consistent without a
 rescan.
 
+Web login sessions are runtime-owned but restart-persistent: `web.rs` keeps the
+live `HashMap<String, u64>` and mirrors tokens into the `sessions` table, then
+rehydrates non-expired rows at startup. Logout and password changes clear those
+rows. The DB is plain SQLite, not encrypted, so `/api/backup/db` exports a
+sensitive file; at-rest DB encryption is deliberately deferred to Phase 4.
+
 Three `(path|video_id, mtime)`-keyed caches let expensive work happen once and be
 skipped on unchanged files: `info_cache` (parsed `info.json` fields),
 `search_meta` + the `video_search` FTS5 index (full-text title/channel/
@@ -123,7 +129,7 @@ whole SPA — a `cargo build` won't catch it since the HTML is just a string).
 ### Bundled toolchain & anti-bot
 
 `ytdlp_bin.rs` manages an optional self-contained venv at
-`~/.local/share/yt-offline/` (nightly `yt-dlp[default]` via `--pre` + `curl_cffi`
+`~/.local/share/catacomb/` (nightly `yt-dlp[default]` via `--pre` + `curl_cffi`
 for TLS impersonation + bundled `deno`). `pot_provider.rs` runs `bgutil-pot` (a
 loopback HTTP server) for YouTube Proof-of-Origin tokens; **its yt-dlp plugin
 must come from the same release as the server binary, not PyPI** (version skew
@@ -154,8 +160,8 @@ both the transcript indexer and the transcript viewers.
 ## Conventions
 
 - **Never commit** `cookies.txt` (live session creds), `config.toml` (user-
-  specific), or `yt-offline.db` (contains the Argon2 password hash). All
-  gitignored.
+  specific), or `catacomb.db` (plain SQLite app state, including the Argon2
+  password hash and restart-persistent session tokens). All gitignored.
 - Redact the absolute cookies path out of any log line surfaced to the UI/API
   (`redact_sensitive` in `downloader.rs`) — it leaks `$HOME`.
 - `app.rs` and `web.rs` are large (~3–4k lines) because each owns a full UI; new
@@ -172,6 +178,7 @@ both the transcript indexer and the transcript viewers.
   cross-compiles — `cargo check --target x86_64-pc-windows-gnu` is green — so
   keep new platform-specific code behind `cfg(unix)`/`cfg(windows)`/
   `cfg(target_os = …)` with a fallback, the way `disk_space`, `plex`, the mpv
-  IPC, and the `chmod` guards already do. Windows/macOS still aren't *shipped*
-  (no tray backend, no link/CI yet), but don't reintroduce an unconditional
-  Linux-only dep.
+  IPC, and the `chmod` guards already do. Windows now ships as a cross-compiled
+  zip from CI; macOS has a local osxcross packaging path but is not in CI and
+  still needs signing/notarization + a real tray backend. Don't reintroduce an
+  unconditional Linux-only dep.

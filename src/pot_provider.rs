@@ -24,7 +24,7 @@
 //! Lives next to the bundled deno + yt-dlp:
 //!
 //! ```text
-//! ~/.local/share/yt-offline/
+//! ~/.local/share/catacomb/
 //!   bin/
 //!     bgutil-pot            ← the Rust HTTP server binary
 //!   venv/                   ← reused — plugin zip unpacked into site-packages
@@ -65,7 +65,7 @@ pub fn server_url() -> String {
 /// Path to the bgutil-pot binary inside the bundled bin dir.
 ///
 /// Co-locates with the bundled `deno` so a single bundled-dir cleanup
-/// (currently just `rm -rf ~/.local/share/yt-offline/bin`) removes
+/// (currently just `rm -rf ~/.local/share/catacomb/bin`) removes
 /// both.
 pub fn bin_path() -> PathBuf {
     let mut p = crate::ytdlp_bin::bundled_dir();

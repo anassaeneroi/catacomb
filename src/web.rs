@@ -401,7 +401,7 @@ struct SettingsPayload {
     /// Maximum simultaneous yt-dlp processes. 0 = unlimited. Ignored if 0 on POST.
     #[serde(default)]
     max_concurrent: usize,
-    /// If true, invoke the bundled yt-dlp under `~/.local/share/yt-offline/bin/`
+    /// If true, invoke the bundled yt-dlp under `~/.local/share/catacomb/bin/`
     /// instead of the system PATH yt-dlp.
     #[serde(default)]
     use_bundled_ytdlp: bool,
@@ -806,7 +806,7 @@ pub fn write_cookies(text: &str) -> Result<usize, String> {
     std::fs::write(&path, &content).map_err(|e| e.to_string())?;
     // cookies.txt carries live session credentials — tighten the mode so it
     // isn't world-readable on multi-user systems. Best-effort, like the
-    // similar guard on yt-offline.db.
+    // similar guard on catacomb.db.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2406,7 +2406,7 @@ async fn get_feed_all(State(state): State<Arc<WebState>>, headers: HeaderMap) ->
         .collect();
     let items = build_feed_items(all, root, &base, &state.feed_token, FEED_LIMIT);
     let feed = crate::feed::Feed {
-        title: "yt-offline — Library".into(),
+        title: "Catacomb — Library".into(),
         description: "Your archived videos as a podcast feed.".into(),
         link: format!("{base}/"),
         items,
@@ -2430,7 +2430,7 @@ async fn get_feed_channel(
         .chain(ch.playlists.iter().flat_map(|p| p.videos.iter())).collect();
     let items = build_feed_items(vids, root, &base, &state.feed_token, FEED_LIMIT);
     let feed = crate::feed::Feed {
-        title: format!("yt-offline — {}", ch.name),
+        title: format!("Catacomb — {}", ch.name),
         description: format!("Archived videos from {}.", ch.name),
         link: format!("{base}/"),
         items,
@@ -2696,7 +2696,7 @@ async fn delete_folder(
 /// session credentials that shouldn't fly over the wire unprompted, and
 /// keeping the endpoint to one file means no extra deps for tar/zip.
 async fn get_backup_db(State(state): State<Arc<WebState>>) -> Response {
-    let db_path = state.channels_root.join("yt-offline.db");
+    let db_path = state.channels_root.join("catacomb.db");
     let Ok(bytes) = std::fs::read(&db_path) else {
         return (StatusCode::NOT_FOUND, "no db file on disk (running in-memory?)").into_response();
     };
@@ -2704,7 +2704,7 @@ async fn get_backup_db(State(state): State<Arc<WebState>>) -> Response {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let filename = format!("yt-offline-{now_secs}.db");
+    let filename = format!("catacomb-{now_secs}.db");
     (
         [
             (header::CONTENT_TYPE, "application/x-sqlite3".to_string()),
@@ -2719,7 +2719,7 @@ async fn get_backup_db(State(state): State<Arc<WebState>>) -> Response {
 /// rows into the live DB. Mirrors `GET /api/backup/db` in the opposite
 /// direction.
 ///
-/// The body is the raw `yt-offline.db` bytes — same shape as what
+/// The body is the raw `catacomb.db` bytes — same shape as what
 /// `get_backup_db` produces. We write it to a sibling temp file, hand it
 /// to [`Database::restore_from_backup`] for the actual merge, then
 /// refresh the in-memory watched / positions / flags caches so the next
@@ -2750,7 +2750,7 @@ async fn post_restore_db(
     // Write to a sibling tmp file so it lives on the same filesystem as
     // the live DB — keeps ATTACH happy and avoids cross-device rename
     // issues if we ever extend this to atomic-replace semantics.
-    let tmp_path = state.channels_root.join(".yt-offline.restore.tmp");
+    let tmp_path = state.channels_root.join(".catacomb.restore.tmp");
     if let Err(e) = std::fs::write(&tmp_path, &body) {
         return (StatusCode::INTERNAL_SERVER_ERROR,
                 format!("write tmp file: {e}")).into_response();
@@ -3124,7 +3124,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         let dir = crate::platform::platform_root(&channels_root, p);
         let _ = std::fs::create_dir_all(&dir);
     }
-    let db_path = channels_root.join("yt-offline.db");
+    let db_path = channels_root.join("catacomb.db");
     let config_path = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("config.toml");
@@ -3374,7 +3374,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
             return;
         }
     };
-    println!("yt-offline web UI: http://localhost:{port}");
+    println!("Catacomb web UI: http://localhost:{port}");
 
     // Now that we're accepting connections, run the initial library scan in
     // the background so a cold-cache scan of a large library doesn't delay

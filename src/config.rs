@@ -24,14 +24,14 @@ pub struct Config {
     pub subtitles: SubtitlesSection,
     #[serde(default)]
     pub convert: ConvertSection,
-    /// Federation: other yt-offline instances whose libraries can be browsed
+    /// Federation: other catacomb instances whose libraries can be browsed
     /// read-only from this one (see [`crate::remote`]). Each is a
     /// `[[remote]]` table in config.toml.
     #[serde(default, rename = "remote")]
     pub remotes: Vec<RemoteSection>,
 }
 
-/// One `[[remote]]` entry — a peer yt-offline instance to browse read-only.
+/// One `[[remote]]` entry — a peer catacomb instance to browse read-only.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RemoteSection {
     /// Display name in the UI's remote switcher.
@@ -122,8 +122,8 @@ pub struct BackupSection {
     /// automatically when a slot opens. Set to 0 for no limit (not recommended).
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
-    /// If true, use the bundled yt-dlp + deno binaries managed by yt-offline
-    /// (installed under `~/.local/share/yt-offline/bin/`). If false, use the
+    /// If true, use the bundled yt-dlp + deno binaries managed by catacomb
+    /// (installed under `~/.local/share/catacomb/bin/`). If false, use the
     /// `yt-dlp` found on the system PATH.
     #[serde(default)]
     pub use_bundled_ytdlp: bool,

@@ -80,7 +80,7 @@ fallback.
 ## Anti-bot subsystems
 
 `ytdlp_bin.rs` manages the optional self-contained venv at
-`~/.local/share/yt-offline/` (nightly `yt-dlp[default]` + `curl_cffi` +
+`~/.local/share/catacomb/` (nightly `yt-dlp[default]` + `curl_cffi` +
 bundled `deno`). `pot_provider.rs` runs `bgutil-pot` for Proof-of-Origin
 tokens — its yt-dlp plugin must come from the same release as the server
 binary. `error_class.rs` pattern-matches yt-dlp stderr into actionable
@@ -95,7 +95,7 @@ wall is RateLimited, not NotFound).
   and drives the HTTP API with curl — genuine end-to-end coverage of the
   axum + SQLite + config stack.
 
-`cargo test` runs both. (A `.forgejo/workflows/test.yml` CI definition
+`cargo test --release` runs both. (A `.forgejo/workflows/test.yml` CI definition
 exists, but Codeberg runs Woodpecker rather than Forgejo Actions, so it
 doesn't execute there without a self-hosted runner — run the suite
 locally.)
@@ -103,8 +103,9 @@ locally.)
 ## Platform support
 
 Tray (`ksni`) and file dialogs (`rfd` xdg-portal) are Linux-only / no-GTK
-by design — that's why packaging avoids a GTK dependency. Windows/macOS
-aren't first-class yet: the tray needs a per-OS backend before a clean
-cross-build. The rest (eframe/wgpu, axum, rusqlite-bundled) already
-compiles cross-platform, and `ytdlp_bin` already has `cfg!(windows)`
-branches.
+by design — that's why packaging avoids a GTK dependency. Those Linux-only
+pieces are target-gated: Windows builds use native file dialogs and a no-op
+tray stub, and the repo now ships a cross-compiled Windows zip. macOS has a
+local osxcross packaging path, but still needs on-hardware validation,
+codesigning/notarization, and a real tray backend before it is a normal
+release artifact.

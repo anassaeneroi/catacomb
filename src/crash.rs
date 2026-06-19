@@ -1,9 +1,9 @@
-//! Persistent panic logging so a crashed yt-offline leaves a paper trail.
+//! Persistent panic logging so a crashed catacomb leaves a paper trail.
 //!
 //! GUI users don't see stderr (the binary is launched without a terminal
 //! from a `.desktop` file or the IDE), so panics today vanish entirely.
 //! This module installs a `panic::set_hook` early in `main` that appends
-//! a structured entry to `<channels_root>/yt-offline.crash.log` for every
+//! a structured entry to `<channels_root>/catacomb.crash.log` for every
 //! panic from any thread.
 //!
 //! The default panic handler still runs after ours so dev runs keep
@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 /// dozen panics is what a bug-report attacher actually wants.
 const LOG_SIZE_CAP_BYTES: u64 = 256 * 1024;
 
-/// Install a global panic hook that logs to `<dir>/yt-offline.crash.log`
+/// Install a global panic hook that logs to `<dir>/catacomb.crash.log`
 /// while preserving the default stderr behavior.
 ///
 /// `dir` is the same directory the SQLite database lives in (typically
@@ -47,7 +47,7 @@ const LOG_SIZE_CAP_BYTES: u64 = 256 * 1024;
 /// Safe to call once at process startup. Calling it more than once
 /// replaces the previous hook (which is fine: the new dir wins).
 pub fn install(dir: &Path) {
-    let path = dir.join("yt-offline.crash.log");
+    let path = dir.join("catacomb.crash.log");
     // Don't fail startup if the parent dir doesn't exist yet — log it,
     // continue. The DB-open path further down the chain will surface a
     // permission / missing-dir error in a more legible way.
@@ -194,10 +194,10 @@ mod tests {
         // (`std::thread::spawn` so the panic doesn't unwind the test
         // runner), and assert the file contents afterward.
         let mut tmp = std::env::temp_dir();
-        tmp.push(format!("yt-offline-crash-test-{}", std::process::id()));
+        tmp.push(format!("catacomb-crash-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let log = tmp.join("yt-offline.crash.log");
+        let log = tmp.join("catacomb.crash.log");
 
         // Install the hook scoped to this test. We swap it back at the
         // end so other tests run on the default hook.

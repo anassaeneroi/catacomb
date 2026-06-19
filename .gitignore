@@ -9,8 +9,8 @@
 
 # makepkg build artifacts (finished .pkg.tar.zst is NOT ignored)
 /pkg/
-/src/yt-offline/
-/yt-offline/
+/src/catacomb/
+/catacomb/
 
 # Rendered mdBook output (source lives in docs/src/)
 /docs/book/
@@ -27,4 +27,4 @@ cookies.txt
 config.toml
 
 # Runtime database (watched status, positions, password hash) — never commit
-yt-offline.db
+catacomb.db

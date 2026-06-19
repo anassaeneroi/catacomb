@@ -2,7 +2,7 @@
 
 [Introduction](./introduction.md)
 
-# Using yt-offline
+# Using catacomb
 
 - [Installation](./installation.md)
 - [First run & configuration](./first-run.md)

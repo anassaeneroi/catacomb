@@ -1,4 +1,4 @@
-//! Federation — read-only browsing of a *peer* yt-offline instance's library.
+//! Federation — read-only browsing of a *peer* catacomb instance's library.
 //!
 //! A [`RemoteClient`] talks to another instance over its existing web API:
 //! it fetches `/api/library`, logging in first if the peer has a password
@@ -61,7 +61,7 @@ impl RemoteClient {
         let client = reqwest::blocking::Client::builder()
             .cookie_store(true)
             .timeout(Duration::from_secs(30))
-            .user_agent("yt-offline-federation")
+            .user_agent("catacomb-federation")
             .build()
             .unwrap_or_else(|_| reqwest::blocking::Client::new());
         RemoteClient {

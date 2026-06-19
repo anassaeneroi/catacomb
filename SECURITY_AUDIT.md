@@ -1,6 +1,7 @@
-# Security Audit — yt-offline
+# Security Audit — catacomb
 
 **Date:** 2026-05-23 (re-audit after security hardening commit `5999673`)
+**Docs refreshed:** 2026-06-18 (persisted sessions / DB backup caveat)
 **Earlier audit:** 2026-05-17 (commit pre-dating session auth, CSP, SHA-256 verify, etc.)
 **Scope:** Rust codebase + embedded web UI + dependencies
 **Threat model:** Self-hosted personal archiving tool. Primary deployment is
@@ -49,7 +50,7 @@ interpretation. Sites audited:
 
 - yt-dlp downloads: `src/downloader.rs:start`, `start_music`, `repair`
 - yt-dlp preview: `src/web.rs:get_preview` (now goes through `apply_cookie_flags` and respects bundled-binary setting)
-- yt-dlp bundled install: `src/ytdlp_bin.rs:install_command` runs `bash -c` with a static script whose only interpolated values are paths under `~/.local/share/yt-offline/` and constant GitHub URLs — no user input flows in.
+- yt-dlp bundled install: `src/ytdlp_bin.rs:install_command` runs `bash -c` with a static script whose only interpolated values are paths under `~/.local/share/catacomb/` and constant GitHub URLs — no user input flows in.
 - ffmpeg transcoder: `src/web.rs:get_transcode` (kill_on_drop set; child terminates when stream is dropped).
 
 Path interpolation in the install script uses single quotes around
@@ -84,7 +85,11 @@ the `settings` table was added.
 
 - Argon2-hashed password in the `settings` table (never in `config.toml`).
 - 256-bit `rand::thread_rng()` (CSPRNG) session tokens, hex-encoded.
-- `Mutex<HashMap<String, Instant>>` of issued tokens, lazily pruned past 30-day TTL — no unbounded growth.
+- Runtime `Mutex<HashMap<String, u64>>` of issued tokens, lazily pruned past
+  30-day TTL — no unbounded growth.
+- Session tokens are mirrored to the SQLite `sessions` table and rehydrated
+  at startup, so server restarts/upgrades do not log users out. Logout and
+  password changes delete the corresponding persisted sessions.
 - `Set-Cookie` includes `HttpOnly`, `SameSite=Strict`, `Path=/`, `Max-Age=2592000`. `Secure` is added when `X-Forwarded-Proto: https` is present (so reverse-proxied deployments get it; plain-HTTP LAN does not, which is correct since browsers would otherwise refuse to send the cookie).
 - All routes layered behind `auth_middleware` when a password is configured. `/api/login` and unauthenticated `GET /` (serves login page) are the only exceptions.
 - `password_required` is cached in an `AtomicBool` so the auth middleware doesn't hit SQLite on every static-file fetch.
@@ -125,9 +130,9 @@ unencrypted over the network. Defenses:
 
 **Mitigation if you need stronger guarantees:** put a reverse proxy with TLS in front (Caddy, nginx, Traefik) and set the `X-Forwarded-Proto` header. The app will then issue cookies with the `Secure` attribute automatically.
 
-### ⚠️ `cookies.txt` and `yt-offline.db` file permissions
+### ⚠️ `cookies.txt` and `catacomb.db` file permissions
 
-- `yt-offline.db`: now `chmod 0600` at open time on Unix (`src/database.rs`). Contains the Argon2 password hash and resume positions. Other local users on the same machine cannot read it.
+- `catacomb.db`: now `chmod 0600` at open time on Unix (`src/database.rs`). It is **plain SQLite**, not encrypted. It contains the Argon2 password hash, watched/resume state, notes/options/flags, derived caches, and restart-persistent web session tokens. Other local users on the same machine cannot read it under normal Unix permissions, but copied DB files and downloaded DB backups remain sensitive.
 - `cookies.txt`: not auto-chmodded because the user pastes / file-picks it in, and our `write_cookies()` uses `std::fs::write` which respects the user's umask. **Recommendation in README:** `chmod 600 cookies.txt` after import. (Tracking issue for future automation.)
 
 ### ⚠️ Job log echoes yt-dlp stderr verbatim
@@ -164,7 +169,7 @@ root, at which point they own the data anyway. Accepted.
 | Optional HTTP password auth | ✅ added (Argon2 + sessions + rate limit) |
 | Filter yt-dlp stderr | ⚠️ still echoed (accepted) |
 | chmod 600 on cookies.txt | ⚠️ documented; not automated |
-| chmod 600 on yt-offline.db | ✅ added (`Database::open`) |
+| chmod 600 on catacomb.db | ✅ added (`Database::open`) |
 | Session token TTL + GC | ✅ added |
 | `Secure` cookie flag for HTTPS | ✅ added (gated on `X-Forwarded-Proto`) |
 | Login rate limiting | ✅ added (5 / 60 s per IP) |
@@ -194,6 +199,13 @@ These are nice-to-haves; none are blocking the current deployment.
 7. **TLS terminator in-process.** Optional `rustls` integration so the
    app can serve HTTPS without a reverse proxy. Currently considered
    out of scope.
+8. **Hash persisted session tokens or sanitize DB backups.** The current
+   `sessions` table stores bearer tokens so restart-safe sessions work; a
+   copied DB backup can therefore carry live web sessions until logout,
+   password change, or TTL expiry.
+9. **Optional at-rest DB encryption.** Tracked as a Phase 4 design item,
+   not an active hardening requirement. It needs key-management, migration,
+   backup/restore, and packaging decisions.
 
 ---
 

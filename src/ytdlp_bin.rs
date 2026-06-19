@@ -4,13 +4,13 @@
 //! app invokes its own yt-dlp instead of whatever's on PATH. To get the
 //! full feature set — most importantly `curl_cffi`-backed `--impersonate`
 //! support — we install yt-dlp into a self-contained Python virtualenv
-//! under `~/.local/share/yt-offline/venv/`. A bundled `deno` lives at
-//! `~/.local/share/yt-offline/bin/deno` so yt-dlp can evaluate the
+//! under `~/.local/share/catacomb/venv/`. A bundled `deno` lives at
+//! `~/.local/share/catacomb/bin/deno` so yt-dlp can evaluate the
 //! JavaScript signature-deciphering code YouTube serves with the player.
 //!
 //! Layout:
 //! ```text
-//! ~/.local/share/yt-offline/
+//! ~/.local/share/catacomb/
 //!   bin/                 ← prepended to PATH so yt-dlp finds deno
 //!     deno
 //!   venv/
@@ -30,7 +30,7 @@ pub fn bundled_root() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local").join("share").join("yt-offline")
+    home.join(".local").join("share").join("catacomb")
 }
 
 /// Directory holding non-Python binaries (currently just `deno`). Also the

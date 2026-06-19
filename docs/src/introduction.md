@@ -1,4 +1,4 @@
-# yt-offline
+# Catacomb
 
 A self-hosted media archive for YouTube and friends. Paste any URL, it
 routes the download to the right folder by source, tracks what you've
@@ -24,7 +24,7 @@ single binary that is **both** a desktop app and a headless web server.
 ## Why it exists
 
 Tartube is the mature open-source yt-dlp GUI and the benchmark in this
-space. yt-offline matches its feature set while adding things Tartube
+space. catacomb matches its feature set while adding things Tartube
 doesn't have: a real web UI reachable from any device, a single-binary
 distribution with a bundled toolchain, a modern security model
 (password-gated UI, Argon2, rate-limited login), a built-in anti-bot

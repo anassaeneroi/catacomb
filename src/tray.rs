@@ -62,14 +62,14 @@ struct TrayModel {
 #[cfg(target_os = "linux")]
 impl ksni::Tray for TrayModel {
     fn id(&self) -> String {
-        "yt-offline".into()
+        "Catacomb".into()
     }
     fn title(&self) -> String {
-        "yt-offline".into()
+        "Catacomb".into()
     }
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "yt-offline".into(),
+            title: "Catacomb".into(),
             description: "Self-hosted archive for YouTube + friends".into(),
             ..Default::default()
         }
@@ -92,7 +92,7 @@ impl ksni::Tray for TrayModel {
         use ksni::menu::StandardItem;
         vec![
             StandardItem {
-                label: "Show yt-offline".into(),
+                label: "Show Catacomb".into(),
                 activate: Box::new(|m: &mut Self| {
                     let _ = m.tx.send(TrayEvent::Show);
                 }),
@@ -153,7 +153,7 @@ pub fn start(icon_png_bytes: &[u8]) -> Option<TrayHandle> {
     };
 
     std::thread::Builder::new()
-        .name("yt-offline-tray".into())
+        .name("catacomb-tray".into())
         .spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()

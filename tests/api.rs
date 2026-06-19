@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 
 /// Absolute path to the binary under test (set by Cargo for integration
 /// tests of a crate that builds a binary).
-const BIN: &str = env!("CARGO_BIN_EXE_yt-offline");
+const BIN: &str = env!("CARGO_BIN_EXE_catacomb");
 
 /// True if `curl` is usable; the tests no-op otherwise so a machine
 /// without curl doesn't show spurious failures.
@@ -32,7 +32,7 @@ fn have_ffmpeg() -> bool {
         .status().map(|s| s.success()).unwrap_or(false)
 }
 
-/// A running `yt-offline --web` child against a scratch dir. Killed and
+/// A running `catacomb --web` child against a scratch dir. Killed and
 /// its dir removed on drop.
 struct Server {
     child: Child,
@@ -59,7 +59,7 @@ impl Server {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn yt-offline --web");
+            .expect("spawn catacomb --web");
         let s = Server { child, port, dir };
         s.wait_ready();
         s
@@ -176,7 +176,7 @@ fn index_and_library_served() {
 
     let (code, body) = s.get("/");
     assert_eq!(code, 200, "GET / should serve the SPA");
-    assert!(body.contains("yt-offline"), "index should mention yt-offline");
+    assert!(body.contains("Catacomb"), "index should mention Catacomb");
 
     let (code, body) = s.get("/api/library");
     assert_eq!(code, 200);

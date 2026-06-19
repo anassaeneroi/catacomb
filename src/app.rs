@@ -392,7 +392,7 @@ impl App {
         // Open the DB first so the library scanner can use info_cache to
         // skip re-parsing unchanged info.json sidecars. Cold start still
         // pays full cost; every subsequent launch is faster.
-        let db_path = channels_root.join("yt-offline.db");
+        let db_path = channels_root.join("catacomb.db");
         let db = Database::open(&db_path)
             .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory db failed"));
         // Defer the (potentially multi-minute, disk-bound) library scan +
@@ -409,7 +409,7 @@ impl App {
             let channels_root = channels_root.clone();
             let ctx = cc.egui_ctx.clone();
             std::thread::Builder::new()
-                .name("yt-offline-libscan".into())
+                .name("catacomb-libscan".into())
                 .spawn(move || {
                     let mut library = library::scan_channels_with_cache(&channels_root, Some(&db));
                     // Hydrate per-channel download options + folder assignments
@@ -493,7 +493,7 @@ impl App {
             let tx = thumb_result_tx.clone();
             let ctx = cc.egui_ctx.clone();
             std::thread::Builder::new()
-                .name(format!("yt-offline-thumb-{worker_id}"))
+                .name(format!("catacomb-thumb-{worker_id}"))
                 .spawn(move || {
                     loop {
                         // Hold the lock only for the recv itself; release
@@ -1185,7 +1185,7 @@ impl App {
             self.status = "Play this video first, then click a line to seek".into();
             return;
         }
-        let sock = format!("/tmp/yt-offline-{id}.sock");
+        let sock = format!("/tmp/catacomb-{id}.sock");
         match UnixStream::connect(&sock) {
             Ok(mut s) => {
                 let cmd = format!("{{\"command\":[\"seek\",{secs},\"absolute\"]}}\n");
@@ -1216,7 +1216,7 @@ impl App {
         let use_mpv_ipc = exe == "mpv" || exe == "mpv.exe";
 
         #[cfg(unix)]
-        let sock_path = format!("/tmp/yt-offline-{video_id}.sock");
+        let sock_path = format!("/tmp/catacomb-{video_id}.sock");
 
         let mut child_cmd = Command::new(&cmd);
 
@@ -1415,7 +1415,7 @@ impl App {
                 format!("Download failed: {label}")
             };
             let _ = notify_rust::Notification::new()
-                .summary("yt-offline")
+                .summary("Catacomb")
                 .body(&summary)
                 .timeout(notify_rust::Timeout::Milliseconds(4000))
                 .show();
@@ -1430,7 +1430,7 @@ impl App {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.heading("yt-offline");
+                ui.heading("Catacomb");
                 ui.separator();
                 ui.label("🔍");
                 ui.add(
@@ -2481,7 +2481,7 @@ impl App {
                 ui.heading("🌐 Remote libraries");
             });
             ui.label(egui::RichText::new(
-                "Browse another yt-offline instance read-only. Playback streams from the peer.")
+                "Browse another Catacomb instance read-only. Playback streams from the peer.")
                 .weak().small());
             ui.separator();
             ui.horizontal_wrapped(|ui| {
@@ -3234,7 +3234,7 @@ impl App {
                             ui.radio_value(&mut self.config.backup.use_bundled_ytdlp, false, "System")
                                 .on_hover_text("Use whatever yt-dlp is on PATH.");
                             ui.radio_value(&mut self.config.backup.use_bundled_ytdlp, true, "Bundled")
-                                .on_hover_text("Use the yt-dlp + deno installed under ~/.local/share/yt-offline/bin/.");
+                                .on_hover_text("Use the yt-dlp + deno installed under ~/.local/share/catacomb/bin/.");
                             let installed = crate::ytdlp_bin::bundled_installed();
                             let btn_label = if installed { "Update" } else { "Install" };
                             if ui.button(btn_label)
@@ -3559,7 +3559,7 @@ impl App {
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(
-                        "Saves a copy of yt-offline.db (watched / favourites / bookmarks / \
+                        "Saves a copy of catacomb.db (watched / favourites / bookmarks / \
                          waiting / channel-options / folders). Restore by copying it back \
                          into your channels directory before launch.",
                     )
@@ -3572,7 +3572,7 @@ impl App {
                         // cookies file-picker pattern.
                         let tx = self.backup_save_tx.clone();
                         let default_name = format!(
-                            "yt-offline-{}.db",
+                            "catacomb-{}.db",
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_secs()).unwrap_or(0),
@@ -4517,9 +4517,9 @@ impl eframe::App for App {
                 Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
             }
         }
-        // User picked a backup destination — copy yt-offline.db there.
+        // User picked a backup destination — copy catacomb.db there.
         while let Ok(dest) = self.backup_save_rx.try_recv() {
-            let src = self.channels_root.join("yt-offline.db");
+            let src = self.channels_root.join("catacomb.db");
             match std::fs::copy(&src, &dest) {
                 Ok(bytes) => self.status = format!(
                     "Backup saved ({} → {})",

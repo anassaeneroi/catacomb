@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn renders_valid_rss() {
         let feed = Feed {
-            title: "yt-offline — Demo & co".into(),
+            title: "catacomb — Demo & co".into(),
             description: "archive".into(),
             link: "http://host/".into(),
             items: vec![FeedItem {
@@ -232,7 +232,7 @@ mod tests {
         };
         let xml = render(&feed);
         assert!(xml.starts_with("<?xml"));
-        assert!(xml.contains("<title>yt-offline — Demo &amp; co</title>"));
+        assert!(xml.contains("<title>catacomb — Demo &amp; co</title>"));
         assert!(xml.contains("<title>Episode &lt;1&gt;</title>"));
         assert!(xml.contains(r#"<enclosure url="http://host/files/channels/Demo/a.mkv" length="12345" type="video/x-matroska"/>"#));
         assert!(xml.contains("<itunes:duration>1:05</itunes:duration>"));

@@ -9,7 +9,7 @@ configuration surface lives at [`docs/tartube-spec.md`](docs/tartube-spec.md);
 it's what the Phase 1 parity work traced back to.
 
 Tartube is the mature open-source yt-dlp GUI and the obvious benchmark for a
-project in this space. yt-offline has architectural advantages Tartube can't
+project in this space. catacomb has architectural advantages Tartube can't
 catch up on quickly (Rust + axum + a real web UI + bundled toolchain + a
 modern security model). **As of 2026-06 we're at feature parity** — every
 Tartube subsystem is matched or led; the remaining gap is years-of-edge-
@@ -78,17 +78,19 @@ Every Phase 2 item is now done — 2.1 / 2.2 shipped alongside 2.3 / 2.4 /
 
 ### 2.1 Integration test coverage — DONE
 
-98 unit tests cover parsers/helpers/resolvers; `tests/api.rs` adds 7
-end-to-end tests that spawn the **real** `--web` binary against a scratch
-tempdir and drive the HTTP API with curl (index/library serving, ETag
-304, settings round-trip + persistence, folders CRUD + cycle guard, notes
-round-trip, channel-options round-trip + clear, DB backup). Each test
-gets its own server/port/tempdir, so they run in parallel — `cargo test`
-runs the lot. (A `.forgejo/workflows/test.yml` CI definition exists, but
-Codeberg executes Woodpecker, not Forgejo Actions, so it's inert there
-without a self-hosted runner; tests run locally.) Stretch left: a
-recorded-fixture corpus for the download pipeline and a headless web-UI
-test.
+128 passing unit tests cover parsers/helpers/resolvers, plus one ignored
+real-ffmpeg fingerprint check for opt-in local validation. `tests/api.rs`
+adds 11 end-to-end tests that spawn the **real** `--web` binary against a
+scratch tempdir and drive the HTTP API with curl (index/library serving,
+ETag 304, settings round-trip + persistence, folders CRUD + cycle guard,
+notes round-trip, channel-options round-trip + clear, DB backup, full-text
+search, podcast/feed-token auth, RSS enclosures, and perceptual dedup).
+Each test gets its own server/port/tempdir, so they run in parallel —
+`cargo test --release` runs the lot. (A `.forgejo/workflows/test.yml` CI
+definition exists, but Codeberg executes Woodpecker, not Forgejo Actions,
+so it's inert there without a self-hosted runner; tests run locally.)
+Stretch left: a recorded-fixture corpus for the download pipeline,
+a restart-persistent-session regression test, and a headless web-UI test.
 
 ### 2.2 Documentation site — DONE
 
@@ -130,10 +132,10 @@ Once we're at parity, we push past Tartube on its own ground.
 
 **Windows is now a shippable artifact.** `cargo build --release --target
 x86_64-pc-windows-gnu` doesn't just check — it *links* a working 22 MB
-`yt-offline.exe` via mingw-w64 (only the upstream egui `f32: From<f64>`
+`catacomb.exe` via mingw-w64 (only the upstream egui `f32: From<f64>`
 warnings). `scripts/package.sh win` (and `all`, when the cross toolchain
 is present) cross-compiles and bundles it into
-`yt-offline-<ver>-x86_64-windows.zip` (exe + LICENSE + a README listing
+`catacomb-<ver>-x86_64-windows.zip` (exe + LICENSE + a README listing
 the yt-dlp/ffmpeg/mpv PATH deps). The Forgejo release workflow installs
 `mingw-w64` + `zip` + the rust target so a tag push produces the Windows
 zip alongside the Linux packages — all from the one Linux container, no
@@ -156,7 +158,7 @@ Linux; `disk_space` (`statvfs`), `plex` (symlinks, with a Windows
 
 **macOS has a packaging path, pending the toolchain.** `scripts/package.sh
 mac` cross-compiles an Apple target (`MAC_ARCH=arm64` default, or
-`x86_64`) via osxcross, assembles an unsigned `yt-offline.app`
+`x86_64`) via osxcross, assembles an unsigned `catacomb.app`
 (`Info.plist` + Mach-O + best-effort `.icns`), and zips it. The crypto
 stack is `ring`, which builds against the osxcross SDK fine. It's gated on
 the operator having osxcross built with a macOS SDK on PATH (the SDK comes
@@ -245,15 +247,47 @@ surfaced as a 🔍 search in both UIs. Plus a searchable, click-to-seek
 current line) and a floating desktop window that seeks mpv over IPC —
 backed by a shared `vtt` WebVTT/SRT parser.
 
-## Phase 4 — Stretch / blue-sky
+## Phase 4 — Long-Horizon Bets
 
-Probably never, or much later.
+Phase 4 is where bigger strategic bets live after Phase 3's "surpass"
+work is banked. These are not required for the current product to be
+healthy; they either change the deployment model, add a new consumption
+surface, or raise the security/privacy bar enough to deserve their own
+design pass.
 
-- A web UI built around a "TV mode" remote-friendly layout.
-- AI summarisation of videos (transcript → bullet points).
-- Multi-user accounts with per-user watched/positions (currently single-user).
-- Integration with Plex / Jellyfin / Kodi as a *source plugin* rather than a
-  symlink generator.
+### 4.1 Living-room mode
+
+A remote-friendly web UI for couch/TV use: large focus states, D-pad
+navigation, queue/playlist controls, "continue watching" as the default
+view, and no dense maintenance/settings chrome.
+
+### 4.2 Local intelligence over the archive
+
+Transcript-derived summaries, topic extraction, "find the clip where..."
+search, and maybe offline embedding indexes. This should stay optional and
+local-first; no cloud dependency should become required for normal archive
+use.
+
+### 4.3 Multi-user library state
+
+Per-user watched state, resume positions, flags, notes, and maybe
+permissions. This is a schema/auth redesign, not a bolt-on setting, because
+the app is currently intentionally single-user.
+
+### 4.4 At-rest privacy hardening
+
+Encrypted `catacomb.db` or encrypted backups. This likely means SQLCipher
+or an export/import backup format, plus key management, migration from
+plaintext DBs, and packaging validation across Linux/Windows/macOS. Until
+that design exists, the DB remains plain SQLite protected by filesystem
+permissions.
+
+### 4.5 Media-server integration as a real source
+
+Plex / Jellyfin / Kodi integration as a plugin/source surface rather than
+only a symlink/NFO generator. The goal would be first-class browsing and
+playback integration without making the archive layout depend on one media
+server's conventions.
 
 ## Recently shipped (highlights)
 
@@ -263,6 +297,13 @@ Roughly reverse-chronological. Items that closed out a roadmap line.
   `start=` offset and the web player uses custom controls for live ffmpeg
   streams, so MKV/H.264 transcode mode can scrub, resume, jump chapters,
   and sync transcript highlights even though the pipe has no byte ranges.
+- **Unified web video player** — direct `/files/` playback and live
+  `/api/transcode/` streams now share one custom player with speed control,
+  caption toggle, keyboard seeking, PiP, fullscreen, saved volume/speed, and
+  chapter ticks.
+- **Restart-safe web sessions** — login tokens are mirrored into SQLite and
+  rehydrated at startup, so a server restart or upgrade no longer logs out
+  active browsers; password changes and logout still clear sessions.
 - **Federation / multi-host** (3.5) — read-only peer libraries with
   tokenized direct media URLs, so videos stream from the peer rather than
   proxying through this instance.
@@ -345,7 +386,10 @@ Roughly reverse-chronological. Items that closed out a roadmap line.
   search + transcript tooling (3.9), and the **Windows** half of 3.1
   (cross-compiled .zip + release CI). Still open: a **macOS** binary
   (3.1; needs a Mac runner), Android (3.2), and plugin hooks (3.8).
-- **Phase 4** items might be valuable, but commit to nothing.
+- **Phase 4** is reserved for bigger future bets: living-room mode, local
+  archive intelligence, multi-user state, at-rest privacy hardening, and
+  deeper media-server integration. Treat these as design projects, not
+  quick backlog items.
 
 Items inside a phase are loosely ordered by user-visible impact, not strict
 prerequisite. With Windows banked, the highest-leverage remaining moves are

@@ -1,6 +1,6 @@
-# yt-offline
+# Catacomb
 
-![yt-offline icon](icon.png)
+![catacomb icon](icon.png)
 
 A self-hosted media archive for YouTube and friends. Pastes any URL, routes it
 to the right folder by source, tracks what you've watched, and lets you play
@@ -9,7 +9,7 @@ the source video has been taken down.
 
 Built on [yt-dlp](https://github.com/yt-dlp/yt-dlp); written in Rust.
 
-📖 **Documentation:** <https://anassaeneroi.codeberg.page/yt-offline/> — setup,
+📖 **Documentation:** <https://anassaeneroi.codeberg.page/catacomb/> — setup,
 first run, the anti-bot stack, troubleshooting, and architecture.
 
 ## What it backs up
@@ -65,10 +65,11 @@ exact URL to refresh from.
 - **Desktop GUI** launches your configured player (mpv by default; mpv gets
   resume-position tracking via JSON-IPC). A floating **transcript window**
   lets you search the subtitles and click any line to seek the running mpv.
-- **Web UI** plays videos inline in any browser, with subtitle tracks, a
-  **chapters** panel, and a searchable **transcript** pane — click any line
-  to seek, and the current line highlights as the video plays. Optional
-  on-the-fly **ffmpeg transcoding** for browsers that can't decode MKV.
+- **Web UI** plays videos inline in any browser with one custom player for
+  direct files and transcoded streams: speed control, caption toggle,
+  keyboard seeking, PiP, fullscreen, saved volume/speed, a **chapters**
+  panel, and a searchable **transcript** pane. Optional on-the-fly
+  **ffmpeg transcoding** covers browsers that can't decode MKV.
 - **Comment viewer** (web) — for videos archived with comments: threaded
   with collapse/expand, in-comment search, sort (top / newest / oldest), an
   uploader badge, and a "new since last visit" highlight.
@@ -111,12 +112,13 @@ exact URL to refresh from.
 - **9-class error classifier** — every failure gets a one-line suggested fix
   (rate-limited, members-only, geoblocked, bad cookies, codec missing, disk
   full, …) shown in both UIs.
-- **Crash log** — any thread panic is appended to `yt-offline.crash.log`
+- **Crash log** — any thread panic is appended to `catacomb.crash.log`
   next to the database, so a GUI launched without a terminal still leaves a
   trace.
 - **Library backup & restore** — download a snapshot of the SQLite database;
   restore does a schema-validated, idempotent merge (watched / positions /
-  flags / folders / notes).
+  flags / folders / notes). The DB is plain SQLite, so treat backups as
+  sensitive.
 - Poison-recovering locks keep one handler's panic from taking down the
   long-running web server.
 
@@ -127,8 +129,8 @@ exact URL to refresh from.
 - **Bind interface picker** — localhost only (default), Tailscale, LAN, or
   all interfaces.
 - **Password-gated UI** when enabled — Argon2 hashed, 256-bit session
-  tokens, 30-day TTL with lazy pruning, per-IP rate-limit on `/api/login`
-  (5 failures → 60s lockout).
+  tokens persisted across restarts, 30-day TTL with lazy pruning, per-IP
+  rate-limit on `/api/login` (5 failures → 60s lockout).
 - **Security headers:** Content-Security-Policy, X-Frame-Options DENY,
   X-Content-Type-Options nosniff, Referrer-Policy no-referrer.
 - **`Secure` cookie flag** when `X-Forwarded-Proto: https` is present
@@ -166,15 +168,15 @@ plus three Emo/Scene flavours (Nocturnal, Coffin, Scene Queen).
 ## Quick start
 
 ```bash
-git clone https://codeberg.org/anassaeneroi/yt-offline
-cd yt-offline
+git clone https://codeberg.org/anassaeneroi/catacomb
+cd catacomb
 cargo build --release
 
 # Desktop GUI
-./target/release/yt-offline
+./target/release/catacomb
 
 # Or web server only (headless)
-./target/release/yt-offline --web 8080
+./target/release/catacomb --web 8080
 ```
 
 On first run a `config.toml` is created in the working directory. Settings
@@ -184,8 +186,8 @@ can also be changed from inside either UI — no manual editing required.
 
 1. Open **Settings**.
 2. Under **yt-dlp binary**, choose **Bundled** and click **Install**.
-3. The installer creates `~/.local/share/yt-offline/venv/` with
-   `yt-dlp[default]` + `curl_cffi`, plus `~/.local/share/yt-offline/bin/deno`.
+3. The installer creates `~/.local/share/catacomb/venv/` with
+   `yt-dlp[default]` + `curl_cffi`, plus `~/.local/share/catacomb/bin/deno`.
    Progress streams into a regular job entry.
 
 Updates are the same button. Switching to **System** uses whatever `yt-dlp`
@@ -197,8 +199,8 @@ is on PATH instead.
 
 ```bash
 sudo pacman -S --needed rust mpv  # python3 + python-pip already present
-git clone https://codeberg.org/anassaeneroi/yt-offline
-cd yt-offline
+git clone https://codeberg.org/anassaeneroi/catacomb
+cd catacomb
 makepkg -si           # or: cargo build --release
 ```
 
@@ -236,8 +238,8 @@ Tools with the **Desktop development with C++** workload, then:
 
 ```powershell
 winget install mpv.net python.python.3.12
-git clone https://codeberg.org/anassaeneroi/yt-offline
-cd yt-offline
+git clone https://codeberg.org/anassaeneroi/catacomb
+cd catacomb
 cargo build --release
 ```
 
@@ -276,7 +278,7 @@ interval_hours = 24
 port       = 8080
 bind       = "127.0.0.1"   # 127.0.0.1 | 0.0.0.0 | a Tailscale/LAN address
 transcode  = false          # MKV → MP4 on the fly for browsers (needs ffmpeg)
-source_url = "https://codeberg.org/anassaeneroi/yt-offline"  # AGPL §13 footer link
+source_url = "https://codeberg.org/anassaeneroi/catacomb"  # AGPL §13 footer link
 
 [plex]
 library_path = "/path/to/plex/TV/youtube"   # leave unset to disable
@@ -342,7 +344,7 @@ the session cookie is HttpOnly + SameSite=Strict, valid 30 days.
 ├── music/
 │   └── <artist>/
 │       └── Track Title [xyz].opus
-└── yt-offline.db                ← watched + positions + password hash
+└── catacomb.db                ← plain SQLite app state (watched, positions, password hash, sessions, caches)
 ```
 
 ## Troubleshooting
@@ -360,7 +362,7 @@ switch to **Bundled** in Settings.
 Sessions cleared after the password was changed. Refresh the page.
 
 **Videos play but seeking is approximate**
-That's usually transcoding mode (`web.transcode = true`). yt-offline can
+That's usually transcoding mode (`web.transcode = true`). catacomb can
 scrub those live ffmpeg streams by re-requesting the stream at a `start=`
 offset, but ffmpeg's fast seek lands on a nearby keyframe rather than an
 exact byte position. Turn transcoding off if your browser can play the

@@ -42,7 +42,7 @@ jobs:
       - name: Add Windows cross-compile target
         # package.sh's `all` only builds the Windows zip when this target +
         # mingw + zip are all present (win_available), so this step is what
-        # opts the release build into producing yt-offline-*-x86_64-windows.zip.
+        # opts the release build into producing catacomb-*-x86_64-windows.zip.
         run: rustup target add x86_64-pc-windows-gnu
 
       - name: Cache cargo registry + build
@@ -87,7 +87,7 @@ jobs:
             - `.deb` — Debian / Ubuntu / Mint
             - `.rpm` — Fedora / RHEL / openSUSE
             - `.AppImage` — any Linux (chmod +x and run)
-            - `-x86_64-windows.zip` — Windows 10/11 (unzip, run yt-offline.exe)
+            - `-x86_64-windows.zip` — Windows 10/11 (unzip, run catacomb.exe)
 
             Runtime requirements: yt-dlp, ffmpeg, mpv on PATH (plus
             xdg-utils on Linux). The Windows zip's README lists the same.

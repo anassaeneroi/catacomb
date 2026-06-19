@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn is_within_accepts_inside_path() {
-        let tmp = std::env::temp_dir().join("yt-offline-iw-test-1");
+        let tmp = std::env::temp_dir().join("catacomb-iw-test-1");
         let _ = fs::create_dir_all(&tmp);
         let inside = tmp.join("foo.txt");
         let _ = fs::write(&inside, "x");
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn is_within_rejects_outside_path() {
-        let tmp = std::env::temp_dir().join("yt-offline-iw-test-2");
+        let tmp = std::env::temp_dir().join("catacomb-iw-test-2");
         let _ = fs::create_dir_all(&tmp);
         // The target's parent canonicalises to /tmp, which doesn't start with tmp.
         let outside = std::env::temp_dir().join("not-our-dir-xyz.txt");
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn is_within_handles_missing_target() {
         // Target doesn't exist; parent dir does and is inside root.
-        let tmp = std::env::temp_dir().join("yt-offline-iw-test-3");
+        let tmp = std::env::temp_dir().join("catacomb-iw-test-3");
         let _ = fs::create_dir_all(&tmp);
         let ghost = tmp.join("does-not-exist.txt");
         assert!(is_within(&tmp, &ghost));

@@ -728,6 +728,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "catacomb"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "axum",
+ "eframe",
+ "image",
+ "ksni",
+ "libc",
+ "notify-rust",
+ "r2d2",
+ "r2d2_sqlite",
+ "rand 0.8.6",
+ "reqwest",
+ "rfd",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tower-http 0.5.2",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5406,33 +5433,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "synstructure",
-]
-
-[[package]]
-name = "yt-offline"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "axum",
- "eframe",
- "image",
- "ksni",
- "libc",
- "notify-rust",
- "r2d2",
- "r2d2_sqlite",
- "rand 0.8.6",
- "reqwest",
- "rfd",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "toml",
- "tower-http 0.5.2",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

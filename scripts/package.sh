@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build distributable packages for yt-offline.
+# Build distributable packages for catacomb.
 #
 # Usage:
 #   scripts/package.sh [deb|rpm|appimage|win|mac|all]
@@ -23,7 +23,7 @@
 # macOS notes: cross-compiling for Apple targets needs osxcross
 # (https://github.com/tpoechtrager/osxcross) built with a macOS SDK, and its
 # wrapper compilers (oa64-clang / o64-clang) on PATH. Set MAC_ARCH=arm64
-# (default) or x86_64. The result is an unsigned yt-offline.app inside a .zip;
+# (default) or x86_64. The result is an unsigned catacomb.app inside a .zip;
 # it is *not* codesigned or notarized, so on the target Mac it must be opened
 # via right-click → Open (or `xattr -dr com.apple.quarantine`) the first time.
 # See docs/PACKAGING.md.
@@ -39,7 +39,7 @@ mkdir -p "$DIST" "$TOOLS"
 
 # Pull version + name straight from Cargo.toml so packages stay in sync.
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-PKG="yt-offline"
+PKG="catacomb"
 ARCH="$(uname -m)"
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -124,9 +124,9 @@ build_appimage() {
     mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" "$appdir/usr/share/icons/hicolor/256x256/apps"
 
     install -Dm755 "target/release/$PKG" "$appdir/usr/bin/$PKG"
-    install -Dm644 youtube-backup.desktop "$appdir/usr/share/applications/$PKG.desktop"
+    install -Dm644 catacomb.desktop "$appdir/usr/share/applications/$PKG.desktop"
     # AppImage wants the desktop file + icon at the AppDir root too.
-    cp youtube-backup.desktop "$appdir/$PKG.desktop"
+    cp catacomb.desktop "$appdir/$PKG.desktop"
     install -Dm644 icon.png "$appdir/usr/share/icons/hicolor/256x256/apps/$PKG.png"
     cp icon.png "$appdir/$PKG.png"
 
@@ -134,7 +134,7 @@ build_appimage() {
     cat > "$appdir/AppRun" <<'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "${0}")")"
-exec "$HERE/usr/bin/yt-offline" "$@"
+exec "$HERE/usr/bin/catacomb" "$@"
 APPRUN
     chmod +x "$appdir/AppRun"
 
@@ -185,14 +185,14 @@ build_win() {
     install -m755 "$exe" "$staging/$PKG.exe"
     install -m644 LICENSE "$staging/LICENSE.txt"
     cat > "$staging/README.txt" <<README
-yt-offline ${VERSION} — Windows build
+Catacomb ${VERSION} — Windows build
 
-Run the GUI by double-clicking yt-offline.exe.
+Run the GUI by double-clicking catacomb.exe.
 
 To run the headless web server, open PowerShell or Command Prompt in this
 folder and run:
 
-    .\\yt-offline.exe --web 8080
+    .\\catacomb.exe --web 8080
 
 then browse to http://localhost:8080. (Launched from a terminal the server
 prints its logs to that terminal; double-clicked it runs windowless.)
@@ -231,7 +231,7 @@ win_available() {
 }
 
 # ── macOS .app .zip (cross-compiled via osxcross) ────────────────────────────
-# Builds an unsigned yt-offline.app for one Apple arch (MAC_ARCH=arm64 default,
+# Builds an unsigned catacomb.app for one Apple arch (MAC_ARCH=arm64 default,
 # or x86_64) and zips it. Requires osxcross's wrapper compilers on PATH; the
 # crypto stack is `ring`, which cross-builds against osxcross's SDK fine. Like
 # the other formats we don't bundle yt-dlp/ffmpeg/mpv — the .app's README and
@@ -322,9 +322,9 @@ build_mac() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>            <string>yt-offline</string>
-    <key>CFBundleDisplayName</key>     <string>yt-offline</string>
-    <key>CFBundleIdentifier</key>      <string>org.codeberg.yt-offline</string>
+    <key>CFBundleName</key>            <string>Catacomb</string>
+    <key>CFBundleDisplayName</key>     <string>Catacomb</string>
+    <key>CFBundleIdentifier</key>      <string>org.codeberg.catacomb</string>
     <key>CFBundleVersion</key>         <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key> <string>${VERSION}</string>
     <key>CFBundleExecutable</key>      <string>${PKG}</string>

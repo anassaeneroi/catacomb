@@ -1,9 +1,9 @@
-//! yt-offline — desktop and web app for archiving YouTube content with yt-dlp.
+//! catacomb — desktop and web app for archiving YouTube content with yt-dlp.
 //!
 //! # Usage
 //!
-//! * **GUI mode** (default): `yt-offline`
-//! * **Web mode**: `yt-offline --web [PORT]` — starts a headless HTTP server
+//! * **GUI mode** (default): `catacomb`
+//! * **Web mode**: `catacomb --web [PORT]` — starts a headless HTTP server
 //!   on the configured port (default 8080).
 //!
 //! Configuration is read from `config.toml` in the current working directory.
@@ -60,7 +60,7 @@ fn renderer_from_args(args: &[String]) -> eframe::Renderer {
     if requested.is_some() {
         renderer_from_name(requested)
     } else {
-        let env_renderer = std::env::var("YT_OFFLINE_RENDERER").ok();
+        let env_renderer = std::env::var("CATACOMB_RENDERER").ok();
         renderer_from_name(env_renderer.as_deref())
     }
 }
@@ -90,6 +90,33 @@ fn attach_windows_console() {
 #[cfg(not(windows))]
 fn attach_windows_console() {}
 
+/// Adopt the pre-rename `yt-offline` data paths under the new `catacomb` names
+/// so the rename doesn't strand an existing library or bundled toolchain.
+/// Best-effort: only renames when the new path is absent and the old one still
+/// exists, so it's a no-op on fresh installs and after the first migrated run.
+fn migrate_legacy_paths(channels_root: &std::path::Path) {
+    fn adopt(old: std::path::PathBuf, new: std::path::PathBuf) {
+        if !new.exists() && old.exists() {
+            match std::fs::rename(&old, &new) {
+                Ok(()) => eprintln!("migrated {} → {}", old.display(), new.display()),
+                Err(e) => eprintln!("warning: could not migrate {} → {}: {e}", old.display(), new.display()),
+            }
+        }
+    }
+    // SQLite DB plus its WAL/SHM sidecars (if any), in the library root.
+    for suffix in ["", "-wal", "-shm"] {
+        adopt(
+            channels_root.join(format!("yt-offline.db{suffix}")),
+            channels_root.join(format!("catacomb.db{suffix}")),
+        );
+    }
+    // Bundled venv + binaries under the XDG data dir.
+    if let Some(home) = std::env::var_os("HOME") {
+        let share = std::path::PathBuf::from(home).join(".local").join("share");
+        adopt(share.join("yt-offline"), share.join("catacomb"));
+    }
+}
+
 fn main() -> eframe::Result<()> {
     attach_windows_console();
 
@@ -103,6 +130,11 @@ fn main() -> eframe::Result<()> {
     let cfg_path = cwd.join("config.toml");
     let mut cfg = config::Config::load(&cfg_path)
         .unwrap_or_else(|_| config::Config::default_with_dir(cwd.join("channels")));
+
+    // One-time adoption of the pre-rename `yt-offline` data paths so existing
+    // installs keep their library + bundled toolchain after the rename to
+    // Catacomb. Runs before anything opens the DB or the venv.
+    migrate_legacy_paths(&cfg.backup.directory);
 
     // Install the persistent panic logger. Logs go alongside the SQLite
     // database; the parent of channels_root is the same "library root"
@@ -137,16 +169,16 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([800.0, 500.0])
-            .with_title("yt-offline"),
+            .with_title("Catacomb"),
         // Default to wgpu (Vulkan): the glow/OpenGL path crashes on some
         // NVIDIA + Wayland maximizes (Glutin EGL_BAD_ALLOC). Keep a launch
         // escape hatch for systems where Vulkan/wgpu opens a blank window:
-        // `YT_OFFLINE_RENDERER=glow yt-offline` or `yt-offline --renderer glow`.
+        // `CATACOMB_RENDERER=glow catacomb` or `catacomb --renderer glow`.
         renderer: renderer_from_args(&args),
         ..Default::default()
     };
     eframe::run_native(
-        "yt-offline",
+        "Catacomb",
         native_options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc, tray)))),
     )
@@ -182,7 +214,7 @@ mod tests {
     #[test]
     fn renderer_arg_overrides_env_parser_path() {
         let args = vec![
-            "yt-offline".to_string(),
+            "Catacomb".to_string(),
             "--renderer".to_string(),
             "gl".to_string(),
         ];

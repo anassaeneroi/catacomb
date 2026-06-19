@@ -2,7 +2,7 @@
 
 A structured analysis of [Tartube v2.5.231](https://github.com/axcore/tartube)
 (2026-05-24), our project's primary feature benchmark. Written to give
-yt-offline a concrete target to work toward — every section ends with a
+catacomb a concrete target to work toward — every section ends with a
 "What we can do" note about whether to adopt, adapt, or skip.
 
 Tartube codebase: ~146,000 lines of Python 3 across 19 modules under
@@ -452,7 +452,7 @@ The 791 boolean flags in `mainapp.py` cover all of these plus their
 **What we can do:** A handful of these tabs map to features we
 literally don't have (FFmpeg presets, comments, profiles, scheduling
 calendar). They're roadmap items, not config surface. The actual
-*configuration surface* of yt-offline is currently:
+*configuration surface* of Catacomb is currently:
 
 - backup dir, max concurrent, bundled-or-system yt-dlp
 - player command, browser (for `--cookies-from-browser`)
@@ -568,7 +568,7 @@ For the record (to keep momentum honest):
 
 ## 12. Specification for "Tartube parity" milestone
 
-Working definition: a yt-offline release is "at Tartube parity" when
+Working definition: a catacomb release is "at Tartube parity" when
 the following are all true.
 
 - [x] **Per-target download options** with cascade resolution and a

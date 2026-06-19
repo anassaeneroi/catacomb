@@ -1467,7 +1467,7 @@ impl Downloader {
 
 impl Drop for Downloader {
     /// Tear down the bgutil-pot child if we spawned one. Without this
-    /// the server keeps running after yt-offline exits — orphaned and
+    /// the server keeps running after catacomb exits — orphaned and
     /// still bound to port 4416, blocking the next launch from
     /// re-spawning.
     fn drop(&mut self) {
@@ -1594,7 +1594,7 @@ mod tests {
 
     #[test]
     fn redact_sensitive_strips_cookie_path() {
-        let abs = "/home/luna/.config/yt-offline/cookies.txt";
+        let abs = "/home/luna/.config/catacomb/cookies.txt";
         let input = format!("Unable to load cookies from {abs}");
         let out = redact_sensitive(&input, abs);
         assert_eq!(out, "Unable to load cookies from cookies.txt");

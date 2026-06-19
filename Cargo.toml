@@ -1,5 +1,5 @@
 [package]
-name = "yt-offline"
+name = "catacomb"
 version = "0.1.0"
 edition = "2021"
 description = "Self-hosted archive for YouTube, TikTok, Twitch, Vimeo, Bandcamp, SoundCloud, Odysee and more. Desktop GUI + web UI, bundled yt-dlp with curl_cffi impersonation, Plex export, SQLite-backed resume tracking. AGPL-3.0."
@@ -97,10 +97,10 @@ priority = "optional"
 depends = "libc6, libxcb1, yt-dlp, ffmpeg, mpv, xdg-utils"
 recommends = "libnotify4"
 assets = [
-    ["target/release/yt-offline", "usr/bin/", "755"],
-    ["youtube-backup.desktop", "usr/share/applications/yt-offline.desktop", "644"],
-    ["icon.png", "usr/share/pixmaps/yt-offline.png", "644"],
-    ["README.md", "usr/share/doc/yt-offline/README.md", "644"],
+    ["target/release/catacomb", "usr/bin/", "755"],
+    ["catacomb.desktop", "usr/share/applications/catacomb.desktop", "644"],
+    ["icon.png", "usr/share/pixmaps/catacomb.png", "644"],
+    ["README.md", "usr/share/doc/catacomb/README.md", "644"],
 ]
 
 # ── Fedora / RHEL / openSUSE package (cargo-generate-rpm) ─────────────────────
@@ -113,9 +113,9 @@ license = "AGPLv3"
 # Fedora; ffmpeg lives in RPM Fusion but we still declare the dep.
 requires = { yt-dlp = "*", ffmpeg = "*", mpv = "*", "xdg-utils" = "*" }
 assets = [
-    { source = "target/release/yt-offline", dest = "/usr/bin/yt-offline", mode = "755" },
-    { source = "youtube-backup.desktop", dest = "/usr/share/applications/yt-offline.desktop", mode = "644" },
-    { source = "icon.png", dest = "/usr/share/pixmaps/yt-offline.png", mode = "644" },
-    { source = "README.md", dest = "/usr/share/doc/yt-offline/README.md", mode = "644" },
-    { source = "LICENSE", dest = "/usr/share/licenses/yt-offline/LICENSE", mode = "644" },
+    { source = "target/release/catacomb", dest = "/usr/bin/catacomb", mode = "755" },
+    { source = "catacomb.desktop", dest = "/usr/share/applications/catacomb.desktop", mode = "644" },
+    { source = "icon.png", dest = "/usr/share/pixmaps/catacomb.png", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/catacomb/README.md", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/catacomb/LICENSE", mode = "644" },
 ]

@@ -3,7 +3,7 @@
 ## Starting a download
 
 Paste any supported URL into the download bar (desktop) or the ⬇
-Downloads modal (web). yt-offline classifies the URL by platform, routes
+Downloads modal (web). catacomb classifies the URL by platform, routes
 it to the right folder, and starts yt-dlp. A channel/playlist URL pulls
 the whole thing; a single-video URL pulls just that one.
 

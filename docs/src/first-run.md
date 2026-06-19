@@ -2,7 +2,7 @@
 
 ## The config file
 
-yt-offline reads `config.toml` **from its working directory** (the
+catacomb reads `config.toml` **from its working directory** (the
 directory you launch it from), not a fixed path. The same goes for
 `cookies.txt`. Everything in `config.toml` is also editable in Settings;
 edits there are written back to the file.
@@ -61,7 +61,7 @@ Everything nests under the one `backup.directory`:
   music/           ← audio-only "Music mode" downloads, by artist
   archive.txt      ← yt-dlp's global download archive
   cookies.txt      ← optional, if you set one
-  yt-offline.db    ← watched/positions/flags/folders/notes/cache + password hash
+  catacomb.db    ← plain SQLite app state (watched/positions/flags/notes, password hash, sessions, caches)
 ```
 
 Each creator folder gets a hidden `.source-url` sidecar so re-checks
@@ -72,8 +72,8 @@ always know the exact URL to refresh from.
 In **Settings → yt-dlp binary** you choose:
 
 - **System** — uses whatever `yt-dlp` is on your `PATH`.
-- **Bundled** — click **Install** and yt-offline builds a self-contained
-  venv at `~/.local/share/yt-offline/`: nightly `yt-dlp[default]` +
+- **Bundled** — click **Install** and catacomb builds a self-contained
+  venv at `~/.local/share/catacomb/`: nightly `yt-dlp[default]` +
   `curl_cffi` (TLS impersonation) + a bundled `deno` (player-JS). The
   same button updates it later.
 
@@ -83,8 +83,8 @@ also required for the [POT token provider](./anti-bot.md#3-pot-tokens-proof-of-o
 
 ## The two front-ends
 
-- `yt-offline` — desktop GUI (eframe/egui).
-- `yt-offline --web [PORT]` — headless web server. Bind to `127.0.0.1`
+- `catacomb` — desktop GUI (eframe/egui).
+- `catacomb --web [PORT]` — headless web server. Bind to `127.0.0.1`
   (default) for localhost-only, a Tailscale address for your tailnet, or
   `0.0.0.0` for the LAN. **Set a password** (Settings) before exposing it
   beyond localhost — the UI and all `/api` routes are then gated behind an
