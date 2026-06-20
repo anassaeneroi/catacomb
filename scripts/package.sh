@@ -208,7 +208,7 @@ config.toml and cookies.txt are read from the working directory, the same
 as on Linux. See the project README for configuration details.
 
 Licensed under the GNU Affero General Public License v3 or later; see
-LICENSE.txt. Source: https://codeberg.org/${PKG}
+LICENSE.txt. Source: https://codeberg.org/anassaeneroi/catacomb
 README
 
     local out="$DIST/${PKG}-${VERSION}-x86_64-windows.zip"

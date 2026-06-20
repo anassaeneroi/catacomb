@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Self-hosted archive for YouTube, TikTok, Twitch, Vimeo, Bandcamp, SoundCloud, Odysee and more. Desktop GUI + web UI, bundled yt-dlp with curl_cffi impersonation, Plex export, SQLite-backed resume tracking. AGPL-3.0."
 license = "AGPL-3.0-only"
-repository = "https://codeberg.org/anassaeneroi/yt-offline"
-homepage = "https://codeberg.org/anassaeneroi/yt-offline"
+repository = "https://codeberg.org/anassaeneroi/catacomb"
+homepage = "https://codeberg.org/anassaeneroi/catacomb"
 authors = ["InannaBeloved <anassaeneroi@pm.me>"]
 readme = "README.md"
 

@@ -4,7 +4,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Self-hosted archive for YouTube, TikTok, Twitch, Vimeo, Bandcamp, SoundCloud, Odysee and more. Desktop GUI + web UI."
 arch=('x86_64' 'aarch64')
-url="https://codeberg.org/anassaeneroi/yt-offline"
+url="https://codeberg.org/anassaeneroi/catacomb"
 license=('AGPL-3.0-only')
 depends=(
     'yt-dlp'
@@ -23,10 +23,7 @@ makedepends=('rust' 'cargo')
 # previously broke the rusqlite bundled-sqlite link; thin LTO in Cargo
 # does the cross-crate inlining we actually want.
 options=('!lto')
-# Force the checkout dir to $pkgname (catacomb); the Codeberg repo is still
-# named yt-offline, so without the `$pkgname::` prefix the clone dir wouldn't
-# match the `cd "$pkgname"` below.
-source=("$pkgname::git+https://codeberg.org/anassaeneroi/yt-offline.git#branch=main")
+source=("git+https://codeberg.org/anassaeneroi/catacomb.git#branch=main")
 sha256sums=('SKIP')
 
 pkgver() {
