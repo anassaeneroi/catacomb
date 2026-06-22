@@ -493,6 +493,35 @@
   .pl-menu button.on{color:var(--accent);font-weight:700}
   #v-cc.on{color:var(--accent);background:color-mix(in srgb,var(--accent) 22%,transparent)}
 
+  /* Command palette: overlay search ────────────────────────────────── */
+  .cp-bg{position:fixed;inset:0;z-index:1000;background:color-mix(in srgb,var(--bg) 78%,transparent);backdrop-filter:blur(14px) brightness(.88);animation:cpFadeIn .2s ease;opacity:1;pointer-events:all;overflow:auto}
+  .cp-bg.cp-closing{animation:cpFadeOut .2s ease;opacity:0;pointer-events:none}
+  @keyframes cpFadeIn{from{opacity:0;backdrop-filter:blur(0px) brightness(1)}}@keyframes cpFadeOut{to{opacity:0;backdrop-filter:blur(0px) brightness(1)}}
+  .cp-container{position:relative;max-width:640px;margin:60px auto 0;z-index:1001;display:flex;flex-direction:column;gap:0;border-radius:var(--radius);border:1px solid var(--hair);overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.4),0 0 0 1px var(--ring);animation:cpDrop .35s cubic-bezier(.22,1,.36,1)}
+  @keyframes cpDrop{from{opacity:0;transform:translateY(-20px);filter:blur(8px)}}
+  .cp-input-wrap{background:linear-gradient(180deg,color-mix(in srgb,var(--panel) 95%,transparent),color-mix(in srgb,var(--card) 60%,transparent));border-bottom:1px solid var(--hair);padding:14px 18px;display:flex;align-items:center;gap:11px}
+  .cp-icon{font-size:18px;color:var(--accent)}
+  .cp-input{flex:1;background:none;border:none;color:var(--text);font-size:14px;outline:none;padding:0;font-family:inherit;letter-spacing:.01em}
+  .cp-input::placeholder{color:var(--muted)}
+  .cp-clear{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:0;opacity:.6;transition:opacity .15s,color .15s}
+  .cp-clear:hover{opacity:1;color:var(--text)}
+  .cp-results{flex:0 1 64vh;background:var(--bg);overflow-y:auto;max-height:64vh;display:flex;flex-direction:column}
+  .cp-empty{padding:40px 20px;text-align:center;color:var(--muted)}
+  .cp-empty .cp-empty-title{font-family:var(--font-display);font-size:1.3rem;font-weight:400;letter-spacing:.01em;margin-bottom:6px}
+  .cp-group{border-bottom:1px solid color-mix(in srgb,var(--border) 50%,transparent)}
+  .cp-group:last-child{border-bottom:none}
+  .cp-group-label{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:9px 18px 5px;background:var(--bg)}
+  .cp-item{padding:10px 18px;cursor:pointer;border-bottom:1px solid color-mix(in srgb,var(--border) 30%,transparent);transition:background .12s,border-color .12s;display:flex;flex-direction:column;gap:4px}
+  .cp-item:hover,.cp-item.cp-selected{background:color-mix(in srgb,var(--accent) 12%,transparent);border-color:var(--accent)}
+  .cp-item.cp-selected{border-left:3px solid var(--accent);padding-left:15px}
+  .cp-item-title{font-size:13px;font-weight:600;color:var(--text);letter-spacing:.005em}
+  .cp-item-meta{font-size:11px;color:var(--muted);display:flex;gap:8px;flex-wrap:wrap}
+  .cp-item-snip{font-size:11.5px;color:var(--text);line-height:1.4;margin-top:2px}
+  .cp-item-snip mark{background:color-mix(in srgb,var(--accent) 28%,transparent);color:var(--accent);font-weight:600;border-radius:2px;padding:0 2px}
+  .cp-actions{padding:10px 18px;background:var(--bg);border-top:1px solid color-mix(in srgb,var(--border) 50%,transparent);display:flex;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted)}
+  .cp-action-btn{background:color-mix(in srgb,var(--card) 55%,transparent);border:1px solid var(--hair);color:var(--text);padding:5px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:11px;transition:background .12s,border-color .12s}
+  .cp-action-btn:hover{background:color-mix(in srgb,var(--accent) 15%,transparent);border-color:var(--accent);color:var(--accent)}
+
   @media(prefers-reduced-motion:reduce){*{animation:none!important;transition-duration:.001ms!important}}
 </style>
 </head>
@@ -2059,53 +2088,64 @@ async function copyChannelFeed(platform,handle,btn){
   }catch(e){setStatus('Error: '+e.message)}
 }
 
-/* ── Full-text library search ───────────────────────────────────── */
-let ftsSeq=0;
+/* ── Full-text library search (command palette) ───────────────────────────────────────── */
+let cpSeq=0,cpSelected=-1,cpRecents=[];
 function openSearch(){
-  if(document.getElementById('fts-modal'))return;
-  const bg=document.createElement('div');bg.className='modal-bg';bg.id='fts-modal';
-  bg.onclick=e=>{if(e.target===bg)bg.remove()};
-  bg.innerHTML=`<div class="modal" style="max-width:720px;width:100%">
-    <div class="modal-hdr"><h2>🔍 Search library</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
-    <input id="fts-input" type="search" placeholder="Search titles, channels, descriptions, transcripts…" autocomplete="off"
-      style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:14px">
-    <div id="fts-status" style="font-size:11px;color:var(--muted);padding:6px 2px"></div>
-    <div id="fts-results" style="overflow-y:auto;max-height:64vh"></div>
-  </div>`;
+  if(document.getElementById('cp-bg'))return;
+  const bg=document.createElement('div');bg.className='cp-bg';bg.id='cp-bg';
+  bg.onclick=e=>{if(e.target===bg)closeCommandPalette()};
+  const cont=document.createElement('div');cont.className='cp-container';bg.appendChild(cont);
+  cont.innerHTML=`<div class="cp-input-wrap"><span class="cp-icon">🔍</span><input id="cp-input" class="cp-input" type="search" placeholder="Search titles, channels, descriptions, transcripts… (Esc to close)" autocomplete="off"><button class="cp-clear" id="cp-clear" onclick="document.getElementById('cp-input').value='';runCommandSearch('')" style="display:none">✕</button></div><div class="cp-results" id="cp-results"></div><div class="cp-actions"><span style="color:var(--muted);flex:1;font-size:10px">Use ↑↓ to navigate · Enter to select · f to search</span><button class="cp-action-btn" onclick="cpClearRecents()">Clear history</button></div>`;
   document.body.appendChild(bg);
-  const input=document.getElementById('fts-input');
-  input.focus();
-  let timer=null;
-  input.oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>runFtsSearch(input.value.trim()),180)};
+  cpSelected=-1;const input=document.getElementById('cp-input');cpRecents=JSON.parse(localStorage.getItem('cp-recents')||'[]');input.focus();renderCommandPalette('');let timer=null;
+  input.oninput=()=>{clearTimeout(timer);document.getElementById('cp-clear').style.display=input.value?'block':'none';timer=setTimeout(()=>runCommandSearch(input.value.trim()),150)};
+  input.onkeydown=(e)=>cpKeydown(e);
 }
-async function runFtsSearch(q){
-  const my=++ftsSeq;
-  const status=document.getElementById('fts-status');
-  const box=document.getElementById('fts-results');
-  if(!box)return;
-  if(!q){box.innerHTML='';if(status)status.textContent='';return}
-  if(status)status.textContent='Searching…';
+function cpKeydown(e){
+  const results=document.querySelectorAll('.cp-item');switch(e.key){
+    case'ArrowUp':e.preventDefault();cpSelected=Math.max(-1,cpSelected-1);scrollIntoSelected(results);updateSelected(results);break;
+    case'ArrowDown':e.preventDefault();cpSelected=Math.min(results.length-1,cpSelected+1);scrollIntoSelected(results);updateSelected(results);break;
+    case'Enter':e.preventDefault();if(cpSelected>=0&&cpSelected<results.length)results[cpSelected].click();break;
+    case'Escape':e.preventDefault();closeCommandPalette();break;
+  }
+}
+function updateSelected(results){results.forEach((r,i)=>r.classList.toggle('cp-selected',i===cpSelected));}
+function scrollIntoSelected(results){
+  if(cpSelected>=0&&cpSelected<results.length){
+    const box=document.getElementById('cp-results');const item=results[cpSelected];const itemTop=item.offsetTop,itemBot=itemTop+item.offsetHeight;
+    if(itemTop<box.scrollTop)box.scrollTop=itemTop;else if(itemBot>box.scrollTop+box.offsetHeight)box.scrollTop=itemBot-box.offsetHeight;
+  }
+}
+function renderCommandPalette(q){
+  const box=document.getElementById('cp-results');if(!box)return;if(!q){
+    if(cpRecents.length){
+      box.innerHTML=`<div class="cp-group"><div class="cp-group-label">Recent searches</div>${cpRecents.slice(0,5).map(r=>`<div class="cp-item" onclick="cpOpenRecent('${esc(r)}')"  ><div class="cp-item-title">${esc(r)}</div></div>`).join('')}</div><div class="cp-group"><div class="cp-group-label">Quick actions</div><div class="cp-item" onclick="openDownloads()"><div class="cp-item-title">⬇ Downloads</div><div class="cp-item-meta">Open downloads panel</div></div><div class="cp-item" onclick="openStats()"><div class="cp-item-title">📊 Statistics</div><div class="cp-item-meta">View library insights</div></div><div class="cp-item" onclick="openMaintenance()"><div class="cp-item-title">🩺 Library health</div><div class="cp-item-meta">Diagnostics & maintenance</div></div><div class="cp-item" onclick="showShortcutsHelp()"><div class="cp-item-title">? Keyboard shortcuts</div><div class="cp-item-meta">View all shortcuts</div></div></div>`;
+    }else{box.innerHTML=`<div style="padding:30px 20px;text-align:center;color:var(--muted)">Start typing to search or browse quick actions below</div><div class="cp-group" style="border-bottom:none"><div class="cp-group-label">Quick actions</div><div class="cp-item" onclick="openDownloads()"><div class="cp-item-title">⬇ Downloads</div><div class="cp-item-meta">Open downloads panel</div></div><div class="cp-item" onclick="openStats()"><div class="cp-item-title">📊 Statistics</div><div class="cp-item-meta">View library insights</div></div><div class="cp-item" onclick="openMaintenance()"><div class="cp-item-title">🩺 Library health</div><div class="cp-item-meta">Diagnostics & maintenance</div></div><div class="cp-item" onclick="showShortcutsHelp()"><div class="cp-item-title">? Keyboard shortcuts</div><div class="cp-item-meta">View all shortcuts</div></div></div>`;}cpSelected=-1;return;
+  }box.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Searching…</div>';
+}
+async function runCommandSearch(q){
+  const my=++cpSeq;const box=document.getElementById('cp-results');if(!box)return;if(!q){renderCommandPalette('');return}
   try{
-    const r=await(await api('/api/search?limit=100&q='+encodeURIComponent(q))).json();
-    if(my!==ftsSeq)return; // a newer keystroke superseded this response
-    const res=r.results||[];
-    if(!res.length){box.innerHTML='<div style="color:var(--muted);padding:12px">No matches.</div>';if(status)status.textContent='0 results';return}
-    box.innerHTML=res.map(h=>`<div onclick="ftsOpen('${esc(h.video_id)}')" style="padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer">
-        <div style="font-size:13px">${esc(h.title)}</div>
-        <div style="font-size:11px;color:var(--muted)">${esc(h.channel)} · ${esc(h.platform)}</div>
-        ${h.snippet?`<div style="font-size:12px;color:var(--muted);margin-top:2px">${ftsSnippet(h.snippet)}</div>`:''}
-      </div>`).join('');
-    if(status)status.textContent=res.length+' result'+(res.length===1?'':'s');
-  }catch(e){box.innerHTML=`<div style="color:#f87171;padding:12px">Search failed: ${esc(e.message)}</div>`}
+    const r=await(await api('/api/search?limit=60&q='+encodeURIComponent(q))).json();
+    if(my!==cpSeq)return;const res=r.results||[];
+    if(!res.length){box.innerHTML=`<div class="cp-empty"><div class="cp-empty-title">No matches</div><div style="font-size:11px;margin-top:4px">Try different keywords</div></div>`;cpSelected=-1;return}
+    const byChannel={};res.forEach(h=>{if(!byChannel[h.channel])byChannel[h.channel]=[];byChannel[h.channel].push(h)});
+    const groups=Object.entries(byChannel).map(([ch,items])=>`<div class="cp-group"><div class="cp-group-label">${esc(ch)}</div>${items.map(h=>{const v=findVideo(h.video_id);const dt=(v&&v.upload_date)?fmtDate(v.upload_date):'';return `<div class="cp-item" onclick="cpSelect('${esc(h.video_id)}')"><div class="cp-item-title">${esc(h.title)}</div><div class="cp-item-meta">${esc(h.platform)}${dt?' • '+dt:''}</div>${h.snippet?`<div class="cp-item-snip">${ftsSnippet(h.snippet)}</div>`:''}</div>`}).join('')}</div>`).join('');
+    box.innerHTML=groups;cpSelected=0;const items=document.querySelectorAll('.cp-item');if(items.length>0){items[0].classList.add('cp-selected');scrollIntoSelected(items)}
+  }catch(e){box.innerHTML=`<div style="color:#f87171;padding:20px;text-align:center">Search failed: ${esc(e.message)}</div>`;cpSelected=-1}
+}
+function cpSelect(id){
+  const q=document.getElementById('cp-input')?.value.trim()||'';if(q){cpRecents=cpRecents.filter(r=>r!==q);cpRecents.unshift(q);localStorage.setItem('cp-recents',JSON.stringify(cpRecents.slice(0,20)))}
+  closeCommandPalette();if(!findVideo(id)){setStatus('Video not in the loaded library — try Rescan');return}
+  selectVideo(id);document.getElementById('details')?.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function cpOpenRecent(q){document.getElementById('cp-input').value=q;runCommandSearch(q);}
+function cpClearRecents(){cpRecents=[];localStorage.removeItem('cp-recents');renderCommandPalette('');}
+function closeCommandPalette(){
+  const bg=document.getElementById('cp-bg');if(!bg)return;bg.classList.add('cp-closing');setTimeout(()=>bg.remove(),200);
 }
 // FTS5 wraps matched terms in STX/ETX control chars; escape first, then mark.
 function ftsSnippet(s){return esc(s).replace(/\x02/g,'<mark>').replace(/\x03/g,'</mark>')}
-function ftsOpen(id){
-  document.getElementById('fts-modal')?.remove();
-  if(!findVideo(id)){setStatus('Video not in the loaded library — try Rescan');return}
-  selectVideo(id);
-  document.getElementById('details')?.scrollIntoView({behavior:'smooth',block:'nearest'});
-}
 
 /* ── Select / Details ───────────────────────────────────────────── */
 function selectVideo(id){selectedId=selectedId===id?null:id;renderGrid();renderDetails()}
@@ -3330,7 +3370,8 @@ document.addEventListener('keydown',(e)=>{
       e.preventDefault();
       break;
     case 'f':
-      openSearch();
+      if(document.getElementById('cp-bg'))closeCommandPalette();
+      else openSearch();
       e.preventDefault();
       break;
     case 'r':
@@ -3356,7 +3397,8 @@ function showShortcutsHelp(){
     <div class="modal-hdr"><h2>Keyboard shortcuts</h2><button onclick="this.closest('.modal-bg').remove()">✕</button></div>
     <table><tbody>
       ${row('/','Focus filter box')}
-      ${row('f','Search titles, descriptions & transcripts')}
+      ${row('f','Command palette search (keyboard-driven)')}
+      ${row('↑↓ in search','Navigate results')}
       ${row('r','Rescan library')}
       ${row('d','Open downloads')}
       ${row('Esc','Close modal / cancel')}
