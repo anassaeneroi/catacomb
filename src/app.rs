@@ -4227,21 +4227,21 @@ impl App {
                         ui.painter().rect_stroke(
                             rect,
                             4.0,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 170, 230)),
+                            egui::Stroke::new(2.0, self.theme_accents.accent),
                         );
                     }
                     if is_playing {
                         ui.painter().rect_stroke(
                             rect,
                             4.0,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 200, 110)),
+                            egui::Stroke::new(2.0, self.theme_accents.success),
                         );
                     }
                     if bulk_checked {
                         ui.painter().rect_stroke(
                             rect,
                             4.0,
-                            egui::Stroke::new(3.0, egui::Color32::from_rgb(180, 130, 240)),
+                            egui::Stroke::new(3.0, self.theme_accents.warning),
                         );
                     }
                     if card.watched {
