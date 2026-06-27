@@ -76,7 +76,24 @@ enum SortMode {
     ChannelAsc,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ViewMode {
+    List,
+    Card,
+    Grid,
+}
+
+impl ViewMode {
+    fn from_config(s: &str) -> Self {
+        match s {
+            "card" => ViewMode::Card,
+            "grid" => ViewMode::Grid,
+            _ => ViewMode::List,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum SidebarView {
     Channels,
     All,
@@ -167,6 +184,10 @@ pub struct App {
     card_density: f32,
     /// Theme-aware accent colors, recomputed whenever the theme changes.
     theme_accents: crate::theme::ThemeAccents,
+    /// Global default video-list render mode (from config).
+    default_view_mode: ViewMode,
+    /// Per-SidebarView overrides; a view absent here falls back to default.
+    view_mode_overrides: std::collections::HashMap<SidebarView, ViewMode>,
     /// When set, the global UI zoom changed and config should be saved at
     /// this instant (debounced so a slider drag / key-repeat doesn't write
     /// config.toml every frame). Synced from `ctx.zoom_factor()` in update().
@@ -358,6 +379,15 @@ fn idx_to_sponsorblock(i: usize) -> Option<String> {
 }
 
 impl App {
+    /// The view mode to use for `view`: the per-view override if set, else
+    /// the global default.
+    fn view_mode_for(&self, view: &SidebarView) -> ViewMode {
+        self.view_mode_overrides
+            .get(view)
+            .copied()
+            .unwrap_or(self.default_view_mode)
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, tray: Option<crate::tray::TrayHandle>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let config_path = cwd.join("config.toml");
@@ -372,6 +402,7 @@ impl App {
 
         theme::apply(&cc.egui_ctx, &config.ui.theme);
         let theme_accents = theme::accents_for(&config.ui.theme);
+        let default_view_mode = ViewMode::from_config(&config.ui.default_view_mode);
         // Restore the persisted global UI zoom. egui's built-in Ctrl +/-/0
         // also drives zoom_factor; update() keeps config.ui.ui_scale synced
         // and persists changes so the size survives restarts.
@@ -555,6 +586,8 @@ impl App {
             db,
             card_density: 1.0,
             theme_accents,
+            default_view_mode,
+            view_mode_overrides: Default::default(),
             scale_save_at: None,
             sort_mode: SortMode::Title,
             watched,
