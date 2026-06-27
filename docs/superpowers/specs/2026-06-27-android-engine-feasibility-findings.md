@@ -64,7 +64,32 @@ and **eliminates the Deno/Node sidecar entirely**.
 
 ## Q4 — Rust core via JNI
 
-_pending_
+**Verdict: PROVEN (toolchain), with a verification caveat on the binding layer.**
+The controller ran a real cross-compile build-proof here (not recalled): the
+crate's pure `vtt.rs` module, vendored into a minimal `cdylib`, compiled with
+NDK r26d to **both** `aarch64-linux-android` and `x86_64-linux-android` `.so`
+files for Android 34, each exporting the expected C-ABI symbol
+(`catacomb_spike_cue_count`, defined `T`). A matching NDK-clang Android client
+harness also built. So Rust-module → Android `.so` is demonstrably real.
+
+- **Module triage (controller, from the crate):** cleanly portable — `vtt`
+  (pure std), `autotag` (pure arithmetic), `error_class`/`platform` (serde
+  only), `library` (effectively). Portable-with-effort — `database`
+  (rusqlite/r2d2; SQLite runs on Android). Not a clean port — `fingerprint`
+  (spawns `ffmpeg`; needs ffmpeg-kit). The download engine modules
+  (`downloader`, `ytdlp_bin`, `pot_provider`) stay off-device by design.
+- **Recommended toolchain:** `cargo-ndk` + **uniffi** (Kotlin codegen) over the
+  raw `jni` crate — avoids JNI signature drift past ~10 functions. *(Toolchain
+  recommendation is from desk research that hit a web rate-limit and leans on
+  knowledge through 2025-08; treat the uniffi-vs-jni specifics as
+  documented-but-verify. The build-proof above is hard evidence.)*
+- **Reuse vs reimplement:** reuse the pure modules. Effort ~5 dev-days for a
+  first `.so` exposing 5–6 modules to Kotlin.
+- **Run-proof status:** on-device dlopen+call was **blocked by the sandbox
+  reaping the emulator** (a harness limitation, not an Android/Rust one);
+  downgraded per plan to symbol-export verification, which passed. The full
+  dlopen+invoke is deferred to the Stage-1 prototype.
+- Full evidence + sources: `q4-rust-jni-android-report.md`.
 
 ## Synthesis — go / no-go
 
