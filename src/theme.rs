@@ -10,6 +10,58 @@ pub const THEMES: &[(&str, &str)] = &[
     ("emo-scene-queen", "Emo: Scene Queen"),
 ];
 
+/// Theme-aware semantic accent colors. egui `Visuals` has no slot for these,
+/// so each theme exposes them here and the paint code in `app.rs` reads from
+/// the active snapshot instead of hardcoding RGB values.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ThemeAccents {
+    /// Selection / focus ring (replaces the hardcoded 120,170,230 blue).
+    pub accent: Color32,
+    /// Playing / watched indicator (replaces 110,200,110 green).
+    pub success: Color32,
+    /// Bulk-selection highlight (replaces 180,130,240 purple).
+    pub warning: Color32,
+}
+
+impl ThemeAccents {
+    /// The stock fallback used before theme-specific accents are wired in.
+    /// Matches the legacy hardcoded values so behavior is unchanged when a
+    /// theme has not yet defined its own.
+    pub const LEGACY: ThemeAccents = ThemeAccents {
+        accent: Color32::from_rgb(120, 170, 230),
+        success: Color32::from_rgb(110, 200, 110),
+        warning: Color32::from_rgb(180, 130, 240),
+    };
+}
+
+/// Look up the semantic accents for a theme name. Falls back to the dark
+/// theme's accents for unknown names.
+pub fn accents_for(name: &str) -> ThemeAccents {
+    match name {
+        "dark" => ThemeAccents { accent: hex(0x7aa2f7), success: hex(0x9ece6a), warning: hex(0xbb9af7) },
+        "light" => ThemeAccents { accent: hex(0x2a5db0), success: hex(0x2e7d32), warning: hex(0x8e44ad) },
+        "dracula" => ThemeAccents { accent: hex(0xbd93f9), success: hex(0x50fa7b), warning: hex(0xff79c6) },
+        "trans" => ThemeAccents { accent: hex(0x55cdfc), success: hex(0x2e7d32), warning: hex(0xf7a8b8) },
+        "emo-nocturnal" => ThemeAccents { accent: hex(0xff0090), success: hex(0x39ff14), warning: hex(0x00f5ff) },
+        "emo-coffin" => ThemeAccents { accent: hex(0x8b0000), success: hex(0x39ff14), warning: hex(0xcc2222) },
+        "emo-scene-queen" => ThemeAccents { accent: hex(0x39ff14), success: hex(0xff00ff), warning: hex(0x00f5ff) },
+        // New themes (added in a later task — values match their palettes).
+        "cyberpunk" => ThemeAccents { accent: hex(0x00fff5), success: hex(0x39ff14), warning: hex(0xff003c) },
+        "synthwave" => ThemeAccents { accent: hex(0xff2a6d), success: hex(0x05d9e8), warning: hex(0xd136a6) },
+        "vaporwave" => ThemeAccents { accent: hex(0x01cdfe), success: hex(0x05ffa1), warning: hex(0xff71ce) },
+        "cemetery-moss" => ThemeAccents { accent: hex(0x7a8a6a), success: hex(0x4a5d3a), warning: hex(0x9a9a8a) },
+        "vampire" => ThemeAccents { accent: hex(0xc9a227), success: hex(0x8b1a2b), warning: hex(0x5c0a1e) },
+        "witching-hour" => ThemeAccents { accent: hex(0x6a4a8b), success: hex(0xb0b8d0), warning: hex(0x1a1a4a) },
+        "nord" => ThemeAccents { accent: hex(0x88c0d0), success: hex(0xa3be8c), warning: hex(0xebcb8b) },
+        "gruvbox" => ThemeAccents { accent: hex(0xfe8019), success: hex(0xb8bb26), warning: hex(0xd3869b) },
+        "tokyo-night" => ThemeAccents { accent: hex(0x7aa2f7), success: hex(0x9ece6a), warning: hex(0xbb9af7) },
+        "paper" => ThemeAccents { accent: hex(0x8b6f3a), success: hex(0x4a6b3a), warning: hex(0xc4a86a) },
+        "honey" => ThemeAccents { accent: hex(0xe8a838), success: hex(0xb87420), warning: hex(0xc97b4a) },
+        "candlelight" => ThemeAccents { accent: hex(0xa8703a), success: hex(0x6b3f1e), warning: hex(0xd9b382) },
+        _ => ThemeAccents { accent: hex(0x7aa2f7), success: hex(0x9ece6a), warning: hex(0xbb9af7) },
+    }
+}
+
 pub fn apply(ctx: &egui::Context, name: &str) {
     let visuals = match name {
         "light" => egui::Visuals::light(),
@@ -191,4 +243,31 @@ fn emo_scene_queen() -> egui::Visuals {
     v.warn_fg_color = hex(0xffcc00);
     v.error_fg_color = hex(0xff4444);
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accents_for_known_theme_returns_nonzero() {
+        let a = accents_for("dark");
+        assert_ne!(a.accent, Color32::TRANSPARENT);
+        assert_ne!(a.success, Color32::TRANSPARENT);
+        assert_ne!(a.warning, Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn accents_for_unknown_theme_falls_back() {
+        let a = accents_for("this-theme-does-not-exist");
+        let dark = accents_for("dark");
+        assert_eq!(a.accent, dark.accent);
+    }
+
+    #[test]
+    fn accents_differ_across_themes() {
+        let dark = accents_for("dark");
+        let light = accents_for("light");
+        assert_ne!(dark.accent, light.accent);
+    }
 }
