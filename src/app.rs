@@ -388,6 +388,34 @@ impl App {
             .unwrap_or(self.default_view_mode)
     }
 
+    /// Paint a consistent missing-thumbnail placeholder inside `rect`:
+    /// a theme-tinted two-tone fill + a single glyph. Used for both channel
+    /// and video cards so the empty states stop diverging.
+    fn paint_thumb_placeholder(&self, ui: &egui::Ui, rect: egui::Rect, glyph: &str, density: f32) {
+        let v = ui.visuals();
+        let top = v.faint_bg_color.to_array();
+        let bot = v.panel_fill.to_array();
+        // egui has no native gradient; fake one with two stacked rects.
+        let mid = rect.top() + rect.height() * 0.5;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, mid)),
+            4.0,
+            egui::Color32::from_rgba_unmultiplied(top[0], top[1], top[2], 255),
+        );
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rect.min.x, mid), rect.max),
+            4.0,
+            egui::Color32::from_rgba_unmultiplied(bot[0], bot[1], bot[2], 255),
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::proportional(24.0 * density),
+            v.weak_text_color(),
+        );
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, tray: Option<crate::tray::TrayHandle>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let config_path = cwd.join("config.toml");
@@ -4007,14 +4035,7 @@ impl App {
                                         .paint_at(ui, thumb_rect);
                                 }
                                 None => {
-                                    ui.painter().rect_filled(thumb_rect, 4.0, egui::Color32::from_gray(30));
-                                    ui.painter().text(
-                                        thumb_rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "📺",
-                                        egui::FontId::proportional(28.0 * density),
-                                        egui::Color32::from_gray(100),
-                                    );
+                                    self.paint_thumb_placeholder(ui, thumb_rect, "🎬", density);
                                 }
                             }
 
@@ -4245,14 +4266,7 @@ impl App {
                                 .paint_at(ui, rect);
                         }
                         None => {
-                            ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(38));
-                            ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "▶",
-                                egui::FontId::proportional(26.0 * density),
-                                egui::Color32::from_gray(110),
-                            );
+                            self.paint_thumb_placeholder(ui, rect, "🎬", density);
                         }
                     }
 
