@@ -19,6 +19,10 @@
 *.swp
 .DS_Store
 .claude/
+.superpowers/
+
+# Session handoff notes (local only)
+ANDROID_CONTEXT.md
 
 # Sensitive: YouTube session cookies — never commit
 cookies.txt
