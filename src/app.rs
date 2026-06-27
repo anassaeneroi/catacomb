@@ -165,6 +165,8 @@ pub struct App {
     plex_status: String,
     db: Database,
     card_density: f32,
+    /// Theme-aware accent colors, recomputed whenever the theme changes.
+    theme_accents: crate::theme::ThemeAccents,
     /// When set, the global UI zoom changed and config should be saved at
     /// this instant (debounced so a slider drag / key-repeat doesn't write
     /// config.toml every frame). Synced from `ctx.zoom_factor()` in update().
@@ -369,6 +371,7 @@ impl App {
         };
 
         theme::apply(&cc.egui_ctx, &config.ui.theme);
+        let theme_accents = theme::accents_for(&config.ui.theme);
         // Restore the persisted global UI zoom. egui's built-in Ctrl +/-/0
         // also drives zoom_factor; update() keeps config.ui.ui_scale synced
         // and persists changes so the size survives restarts.
@@ -551,6 +554,7 @@ impl App {
             plex_status: String::new(),
             db,
             card_density: 1.0,
+            theme_accents,
             scale_save_at: None,
             sort_mode: SortMode::Title,
             watched,
@@ -3176,6 +3180,7 @@ impl App {
                                     {
                                         self.config.ui.theme = id.to_string();
                                         theme::apply(ctx, id);
+                                        self.theme_accents = theme::accents_for(id);
                                     }
                                 }
                             });
