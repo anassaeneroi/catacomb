@@ -41,7 +41,26 @@ path.
 
 ## Q3 — POT / Proof-of-Origin
 
-_pending_
+**Verdict: RISKY** (the go/no-go gate — and it does NOT block).
+**POT is required** on the mobile surface; you can't reliably skip it for a
+general archiver. The shortcut clients are closing: `android_vr` dropped to
+360p (SABR A/B, Mar 2026) and `tv` was removed from yt-dlp defaults after
+YouTube enforced LOGIN_REQUIRED. **But there is a production-proven path that is
+strictly better than Catacomb's desktop design:** YTDLnis (since v1.8.3, Mar
+2025) runs YouTube's BotGuard JS challenge **inside the Android WebView** and
+passes the resulting web GVS PO token to yt-dlp as an extractor arg. This
+**collapses Q2 and Q3 into one mechanism** — the WebView *is* the JS runtime —
+and **eliminates the Deno/Node sidecar entirely**.
+
+- **Recommended anti-bot approach:** WebView-based BotGuard/POT generation (à la
+  YTDLnis), no sidecar.
+- **Caveats:** tokens are video-bound + ~12h-lived (a WebView attestation call
+  per download); native `android`-client DroidGuard tokens remain **unsolved**
+  (no open tooling outside genuine Play Services). Fragile cat-and-mouse — must
+  track YouTube changes.
+- **Flagged-for-device:** actual token minting + a real download need a device/
+  WebView/Google session; not reproducible headlessly here.
+- Full evidence + sources: `q3-pot-android-report.md`.
 
 ## Q4 — Rust core via JNI
 
