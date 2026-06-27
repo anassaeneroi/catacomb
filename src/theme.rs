@@ -64,19 +64,81 @@ pub fn accents_for(name: &str) -> ThemeAccents {
 
 pub fn apply(ctx: &egui::Context, name: &str) {
     let visuals = match name {
-        "light" => egui::Visuals::light(),
+        "light" => light(),
         "dracula" => dracula(),
         "trans" => trans(),
         "emo-nocturnal" => emo_nocturnal(),
         "emo-coffin" => emo_coffin(),
         "emo-scene-queen" => emo_scene_queen(),
-        _ => egui::Visuals::dark(),
+        _ => dark(),
     };
     ctx.set_visuals(visuals);
 }
 
 fn hex(v: u32) -> Color32 {
     Color32::from_rgb(((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8)
+}
+
+// Hand-tuned default dark — true near-black panel, cool steel-blue accent.
+// Replaces the stock egui::Visuals::dark() so the out-of-box experience
+// matches the care given to the themed variants.
+fn dark() -> egui::Visuals {
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = hex(0x14141a);
+    v.window_fill = hex(0x1a1a22);
+    v.extreme_bg_color = hex(0x0a0a0e);
+    v.faint_bg_color = hex(0x1f1f29);
+    v.code_bg_color = hex(0x101016);
+    v.selection.bg_fill = hex(0x2a3a5a);
+    v.selection.stroke = Stroke::new(1.0, hex(0x7aa2f7));
+    v.hyperlink_color = hex(0x7aa2f7);
+    v.override_text_color = None;
+    v.widgets.noninteractive.bg_fill = hex(0x1f1f29);
+    v.widgets.noninteractive.weak_bg_fill = hex(0x181820);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, hex(0xc8c8d8));
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, hex(0x2a2a36));
+    v.widgets.inactive.bg_fill = hex(0x2a2a36);
+    v.widgets.inactive.weak_bg_fill = hex(0x222230);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, hex(0xd0d0e0));
+    v.widgets.hovered.bg_fill = hex(0x3a3a4e);
+    v.widgets.hovered.weak_bg_fill = hex(0x303044);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.5, hex(0xe8e8f8));
+    v.widgets.active.bg_fill = hex(0x7aa2f7);
+    v.widgets.active.weak_bg_fill = hex(0x5a82d7);
+    v.widgets.active.fg_stroke = Stroke::new(2.0, hex(0x14141a));
+    v.widgets.open.bg_fill = hex(0x3a3a4e);
+    v.window_stroke = Stroke::new(1.0, hex(0x2a2a36));
+    v
+}
+
+// Hand-tuned default light — warm off-white, slate accent.
+fn light() -> egui::Visuals {
+    let mut v = egui::Visuals::light();
+    v.panel_fill = hex(0xf6f4ef);
+    v.window_fill = hex(0xfefcf7);
+    v.extreme_bg_color = hex(0xffffff);
+    v.faint_bg_color = hex(0xefece4);
+    v.code_bg_color = hex(0xeae6dc);
+    v.selection.bg_fill = hex(0xbcd0ee);
+    v.selection.stroke = Stroke::new(1.0, hex(0x2a5db0));
+    v.hyperlink_color = hex(0x2a5db0);
+    v.override_text_color = None;
+    v.widgets.noninteractive.bg_fill = hex(0xeae6dc);
+    v.widgets.noninteractive.weak_bg_fill = hex(0xf0ede5);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, hex(0x3a3a3a));
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, hex(0xd0ccbf));
+    v.widgets.inactive.bg_fill = hex(0xdfe0e8);
+    v.widgets.inactive.weak_bg_fill = hex(0xe8e9f0);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, hex(0x2a2a2a));
+    v.widgets.hovered.bg_fill = hex(0xcdd6e8);
+    v.widgets.hovered.weak_bg_fill = hex(0xd8e0ee);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.5, hex(0x141414));
+    v.widgets.active.bg_fill = hex(0x2a5db0);
+    v.widgets.active.weak_bg_fill = hex(0x4a7dd0);
+    v.widgets.active.fg_stroke = Stroke::new(2.0, hex(0xffffff));
+    v.widgets.open.bg_fill = hex(0xcdd6e8);
+    v.window_stroke = Stroke::new(1.0, hex(0xd0ccbf));
+    v
 }
 
 fn dracula() -> egui::Visuals {
