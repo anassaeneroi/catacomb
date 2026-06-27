@@ -93,4 +93,60 @@ harness also built. So Rust-module → Android `.so` is demonstrably real.
 
 ## Synthesis — go / no-go
 
-_pending_
+**Overall verdict: GO, with one qualification.** A standalone on-device download
+engine is credible enough to prototype, but one open question remains that the
+prototype must answer before a full build commitment.
+
+### Question → Verdict table
+
+| Question | Verdict | One-line reason |
+| --- | --- | --- |
+| Q1 — yt-dlp on Android | RISKY | yt-dlp runs, but **curl_cffi TLS impersonation is broken on Android** (#15505). |
+| Q2 — JS runtime | RISKY | External JS runtime now mandatory (Python jsinterp deprecated 2025.11.12). |
+| Q3 — POT | RISKY (not blocking) | POT required on mobile, but **WebView-BotGuard is production-proven** (YTDLnis) and collapses Q2. |
+| Q4 — Rust core via JNI | PROVEN | Pure modules cross-compile to Android .so (build-proof run locally). |
+
+### Decision logic
+
+All four questions are at worst "risky with a credible path," and no question is
+"unsolved" *in a way that blocks a prototype*. Q3's WebView path is the key: it
+eliminates the Deno/Node sidecar and provides the JS runtime natively, materially
+reducing Q2's risk. The single blocking worry from Q1 is **curl_cffi** — TLS
+impersonation is broken on Android, and that's Catacomb's primary anti-bot
+mechanism on desktop. However, Q3's web GVS PO token generated via WebView may
+*restore* anti-bot access *without* curl_cffi (the desktop path uses curl_cffi
+because it lacks a real browser context; the WebView *is* one). This specific
+question — **does WebView-BotGuard + web PO recover YouTube without curl_cffi?**
+— was not resolved by desk research and must be answered by a Stage-1 prototype.
+
+### Recommended next sub-project
+
+**Stage-1 Android engine prototype** (scoped, ~2–3 weeks):
+
+- **Adopt HLahwani/yt-dlp-android** (May 2026) as the on-device yt-dlp
+  mechanism — it bundles QuickJS (Q2), exposes a NIGHTLY update channel (Q1), and
+  is designed for WebView-POT integration (Q3). This is the single-library path
+  that solves Q1+Q2+Q3 together.
+- **Prototype a WebView-BotGuard token mint** (à la YTDLnis) and pass the web
+  GVS PO token to yt-dlp. Test against real YouTube downloads on a real device
+  (the sandbox emulator cannot run this). **The critical test:** does this recover
+  full-format access *without* curl_cffi?
+- **Compile a small Rust `.so`** exposing 2–3 pure modules (vtt, error_class,
+  platform) via `cargo-ndk` + uniffi, and call them from a minimal Kotlin harness.
+  Prove the JNI bridge works (Q4 run-proof, currently sandbox-blocked).
+- **If the anti-bot test fails** (curl_cffi still required, or WebView-POT is
+  insufficient), pivot to the fallback: a **client-to-server Android app** that
+  browses/downloads against Catacomb's existing web API (the `remote.rs` path)
+  and revisit standalone later. The WebAPI path is already proven.
+
+### Fallback / risk acknowledgment
+
+The **"risky" verdicts are real**: YouTube continues tightening non-web surfaces
+(android_vr → 360p, tv → LOGIN_REQUIRED), and the WebView approach is part of
+that cat-and-mouse game. The Stage-1 prototype is the honest way to discover
+whether the current path holds. If it doesn't, the client-to-server fallback is
+no failure — it's shipping a useful app that leverages what Catacomb already has.
+
+---
+
+**Status:** research spike complete. Gate passed to Stage-1 prototype.

@@ -172,9 +172,14 @@ alternative that also unlocks signing.
 
 ### 3.2 Android client
 
-Native client over the existing web API. Background download via
-WorkManager + JobScheduler. Push notifications via Tailscale-routed
-HTTPS or a userland push channel.
+**Feasibility research complete (2026-06).** A standalone on-device engine is
+credible enough to prototype — see
+`docs/superpowers/specs/2026-06-27-android-engine-feasibility-findings.md` for the
+full Q1–Q4 findings and the **go** verdict. Next: a Stage-1 prototype testing
+WebView-BotGuard POT + HLahwani/yt-dlp-android against real YouTube downloads on
+a real device, to confirm anti-bot works without curl_cffi (broken on Android).
+Fallback: a client-to-server app browsing Catacomb's existing web API (the
+`remote.rs` path).
 
 ### 3.4 Smart auto-tagging — DONE
 
