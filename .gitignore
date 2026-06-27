@@ -20,6 +20,7 @@
 .DS_Store
 .claude/
 .superpowers/
+.worktrees/
 
 # Session handoff notes (local only)
 ANDROID_CONTEXT.md
