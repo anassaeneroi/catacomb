@@ -1,29 +1,37 @@
 # Session handoff — Catacomb
 
-> Working notes for continuing this work in another session/agent (e.g. Codex).
-> Written 2026-06-19. Delete or update freely; this is not a tracked spec.
+> Working notes for continuing this work in another session/agent (Copilot, Codex, etc.).
+> Updated 2026-06-19. Delete or update freely; this is not a tracked spec.
 
 ## TL;DR — where things are
 
-- Project: `catacomb` — one Rust binary that is **both** an egui desktop GUI
-  and an axum web server wrapping `yt-dlp`. See [CLAUDE.md](CLAUDE.md) for the
-  authoritative architecture; [ROADMAP.md](ROADMAP.md) for the plan.
-- Recent work has been almost entirely on the **web UI** (`src/web_ui/index.html`,
-  a single `include_str!`-baked SPA) plus a few `web.rs`/`database.rs` changes.
-- Branch: `main`. Last commit: `2f95e7f` (unified cinematic video player).
-- A dev web server is usually running on **:8081** against the user's real
-  library. It keeps getting reaped between turns — just restart it (see below).
+- Project: **Catacomb** (crate/binary `catacomb`) — one Rust binary that is
+  **both** an egui desktop GUI and an axum web server wrapping `yt-dlp`. See
+  [CLAUDE.md](CLAUDE.md) for the authoritative architecture; [ROADMAP.md](ROADMAP.md)
+  for the plan.
+- Branch: `main`. Last commit `c12de9c` (command palette); `5f95bdb` and
+  earlier are pushed, **`c12de9c` is committed but NOT yet pushed**. Remote:
+  `https://codeberg.org/anassaeneroi/catacomb.git`.
+- **Local checkout dir was renamed** `~/code/youtube-backup` → **`~/code/catacomb`**
+  (code dir only; the library/backup dir at `/mnt/InannaBeloved/youtube-backup`
+  is unchanged). Run the server with the right CWD, e.g.
+  `env -C ~/code/catacomb ~/code/catacomb/target/release/catacomb --web 8081`.
+- Only `HANDOFF.md` is uncommitted now.
+- The project was **renamed yt-offline → Catacomb** (crate, binary, data
+  paths with migration, UI, docs, repo URLs). See "The rename" below.
+- A dev web server is usually run on **:8081** against the user's real library.
+  It gets reaped between turns in this sandbox — just relaunch it (see gotchas).
 
 ## How to build / run / test
 
 ```bash
-cargo build --release                 # ~1.5 min (opt-level=3 + thin LTO)
+cargo build --release                 # ~1.5 min (opt-level=3 + thin LTO) → target/release/catacomb
 cargo test --release                  # 128 unit + 11 integration (tests/api.rs); no network
 ./target/release/catacomb --web 8081  # headless web server (what the user uses)
 ./target/release/catacomb             # desktop GUI (default)
 ```
 
-### CRITICAL gotchas (learned this session)
+### CRITICAL gotchas
 
 1. **The web SPA is one big embedded file** — `src/web_ui/index.html`, baked in
    at compile time via `include_str!`. **Editing it requires a `cargo build`** to
@@ -32,11 +40,12 @@ cargo test --release                  # 128 unit + 11 integration (tests/api.rs)
    ```bash
    awk '/<script>/{f=1;next}/<\/script>/{f=0}f' src/web_ui/index.html > /tmp/spa.js && node --check /tmp/spa.js
    ```
+   `src/web_ui/login.html` is a second, separate embedded page (the login screen).
 2. **DB location**: the server opens the DB at `channels_root.join("catacomb.db")`
-   (`web.rs` ~L3127), i.e. **`<backup.directory>/catacomb.db`**. For this user
-   that's `/mnt/InannaBeloved/youtube-backup/catacomb.db` (~64 MB, real data —
-   do NOT clobber). `config.toml` is read from the **process CWD**. A stray
-   0-byte `catacomb.db` may sit in the repo dir; it is unused — ignore it.
+   (`web.rs` ~L3127 and `app.rs` ~L395), i.e. **`<backup.directory>/catacomb.db`**.
+   For this user that's `/mnt/InannaBeloved/youtube-backup/catacomb.db` (~64 MB,
+   real data — do NOT clobber). `config.toml` is read from the **process CWD**.
+   A stray 0-byte `catacomb.db` may sit in the repo dir; it's unused — ignore it.
 3. **Offline-first**: this is a self-hosted, possibly-no-internet archiver.
    **Never load fonts/CSS/JS from a CDN.** UI fonts are embedded as base64 woff2
    (SIL OFL) directly in the `<style>` block. Keep it that way.
@@ -45,8 +54,7 @@ cargo test --release                  # 128 unit + 11 integration (tests/api.rs)
    vars (and the design-layer tokens below) so every theme inherits it.
 5. **Background server reaping**: in the sandbox, `run_in_background` servers get
    killed between turns and shell `&`/`nohup` is unreliable. Just relaunch
-   `./target/release/catacomb --web 8081` each time you need it up. `pkill -f`
-   first to avoid a port clash.
+   `./target/release/catacomb --web 8081`; `pkill -f "web 8081"` first.
 6. **Verifying UI visually without a browser driver** (no puppeteer/playwright):
    extract the relevant CSS/JS from `index.html` into a `/tmp/*.html` harness with
    a mock payload and screenshot with headless chromium:
@@ -55,13 +63,32 @@ cargo test --release                  # 128 unit + 11 integration (tests/api.rs)
      --window-size=1100,1300 --virtual-time-budget=3000 \
      --screenshot=/tmp/out.png "file:///tmp/harness.html"
    ```
-   Note: `--virtual-time-budget` can capture entry animations mid-flight; add a
-   "settle" override (disable transitions, force final state) for a clean shot.
+   `--virtual-time-budget` can capture entry animations mid-flight; add a "settle"
+   override (disable transitions, force final state) for a clean final shot.
+
+## The rename (yt-offline → Catacomb)
+
+Done and pushed across `404362b` (code), `3f61184` (docs), `5f95bdb` (repo URLs):
+
+- **Crate/binary** `catacomb` (Cargo.toml, deb/rpm assets, PKGBUILD, package.sh,
+  `catacomb.desktop`, launch.json, release CI, `tests/api.rs` → `CARGO_BIN_EXE_catacomb`).
+- **Data paths**: DB `yt-offline.db` → `catacomb.db`; venv `~/.local/share/yt-offline`
+  → `~/.local/share/catacomb`. `migrate_legacy_paths()` in `main.rs` adopts the old
+  names on first run (renames DB + WAL/SHM sidecars + venv dir; best-effort, no-op
+  once migrated). **Keep this function's OLD-name args as `yt-offline`** — a blunt
+  rename sed will wrongly make both sides `catacomb` and break migration (happened
+  once; watch for it).
+- **Display**: window/tray/title/feed/login/SPA wordmarks → "Catacomb". Env
+  override `YT_OFFLINE_RENDERER` → `CATACOMB_RENDERER`.
+- Verified: builds, 128+11 tests pass, scratch-dir migration preserved bytes, and
+  the live cutover migrated the real 64 MB DB + venv (server served the library).
+- Repo URLs point at `…/anassaeneroi/catacomb` (Cargo.toml, PKGBUILD, package.sh).
 
 ## Settings flow (the easy thing to get wrong)
 
 Adding a setting touches **five** places (grep an existing one like
 `dedup_enabled` or `sponsorblock_mode` end-to-end first):
+
 1. `config.rs` — field + `Default` + `default_with_dir()`.
 2. `download_options.rs` — `Option<…>` per-channel override (None = use global).
 3. `downloader.rs` — resolver merging global+override + a `pub` field on `Downloader`.
@@ -71,78 +98,68 @@ Adding a setting touches **five** places (grep an existing one like
 5. Seed the `Downloader` field at construction AND on settings-save, in BOTH
    `app.rs` and `web.rs`.
 
-## What this session shipped (committed)
+## What this session shipped (committed, newest first)
 
-Newest first (all on `main`):
-
+- `5f95bdb` repo URLs → renamed Codeberg repo.
+- `3f61184` / `404362b` **Rename → Catacomb** (see above).
+- `6d2261b` **Login page reskin** — `src/web_ui/login.html`: serif wordmark +
+  recording dot, aurora + grain, accent focus ring; system-serif (offline-safe).
 - `2f95e7f` **Unified cinematic video player.** Replaced native `<video controls>`
-  (direct `/files/` playback) with ONE custom player for both direct + transcode.
-  Custom scrubber (played/buffered/chapter-ticks/hover tooltip, drag-to-seek via
-  pointer events, commits on release), playback-speed popover (0.5–2×), persistent
-  volume/speed/captions (localStorage `plPrefs`), CC toggle, PiP, fullscreen,
-  auto-hiding controls + center play/pause flash, expanded keyboard
-  (space/k j/l ←→ ↑↓ m c p f `<` `>` 0–9). All seeking routes through the
-  existing `playerSeek`/`effTime` so the transcode reload-at-offset path is intact.
+  with ONE custom player for both direct + transcode. Custom scrubber
+  (played/buffered/chapter-ticks/hover tooltip, drag-to-seek via pointer events,
+  commits on release), speed popover (0.5–2×), persistent volume/speed/captions
+  (localStorage `plPrefs`), CC toggle, PiP, fullscreen, auto-hiding controls +
+  center flash, expanded keyboard (space/k j/l ←→ ↑↓ m c p f `<` `>` 0–9). All
+  seeking routes through `playerSeek`/`effTime` (transcode reload-at-offset intact).
   CSS prefix `.pl-*`; JS around `playVideo`/`updateVctrl`/`plBindScrubber`.
-- `816da05` **Persist login sessions in SQLite.** New `sessions(token, issued_at)`
-  table; in-memory map switched `Instant`→`u64` unix secs; insert on login, delete
-  on logout, clear on password change, rehydrate at startup via `load_sessions()`.
-  Fixes "restart logs everyone out". (`database.rs` + `web.rs`.)
+- `816da05` **Persist login sessions in SQLite** — `sessions(token, issued_at)`
+  table; map switched `Instant`→`u64`; insert/delete/clear + rehydrate at startup.
+  Fixes "restart logs everyone out".
 - `dd48e89` **api() 401 → reload to login** instead of a cryptic "error" toast.
-- `615c088` **Maintenance modal → "diagnostics console"** (CSS prefix `.mx-*`):
-  pulsing health verdict + status tiles + instrument-panel sections. Presentation
-  only; all handler ids/classes (`dup-chk` `sim-chk` `at-chk` `dedup-area`
-  `autotag-area`, polling) untouched.
-- `6f61821` **Stats modal → "observatory" dashboard** (CSS prefix `.sx-*`):
-  count-up metric cards, self-drawing SVG area chart (Catmull-Rom), growing
-  histogram, ranked leaderboard with Size/Count toggle.
+- `615c088` **Maintenance modal → "diagnostics console"** (CSS `.mx-*`): pulsing
+  health verdict + status tiles + instrument panels. Presentation only; handler
+  ids/classes untouched.
+- `6f61821` **Stats modal → "observatory" dashboard** (CSS `.sx-*`): count-up
+  metrics, self-drawing SVG area chart, growing histogram, ranked leaderboard.
 - `c8cb700` **"Cinematheque" reskin**: embedded Instrument Serif + Hanken Grotesk
-  (base64 OFL), accent aurora + film-grain atmosphere, cinematic card hover,
-  recording-dot wordmark. Design-layer CSS appended after the functional rules so
-  it overrides by source order; everything flows through the theme variables.
-- `983864f` **macOS osxcross packaging path** (`scripts/package.sh mac` → `.app`
-  zip; local-only, not in CI — needs osxcross + SDK).
-- `207013e` **Windows shippable**: cross-compiled `.zip` via mingw + console
-  reattach fix (`attach_windows_console` in `main.rs`) + Windows build in the
-  Forgejo release CI.
-- `8b25787` **Library sorting**: download-date sort (file mtime) + grouped sort
-  options, both UIs.
-- earlier: `015d037` scan leaves one core free; `5ffdb17` download-modal
-  diff-aware repaint + Retry-all; `9ed6293` download cancel/retry/queue + dedup
-  off-switch.
+  (base64 OFL), accent aurora + film-grain, cinematic card hover, recording dot.
+- `983864f` macOS osxcross packaging; `207013e` Windows shippable .zip + CI;
+  `8b25787` library sorting (download-date + grouped options).
 
 ### Design-layer conventions (web UI)
-- CSS is appended near the end of the `<style>` block, AFTER the functional
-  rules, so equal-specificity overrides win by source order. Prefixes:
-  `.sx-*` = stats observatory, `.mx-*` = maintenance console, `.pl-*` = player.
+
+- CSS is appended near the end of the `<style>` block, AFTER the functional rules,
+  so equal-specificity overrides win by source order. Prefixes: `.sx-*` = stats
+  observatory, `.mx-*` = maintenance console, `.pl-*` = player.
 - Reveal animations gate behind a class added post-layout (e.g. `.sx-go`) so they
-  play once per open, not on every re-render. All honor
-  `@media (prefers-reduced-motion: reduce)` (a global rule at the end of `<style>`).
+  play once per open, not on re-render. All honor `prefers-reduced-motion` (global
+  rule at the end of `<style>`).
 - Fonts: `--font-display` (Instrument Serif), `--font-body` (Hanken Grotesk).
   Extra tokens: `--radius`, `--radius-sm`, `--ring`, `--glow`, `--shadow`, `--hair`.
 
-## Uncommitted changes (REVIEW + COMMIT before continuing)
+## Command-palette search overlay — SHIPPED (`c12de9c`)
 
-`git status` shows modified-but-uncommitted (mostly docs, made by the user/linter
-— do NOT revert, just review and commit):
-- Docs/prose: `AGENTS.md`, `CLAUDE.md`, `README.md`, `ROADMAP.md`,
-  `SECURITY_AUDIT.md`, `docs/src/{architecture,first-run,installation,packaging}.md`
-- Small code touches: `src/database.rs` (~4 lines — schema doc/comment),
-  `src/web_ui/index.html` (6/6 — minor).
-
-Run `git diff` to confirm these are intended, then commit them. They look like
-documentation catch-up for the session's features.
+`openSearch()` is now a `.cp-*` command palette (CSS `.cp-*`; JS `openSearch`,
+`runCommandSearch`, `renderCommandPalette`, `cpKeydown`, `updateSelected`,
+`scrollIntoSelected`, `cpSelect`, `cpOpenRecent`, `cpClearRecents`,
+`closeCommandPalette`, `ftsSnippet`). Blurred backdrop, centered input, results
+grouped by channel with highlighted FTS snippets (`char(2)`/`char(3)` → `<mark>`
+via `ftsSnippet`), ↑↓ nav, Enter to open (`cpSelect`→`selectVideo`), Esc to
+close, recents + quick-actions in `localStorage['cp-recents']`. Debounced
+queries to `/api/search?limit=60&q=…` with a `cpSeq` guard against stale
+responses. Upload date is looked up client-side via `findVideo` (SearchHit has
+no date). Triggers: 🔍 header button + `f` hotkey. Verified by build + headless
+harness screenshot. Built into the running `:8081` binary.
 
 ## Suggested next steps (pick up here)
 
-Highest-leverage, all buildable + verifiable locally:
-1. **Login page reskin** — `LOGIN_HTML` in `web.rs` is a plain form and is the one
-   surface that still clashes with the cinematheque aesthetic. Small, high impact.
-2. **Search overlay** (`openSearch` in the SPA) — could become a command-palette
-   experience to match the new players.
-3. Commit the pending doc changes (above).
+1. **Push** — `c12de9c` (command palette) is committed but not yet pushed.
+2. Any rough edges from real daily use (the player + palette especially — both
+   verified via harness screenshots, not live click-through).
+3. A fresh web-UI surface to reskin/upgrade, or a roadmap item below.
 
 Roadmap "surpass" items still open (see [ROADMAP.md](ROADMAP.md) §3):
+
 - **3.1 macOS binary** — osxcross scaffolding done (`scripts/package.sh mac`);
   needs the toolchain + SDK installed, then verify. Windows already ships.
 - **3.2 Android client** (big), **3.8 plugin/scripting hooks** (architectural).
@@ -155,9 +172,12 @@ Roadmap "surpass" items still open (see [ROADMAP.md](ROADMAP.md) §3):
 - The video player's seek/speed/captions are verified by code-path review +
   static chrome screenshot, NOT live playback (no headless video). Worth a real
   click-through in the app.
-- Session persistence: the user's *current* browser cookie predates the
-  persistence commit, so they must log in once more; logins after that survive
-  restarts. (They may have a download password set or not — it has toggled during
-  testing; that's user-driven, not a bug.)
+- After the rename + session-persistence work, the user's existing browser cookie
+  predates both, so they must **log in once more**; logins after that survive
+  restarts. A download password may or may not be set (toggled during testing) —
+  that's user-driven, not a bug.
+- The user's local `config.toml` `source_url` still points at the old
+  `…/yt-offline` repo (gitignored, user-specific) — change it in Settings if the
+  UI "source" link should match the renamed repo.
 - Don't commit `cookies.txt`, `config.toml`, or `catacomb.db` (all gitignored;
   contain creds / the Argon2 password hash).
