@@ -39,17 +39,6 @@ pub struct ThemeAccents {
     pub warning: Color32,
 }
 
-impl ThemeAccents {
-    /// The stock fallback used before theme-specific accents are wired in.
-    /// Matches the legacy hardcoded values so behavior is unchanged when a
-    /// theme has not yet defined its own.
-    pub const LEGACY: ThemeAccents = ThemeAccents {
-        accent: Color32::from_rgb(120, 170, 230),
-        success: Color32::from_rgb(110, 200, 110),
-        warning: Color32::from_rgb(180, 130, 240),
-    };
-}
-
 /// Look up the semantic accents for a theme name. Falls back to the dark
 /// theme's accents for unknown names.
 pub fn accents_for(name: &str) -> ThemeAccents {

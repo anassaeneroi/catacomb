@@ -4416,37 +4416,8 @@ impl App {
                     let mut toggle_flag_card: Option<&'static str> = None;
 
                     ui.vertical(|ui| {
-                        let (rect, resp) = ui.allocate_exact_size(
-                            egui::vec2(thumb_w, thumb_h),
-                            egui::Sense::click(),
-                        );
-                        let texture = card.thumb_path.as_ref().and_then(|p| self.texture(ctx, p));
-                        match &texture {
-                            Some(handle) => {
-                                egui::Image::new(handle)
-                                    .maintain_aspect_ratio(true)
-                                    .paint_at(ui, rect);
-                            }
-                            None => {
-                                self.paint_thumb_placeholder(ui, rect, "🎬", density);
-                            }
-                        }
-                        if selected {
-                            ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(2.0, self.theme_accents.accent));
-                        }
-                        if is_playing {
-                            ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(2.0, self.theme_accents.success));
-                        }
-                        if bulk_checked {
-                            ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(3.0, self.theme_accents.warning));
-                        }
-                        if resp.clicked() {
-                            clicked_card = true;
-                        }
-                        if resp.double_clicked() {
-                            play_card = true;
-                        }
-                        ui.add_space(4.0);
+                        // `render_row_body` owns the thumbnail + rings + clicks,
+                        // so the grid just lays out title/meta below it.
                         self.render_row_body(
                             ui, ctx, card, density, egui::vec2(thumb_w, thumb_h), show_channel,
                             selected, is_playing, bulk_checked,
@@ -4464,9 +4435,9 @@ impl App {
     }
 
     /// The thumbnail + metadata + flag-button body shared by List/Card/Grid.
-    /// In List/Card it's laid out inside an existing horizontal; in Grid the
-    /// thumbnail is already painted by the caller, so `thumb_size` is only
-    /// used here for the watched banner placement (Grid passes its own).
+    /// Owns the thumbnail paint, selection/playing/bulk rings, watched
+    /// banner, and click/double-click sensing. Callers lay out the cell
+    /// (horizontal for List/Card, vertical for Grid) and pass `thumb_size`.
     fn render_row_body(
         &mut self,
         ui: &mut egui::Ui,
