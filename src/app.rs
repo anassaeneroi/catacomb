@@ -76,7 +76,24 @@ enum SortMode {
     ChannelAsc,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ViewMode {
+    List,
+    Card,
+    Grid,
+}
+
+impl ViewMode {
+    fn from_config(s: &str) -> Self {
+        match s {
+            "card" => ViewMode::Card,
+            "grid" => ViewMode::Grid,
+            _ => ViewMode::List,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum SidebarView {
     Channels,
     All,
@@ -165,6 +182,12 @@ pub struct App {
     plex_status: String,
     db: Database,
     card_density: f32,
+    /// Theme-aware accent colors, recomputed whenever the theme changes.
+    theme_accents: crate::theme::ThemeAccents,
+    /// Global default video-list render mode (from config).
+    default_view_mode: ViewMode,
+    /// Per-SidebarView overrides; a view absent here falls back to default.
+    view_mode_overrides: std::collections::HashMap<SidebarView, ViewMode>,
     /// When set, the global UI zoom changed and config should be saved at
     /// this instant (debounced so a slider drag / key-repeat doesn't write
     /// config.toml every frame). Synced from `ctx.zoom_factor()` in update().
@@ -356,6 +379,43 @@ fn idx_to_sponsorblock(i: usize) -> Option<String> {
 }
 
 impl App {
+    /// The view mode to use for `view`: the per-view override if set, else
+    /// the global default.
+    fn view_mode_for(&self, view: &SidebarView) -> ViewMode {
+        self.view_mode_overrides
+            .get(view)
+            .copied()
+            .unwrap_or(self.default_view_mode)
+    }
+
+    /// Paint a consistent missing-thumbnail placeholder inside `rect`:
+    /// a theme-tinted two-tone fill + a single glyph. Used for both channel
+    /// and video cards so the empty states stop diverging.
+    fn paint_thumb_placeholder(&self, ui: &egui::Ui, rect: egui::Rect, glyph: &str, density: f32) {
+        let v = ui.visuals();
+        let top = v.faint_bg_color.to_array();
+        let bot = v.panel_fill.to_array();
+        // egui has no native gradient; fake one with two stacked rects.
+        let mid = rect.top() + rect.height() * 0.5;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, mid)),
+            4.0,
+            egui::Color32::from_rgba_unmultiplied(top[0], top[1], top[2], 255),
+        );
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rect.min.x, mid), rect.max),
+            4.0,
+            egui::Color32::from_rgba_unmultiplied(bot[0], bot[1], bot[2], 255),
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            egui::FontId::proportional(24.0 * density),
+            v.weak_text_color(),
+        );
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, tray: Option<crate::tray::TrayHandle>) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let config_path = cwd.join("config.toml");
@@ -369,6 +429,14 @@ impl App {
         };
 
         theme::apply(&cc.egui_ctx, &config.ui.theme);
+        let theme_accents = theme::accents_for(&config.ui.theme);
+        let default_view_mode = ViewMode::from_config(&config.ui.default_view_mode);
+        // Typography & spacing baseline: slightly larger base text, more
+        // breathable item spacing, comfortable button padding.
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(8.0, 5.0);
+        style.spacing.button_padding = egui::vec2(6.0, 3.0);
+        cc.egui_ctx.set_style(style);
         // Restore the persisted global UI zoom. egui's built-in Ctrl +/-/0
         // also drives zoom_factor; update() keeps config.ui.ui_scale synced
         // and persists changes so the size survives restarts.
@@ -551,6 +619,9 @@ impl App {
             plex_status: String::new(),
             db,
             card_density: 1.0,
+            theme_accents,
+            default_view_mode,
+            view_mode_overrides: Default::default(),
             scale_save_at: None,
             sort_mode: SortMode::Title,
             watched,
@@ -3176,6 +3247,36 @@ impl App {
                                     {
                                         self.config.ui.theme = id.to_string();
                                         theme::apply(ctx, id);
+                                        self.theme_accents = theme::accents_for(id);
+                                    }
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Default view:");
+                        egui::ComboBox::from_id_salt("default_view_mode_combo")
+                            .selected_text(match self.default_view_mode {
+                                ViewMode::List => "List",
+                                ViewMode::Card => "Card",
+                                ViewMode::Grid => "Grid",
+                            })
+                            .show_ui(ui, |ui| {
+                                for (mode, label) in [
+                                    (ViewMode::List, "List"),
+                                    (ViewMode::Card, "Card"),
+                                    (ViewMode::Grid, "Grid"),
+                                ] {
+                                    if ui
+                                        .selectable_label(self.default_view_mode == mode, label)
+                                        .clicked()
+                                    {
+                                        self.default_view_mode = mode;
+                                        self.config.ui.default_view_mode = match mode {
+                                            ViewMode::List => "list",
+                                            ViewMode::Card => "card",
+                                            ViewMode::Grid => "grid",
+                                        }
+                                        .to_string();
                                     }
                                 }
                             });
@@ -3969,14 +4070,7 @@ impl App {
                                         .paint_at(ui, thumb_rect);
                                 }
                                 None => {
-                                    ui.painter().rect_filled(thumb_rect, 4.0, egui::Color32::from_gray(30));
-                                    ui.painter().text(
-                                        thumb_rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "📺",
-                                        egui::FontId::proportional(28.0 * density),
-                                        egui::Color32::from_gray(100),
-                                    );
+                                    self.paint_thumb_placeholder(ui, thumb_rect, "🎬", density);
                                 }
                             }
 
@@ -4180,208 +4274,368 @@ impl App {
             return;
         }
 
+        // View-mode toggle: ☰ List / ▢ Card / ◫ Grid. Writes a per-view
+        // override; a view with no override falls back to the global default.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("View:").weak().small());
+            let current = self.view_mode_for(&self.sidebar_view);
+            for (mode, label) in [
+                (ViewMode::List, "☰ List"),
+                (ViewMode::Card, "▢ Card"),
+                (ViewMode::Grid, "◫ Grid"),
+            ] {
+                if ui.selectable_label(current == mode, label).clicked() {
+                    self.view_mode_overrides
+                        .insert(self.sidebar_view.clone(), mode);
+                }
+            }
+        });
+        ui.separator();
+
         let density = self.card_density;
+        let view_mode = self.view_mode_for(&self.sidebar_view);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            let thumb_w = (176.0 * density).round();
-            let thumb_h = (99.0 * density).round();
-            let thumb_size = egui::vec2(thumb_w, thumb_h);
-
-            for card in &cards {
-                let selected = self.selected_video.as_deref() == Some(card.id.as_str());
-                let is_playing = self.currently_playing.as_deref() == Some(card.id.as_str());
-                let bulk_checked = self.bulk_selected.contains(&card.id);
-                let mut clicked_card = false;
-                let mut play_card = false;
-                let mut toggle_watched_card = false;
-                // Flag toggles deferred outside the row closure so we can
-                // mutate `self.flags` + DB without fighting the borrow checker.
-                let mut toggle_flag_card: Option<&'static str> = None;
-
-                ui.horizontal(|ui| {
-                    let (rect, resp) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
-                    let texture = card.thumb_path.as_ref().and_then(|p| self.texture(ctx, p));
-                    match &texture {
-                        Some(handle) => {
-                            egui::Image::new(handle)
-                                .maintain_aspect_ratio(true)
-                                .paint_at(ui, rect);
-                        }
-                        None => {
-                            ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(38));
-                            ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "▶",
-                                egui::FontId::proportional(26.0 * density),
-                                egui::Color32::from_gray(110),
-                            );
-                        }
-                    }
-
-                    if selected {
-                        ui.painter().rect_stroke(
-                            rect,
-                            4.0,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 170, 230)),
-                        );
-                    }
-                    if is_playing {
-                        ui.painter().rect_stroke(
-                            rect,
-                            4.0,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 200, 110)),
-                        );
-                    }
-                    if bulk_checked {
-                        ui.painter().rect_stroke(
-                            rect,
-                            4.0,
-                            egui::Stroke::new(3.0, egui::Color32::from_rgb(180, 130, 240)),
-                        );
-                    }
-                    if card.watched {
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_size(
-                                rect.min,
-                                egui::vec2(rect.width(), rect.height() * 0.18),
-                            ),
-                            0.0,
-                            egui::Color32::from_rgba_premultiplied(30, 140, 60, 200),
-                        );
-                        ui.painter().text(
-                            rect.min + egui::vec2(4.0, 2.0),
-                            egui::Align2::LEFT_TOP,
-                            "✓ watched",
-                            egui::FontId::proportional(10.0 * density),
-                            egui::Color32::WHITE,
-                        );
-                    }
-
-                    if resp.clicked() {
-                        clicked_card = true;
-                    }
-                    if resp.double_clicked() {
-                        play_card = true;
-                    }
-
-                    ui.vertical(|ui| {
-                        let title_color = if card.watched {
-                            ui.visuals().weak_text_color()
-                        } else {
-                            ui.visuals().text_color()
-                        };
-                        if ui
-                            .selectable_label(
-                                selected,
-                                egui::RichText::new(&card.title)
-                                    .strong()
-                                    .color(title_color),
-                            )
-                            .clicked()
-                        {
-                            clicked_card = true;
-                        }
-                        ui.horizontal(|ui| {
-                            if show_channel {
-                                ui.label(egui::RichText::new(&card.channel_name).small().weak());
-                                ui.label(egui::RichText::new("·").weak());
-                            }
-                            ui.label(egui::RichText::new(&card.id).small().monospace().weak());
-                            if let Some(date) = card.upload_date.as_deref().map(format_upload_date) {
-                                if !date.is_empty() {
-                                    ui.label(egui::RichText::new("·").weak());
-                                    ui.label(egui::RichText::new(date).small().weak());
-                                }
-                            }
-                            if let Some(secs) = card.duration_secs {
-                                ui.label(egui::RichText::new("·").weak());
-                                ui.label(egui::RichText::new(format_duration(secs)).small().weak());
-                            }
-                            if let Some(bytes) = card.file_size {
-                                ui.label(egui::RichText::new("·").weak());
-                                ui.label(egui::RichText::new(format_size(bytes)).small().weak());
-                            }
-                            if card.has_live_chat {
-                                ui.label(egui::RichText::new("· 💬").small().weak());
-                            }
-                            if card.video_path.is_none() {
-                                ui.label(
-                                    egui::RichText::new("· no video file")
-                                        .small()
-                                        .color(egui::Color32::from_rgb(200, 140, 90)),
-                                );
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            if self.bulk_mode {
-                                let chk_label = if bulk_checked { "☑" } else { "☐" };
-                                if ui.small_button(chk_label).clicked() {
-                                    clicked_card = true; // handled below
-                                }
-                            } else {
-                                if card.video_path.is_some() && ui.small_button("▶ Play").clicked() {
-                                    play_card = true;
-                                }
-                                if let Some(pos) = card.resume_pos {
-                                    if pos > 5.0 && ui.small_button(format!("⏩ {}", format_duration(pos))).clicked() {
-                                        play_card = true;
-                                    }
-                                }
-                                if ui.small_button("Details").clicked() {
-                                    clicked_card = true;
-                                }
-                                let w_label = if card.watched { "✓" } else { "○" };
-                                if ui.small_button(w_label).on_hover_text("Toggle watched").clicked() {
-                                    toggle_watched_card = true;
-                                }
-                                let fav_label = if card.favourite { "★" } else { "☆" };
-                                if ui.small_button(fav_label).on_hover_text("Toggle favourite").clicked() {
-                                    toggle_flag_card = Some("favourite");
-                                }
-                                let bm_label = if card.bookmark { "🔖" } else { "🔖̲" };
-                                if ui.small_button(bm_label).on_hover_text("Toggle bookmark").clicked() {
-                                    toggle_flag_card = Some("bookmark");
-                                }
-                                let wait_label = if card.waiting { "⏳" } else { "⏰" };
-                                if ui.small_button(wait_label).on_hover_text("Toggle waiting").clicked() {
-                                    toggle_flag_card = Some("waiting");
-                                }
-                            }
-                        });
-                    });
-                });
-
-                if self.bulk_mode {
-                    if clicked_card {
-                        let id = card.id.clone();
-                        if self.bulk_selected.contains(&id) {
-                            self.bulk_selected.remove(&id);
-                        } else {
-                            self.bulk_selected.insert(id);
-                        }
-                    }
-                } else if play_card {
-                    if let Some(p) = card.video_path.clone() {
-                        let id = card.id.clone();
-                        self.play_with_tracking(&p, id);
-                    }
-                    self.selected_video = Some(card.id.clone());
-                } else if clicked_card {
-                    self.selected_video = Some(card.id.clone());
+            match view_mode {
+                ViewMode::List | ViewMode::Card => {
+                    self.render_video_rows(ui, ctx, &cards, density, show_channel, view_mode == ViewMode::Card);
                 }
-                if toggle_watched_card {
-                    let id = card.id.clone();
-                    self.toggle_watched(&id);
+                ViewMode::Grid => {
+                    self.render_video_grid(ui, ctx, &cards, density, show_channel);
                 }
-                if let Some(flag) = toggle_flag_card {
-                    let id = card.id.clone();
-                    self.toggle_video_flag(&id, flag);
-                }
-
-                ui.separator();
             }
         });
         self.cards_cache = cards;
+    }
+
+    /// Row-based render path shared by List and Card modes. When `as_card`
+    /// is true, each row is wrapped in a rounded faint-bg card with a hover
+    /// accent ring; otherwise the row is rendered flat (legacy List style).
+    fn render_video_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        cards: &[Card],
+        density: f32,
+        show_channel: bool,
+        as_card: bool,
+    ) {
+        let thumb_w = (176.0 * density).round();
+        let thumb_h = (99.0 * density).round();
+        let thumb_size = egui::vec2(thumb_w, thumb_h);
+
+        for card in cards {
+            let selected = self.selected_video.as_deref() == Some(card.id.as_str());
+            let is_playing = self.currently_playing.as_deref() == Some(card.id.as_str());
+            let bulk_checked = self.bulk_selected.contains(&card.id);
+            let mut clicked_card = false;
+            let mut play_card = false;
+            let mut toggle_watched_card = false;
+            // Flag toggles deferred outside the row closure so we can
+            // mutate `self.flags` + DB without fighting the borrow checker.
+            let mut toggle_flag_card: Option<&'static str> = None;
+
+            // Wrap each row in a Frame when rendering as a Card.
+            let mut card_rect: Option<egui::Rect> = None;
+            if as_card {
+                let frame = egui::Frame::default()
+                    .fill(ui.visuals().faint_bg_color)
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                    ))
+                    .rounding(egui::Rounding::same(8.0))
+                    .inner_margin(egui::Margin::same(8.0))
+                    .outer_margin(egui::Margin::symmetric(0.0, 3.0));
+                let resp = frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        self.render_row_body(
+                            ui, ctx, card, density, thumb_size, show_channel,
+                            selected, is_playing, bulk_checked,
+                            &mut clicked_card, &mut play_card,
+                            &mut toggle_watched_card, &mut toggle_flag_card,
+                        );
+                    });
+                }).response;
+                if resp.hovered() {
+                    card_rect = Some(resp.rect);
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    self.render_row_body(
+                        ui, ctx, card, density, thumb_size, show_channel,
+                        selected, is_playing, bulk_checked,
+                        &mut clicked_card, &mut play_card,
+                        &mut toggle_watched_card, &mut toggle_flag_card,
+                    );
+                });
+            }
+
+            if let Some(rect) = card_rect {
+                ui.painter().rect_stroke(
+                    rect,
+                    8.0,
+                    egui::Stroke::new(1.5, self.theme_accents.accent),
+                );
+            }
+
+            self.apply_card_actions(
+                card, clicked_card, play_card, toggle_watched_card, toggle_flag_card,
+            );
+            ui.separator();
+        }
+    }
+
+    /// Grid mode: YouTube/Plex-style vertical cards in a responsive grid.
+    fn render_video_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        cards: &[Card],
+        density: f32,
+        show_channel: bool,
+    ) {
+        let thumb_w = (176.0 * density).round();
+        let thumb_h = (99.0 * density).round();
+        let card_w = thumb_w + 8.0;
+        let avail = ui.available_width();
+        let cols = ((avail / card_w).floor() as usize).max(1);
+
+        // Grid mode renders one cell at a time but still uses the deferred-
+        // flags pattern: actions are applied per-card right after its cell.
+        egui::Grid::new("video_grid")
+            .num_columns(cols)
+            .spacing([8.0, 8.0])
+            .show(ui, |ui| {
+                for card in cards {
+                    let selected = self.selected_video.as_deref() == Some(card.id.as_str());
+                    let is_playing = self.currently_playing.as_deref() == Some(card.id.as_str());
+                    let bulk_checked = self.bulk_selected.contains(&card.id);
+                    let mut clicked_card = false;
+                    let mut play_card = false;
+                    let mut toggle_watched_card = false;
+                    let mut toggle_flag_card: Option<&'static str> = None;
+
+                    ui.vertical(|ui| {
+                        // `render_row_body` owns the thumbnail + rings + clicks,
+                        // so the grid just lays out title/meta below it.
+                        self.render_row_body(
+                            ui, ctx, card, density, egui::vec2(thumb_w, thumb_h), show_channel,
+                            selected, is_playing, bulk_checked,
+                            &mut clicked_card, &mut play_card,
+                            &mut toggle_watched_card, &mut toggle_flag_card,
+                        );
+                    });
+
+                    self.apply_card_actions(
+                        card, clicked_card, play_card, toggle_watched_card, toggle_flag_card,
+                    );
+                    ui.end_row();
+                }
+            });
+    }
+
+    /// The thumbnail + metadata + flag-button body shared by List/Card/Grid.
+    /// Owns the thumbnail paint, selection/playing/bulk rings, watched
+    /// banner, and click/double-click sensing. Callers lay out the cell
+    /// (horizontal for List/Card, vertical for Grid) and pass `thumb_size`.
+    fn render_row_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        card: &Card,
+        density: f32,
+        thumb_size: egui::Vec2,
+        show_channel: bool,
+        selected: bool,
+        is_playing: bool,
+        bulk_checked: bool,
+        clicked_card: &mut bool,
+        play_card: &mut bool,
+        toggle_watched_card: &mut bool,
+        toggle_flag_card: &mut Option<&'static str>,
+    ) {
+        let (rect, resp) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
+        let texture = card.thumb_path.as_ref().and_then(|p| self.texture(ctx, p));
+        match &texture {
+            Some(handle) => {
+                egui::Image::new(handle)
+                    .maintain_aspect_ratio(true)
+                    .paint_at(ui, rect);
+            }
+            None => {
+                self.paint_thumb_placeholder(ui, rect, "🎬", density);
+            }
+        }
+
+        if selected {
+            ui.painter().rect_stroke(
+                rect,
+                4.0,
+                egui::Stroke::new(2.0, self.theme_accents.accent),
+            );
+        }
+        if is_playing {
+            ui.painter().rect_stroke(
+                rect,
+                4.0,
+                egui::Stroke::new(2.0, self.theme_accents.success),
+            );
+        }
+        if bulk_checked {
+            ui.painter().rect_stroke(
+                rect,
+                4.0,
+                egui::Stroke::new(3.0, self.theme_accents.warning),
+            );
+        }
+        if card.watched {
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(
+                    rect.min,
+                    egui::vec2(rect.width(), rect.height() * 0.18),
+                ),
+                0.0,
+                egui::Color32::from_rgba_premultiplied(30, 140, 60, 200),
+            );
+            ui.painter().text(
+                rect.min + egui::vec2(4.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                "✓ watched",
+                egui::FontId::proportional(10.0 * density),
+                egui::Color32::WHITE,
+            );
+        }
+
+        if resp.clicked() {
+            *clicked_card = true;
+        }
+        if resp.double_clicked() {
+            *play_card = true;
+        }
+
+        ui.vertical(|ui| {
+            let title_color = if card.watched {
+                ui.visuals().weak_text_color()
+            } else {
+                ui.visuals().text_color()
+            };
+            if ui
+                .selectable_label(
+                    selected,
+                    egui::RichText::new(&card.title)
+                        .strong()
+                        .size(14.0)
+                        .color(title_color),
+                )
+                .clicked()
+            {
+                *clicked_card = true;
+            }
+            ui.horizontal(|ui| {
+                if show_channel {
+                    ui.label(egui::RichText::new(&card.channel_name).small().weak());
+                    ui.label(egui::RichText::new("·").weak());
+                }
+                ui.label(egui::RichText::new(&card.id).small().monospace().weak());
+                if let Some(date) = card.upload_date.as_deref().map(format_upload_date) {
+                    if !date.is_empty() {
+                        ui.label(egui::RichText::new("·").weak());
+                        ui.label(egui::RichText::new(date).small().weak());
+                    }
+                }
+                if let Some(secs) = card.duration_secs {
+                    ui.label(egui::RichText::new("·").weak());
+                    ui.label(egui::RichText::new(format_duration(secs)).small().weak());
+                }
+                if let Some(bytes) = card.file_size {
+                    ui.label(egui::RichText::new("·").weak());
+                    ui.label(egui::RichText::new(format_size(bytes)).small().weak());
+                }
+                if card.has_live_chat {
+                    ui.label(egui::RichText::new("· 💬").small().weak());
+                }
+                if card.video_path.is_none() {
+                    ui.label(
+                        egui::RichText::new("· no video file")
+                            .small()
+                            .color(egui::Color32::from_rgb(200, 140, 90)),
+                    );
+                }
+            });
+            ui.horizontal(|ui| {
+                if self.bulk_mode {
+                    let chk_label = if bulk_checked { "☑" } else { "☐" };
+                    if ui.small_button(chk_label).clicked() {
+                        *clicked_card = true; // handled below
+                    }
+                } else {
+                    if card.video_path.is_some() && ui.small_button("▶ Play").clicked() {
+                        *play_card = true;
+                    }
+                    if let Some(pos) = card.resume_pos {
+                        if pos > 5.0 && ui.small_button(format!("⏩ {}", format_duration(pos))).clicked() {
+                            *play_card = true;
+                        }
+                    }
+                    if ui.small_button("Details").clicked() {
+                        *clicked_card = true;
+                    }
+                    let w_label = if card.watched { "✓" } else { "○" };
+                    if ui.small_button(w_label).on_hover_text("Toggle watched").clicked() {
+                        *toggle_watched_card = true;
+                    }
+                    let fav_label = if card.favourite { "★" } else { "☆" };
+                    if ui.small_button(fav_label).on_hover_text("Toggle favourite").clicked() {
+                        *toggle_flag_card = Some("favourite");
+                    }
+                    let bm_label = if card.bookmark { "🔖" } else { "🔖̲" };
+                    if ui.small_button(bm_label).on_hover_text("Toggle bookmark").clicked() {
+                        *toggle_flag_card = Some("bookmark");
+                    }
+                    let wait_label = if card.waiting { "⏳" } else { "⏰" };
+                    if ui.small_button(wait_label).on_hover_text("Toggle waiting").clicked() {
+                        *toggle_flag_card = Some("waiting");
+                    }
+                }
+            });
+        });
+    }
+
+    /// Apply the per-card deferred actions (click/play/watch/flag toggles).
+    fn apply_card_actions(
+        &mut self,
+        card: &Card,
+        clicked_card: bool,
+        play_card: bool,
+        toggle_watched_card: bool,
+        toggle_flag_card: Option<&'static str>,
+    ) {
+        if self.bulk_mode {
+            if clicked_card {
+                let id = card.id.clone();
+                if self.bulk_selected.contains(&id) {
+                    self.bulk_selected.remove(&id);
+                } else {
+                    self.bulk_selected.insert(id);
+                }
+            }
+        } else if play_card {
+            if let Some(p) = card.video_path.clone() {
+                let id = card.id.clone();
+                self.play_with_tracking(&p, id);
+            }
+            self.selected_video = Some(card.id.clone());
+        } else if clicked_card {
+            self.selected_video = Some(card.id.clone());
+        }
+        if toggle_watched_card {
+            let id = card.id.clone();
+            self.toggle_watched(&id);
+        }
+        if let Some(flag) = toggle_flag_card {
+            let id = card.id.clone();
+            self.toggle_video_flag(&id, flag);
+        }
     }
 }
 

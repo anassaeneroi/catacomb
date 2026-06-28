@@ -207,9 +207,14 @@ pub struct UiSection {
     /// the built-in Ctrl + / Ctrl - / Ctrl 0 keyboard zoom.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+    /// Default video-list render mode: "list", "card", or "grid".
+    /// Per-view overrides live in App state (not persisted beyond session).
+    #[serde(default = "default_view_mode")]
+    pub default_view_mode: String,
 }
 
 fn default_ui_scale() -> f32 { 1.0 }
+fn default_view_mode() -> String { "list".to_string() }
 
 impl Default for UiSection {
     fn default() -> Self {
@@ -217,6 +222,7 @@ impl Default for UiSection {
             theme: default_theme(),
             minimize_to_tray: false,
             ui_scale: default_ui_scale(),
+            default_view_mode: default_view_mode(),
         }
     }
 }
@@ -317,5 +323,24 @@ impl Config {
             convert: ConvertSection::default(),
             remotes: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_section_default_view_mode_is_list() {
+        let ui = UiSection::default();
+        assert_eq!(ui.default_view_mode, "list");
+    }
+
+    #[test]
+    fn ui_section_round_trips_through_toml() {
+        let ui = UiSection { default_view_mode: "grid".into(), ..Default::default() };
+        let s = toml::to_string(&ui).unwrap();
+        let back: UiSection = toml::from_str(&s).unwrap();
+        assert_eq!(back.default_view_mode, "grid");
     }
 }
