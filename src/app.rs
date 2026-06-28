@@ -3247,6 +3247,35 @@ impl App {
                             });
                         ui.end_row();
 
+                        ui.label("Default view:");
+                        egui::ComboBox::from_id_salt("default_view_mode_combo")
+                            .selected_text(match self.default_view_mode {
+                                ViewMode::List => "List",
+                                ViewMode::Card => "Card",
+                                ViewMode::Grid => "Grid",
+                            })
+                            .show_ui(ui, |ui| {
+                                for (mode, label) in [
+                                    (ViewMode::List, "List"),
+                                    (ViewMode::Card, "Card"),
+                                    (ViewMode::Grid, "Grid"),
+                                ] {
+                                    if ui
+                                        .selectable_label(self.default_view_mode == mode, label)
+                                        .clicked()
+                                    {
+                                        self.default_view_mode = mode;
+                                        self.config.ui.default_view_mode = match mode {
+                                            ViewMode::List => "list",
+                                            ViewMode::Card => "card",
+                                            ViewMode::Grid => "grid",
+                                        }
+                                        .to_string();
+                                    }
+                                }
+                            });
+                        ui.end_row();
+
                         ui.label("UI scale:");
                         ui.horizontal(|ui| {
                             // Drive zoom_factor directly; update() mirrors it
