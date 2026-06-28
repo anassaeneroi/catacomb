@@ -4239,6 +4239,24 @@ impl App {
             return;
         }
 
+        // View-mode toggle: ☰ List / ▢ Card / ◫ Grid. Writes a per-view
+        // override; a view with no override falls back to the global default.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("View:").weak().small());
+            let current = self.view_mode_for(&self.sidebar_view);
+            for (mode, label) in [
+                (ViewMode::List, "☰ List"),
+                (ViewMode::Card, "▢ Card"),
+                (ViewMode::Grid, "◫ Grid"),
+            ] {
+                if ui.selectable_label(current == mode, label).clicked() {
+                    self.view_mode_overrides
+                        .insert(self.sidebar_view.clone(), mode);
+                }
+            }
+        });
+        ui.separator();
+
         let density = self.card_density;
         let view_mode = self.view_mode_for(&self.sidebar_view);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
