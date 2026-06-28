@@ -431,6 +431,12 @@ impl App {
         theme::apply(&cc.egui_ctx, &config.ui.theme);
         let theme_accents = theme::accents_for(&config.ui.theme);
         let default_view_mode = ViewMode::from_config(&config.ui.default_view_mode);
+        // Typography & spacing baseline: slightly larger base text, more
+        // breathable item spacing, comfortable button padding.
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(8.0, 5.0);
+        style.spacing.button_padding = egui::vec2(6.0, 3.0);
+        cc.egui_ctx.set_style(style);
         // Restore the persisted global UI zoom. egui's built-in Ctrl +/-/0
         // also drives zoom_factor; update() keeps config.ui.ui_scale synced
         // and persists changes so the size survives restarts.
@@ -4547,6 +4553,7 @@ impl App {
                     selected,
                     egui::RichText::new(&card.title)
                         .strong()
+                        .size(14.0)
                         .color(title_color),
                 )
                 .clicked()
