@@ -18,6 +18,15 @@ Phases 2/3/5 require a physical Android device with a logged-in Google session
 environment. Phase 4 — the "shared Rust core" leg the feasibility research
 marked **PROVEN** — is fully implemented and verified here.
 
+## Installable demo APK (`demo/`)
+
+[`demo/`](demo/) is a minimal, dependency-free app (plain Android Views, no
+Gradle/AGP/Compose) that calls the Phase-4 JNI core on-device and shows the
+results. Build it with `demo/build-apk.sh` (drives `aapt2`/`d8`/`zipalign`/
+`apksigner` directly) → `demo/out/catacomb-spike-debug.apk`. Verified on an
+Android 14 x86_64 emulator: the app launches, loads `libcatacomb_core.so`, and
+the JNI calls return correct JSON. See [`demo/README.md`](demo/README.md).
+
 ## Phase 4: `rust/catacomb_core`
 
 A `cdylib` that reuses Catacomb's **pure** modules verbatim (`vtt`,
