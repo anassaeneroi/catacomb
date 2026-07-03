@@ -294,6 +294,10 @@ pub struct App {
     /// menu or another exit path). The viewport `CloseRequested` handler
     /// honors this — without it, the close button minimizes to tray.
     quitting: bool,
+    /// Clone of the egui context, kept so background worker threads (dedup,
+    /// remote fetch) can call `request_repaint()` on completion and wake the
+    /// event loop even when the app is idle or on a different screen.
+    egui_ctx: egui::Context,
 }
 
 /// Scratch struct for the per-channel options dialog. Distinct from
@@ -691,6 +695,7 @@ impl App {
             move_to_folder_target: None,
             tray,
             quitting: false,
+            egui_ctx: cc.egui_ctx.clone(),
         }
     }
 
@@ -1098,6 +1103,7 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         self.dedup_rx = Some(rx);
         let workers = crate::fingerprint::default_workers();
+        let repaint_ctx = self.egui_ctx.clone();
         std::thread::spawn(move || {
             let res = crate::fingerprint::rebuild_and_group(
                 &db, inputs, &valid_paths, workers, &progress.0, &progress.1,
@@ -1115,6 +1121,9 @@ impl App {
                 groups
             });
             let _ = tx.send(res);
+            // Wake the egui loop so the result is drained in update() even if
+            // the user navigated away from the Maintenance screen.
+            repaint_ctx.request_repaint();
         });
     }
 
@@ -2214,39 +2223,6 @@ impl App {
     fn maintenance_screen(&mut self, ctx: &egui::Context) {
         let report = self.health_report.clone().unwrap_or_default();
 
-        // Receive a background remote-library fetch (federation).
-        let remote_result = self.remote_rx.as_ref().and_then(|rx| rx.try_recv().ok());
-        if let Some(res) = remote_result {
-            self.remote_rx = None;
-            match res {
-                Ok(lib) => {
-                    let n: usize = lib.channels.iter().map(|c| c.videos.len()).sum();
-                    self.remote_status =
-                        format!("{} channels · {} videos", lib.channels.len(), n);
-                    self.remote_library = Some(lib);
-                }
-                Err(e) => {
-                    self.remote_status = format!("Error: {e}");
-                    self.remote_library = None;
-                }
-            }
-            ctx.request_repaint();
-        }
-
-        // Drain the background dedup result if it's ready.
-        let mut dedup_done = None;
-        if let Some(rx) = &self.dedup_rx {
-            if let Ok(res) = rx.try_recv() { dedup_done = Some(res); }
-        }
-        if let Some(res) = dedup_done {
-            match res {
-                Ok(groups) => self.dedup_groups = groups,
-                Err(e) => self.dedup_error = Some(e),
-            }
-            self.dedup_running = false;
-            self.dedup_rx = None;
-        }
-
         // Actions are collected during rendering and applied after the closure
         // to avoid borrowing `self` while the report is borrowed immutably.
         let mut to_remove: Vec<PathBuf> = Vec::new();
@@ -2515,8 +2491,11 @@ impl App {
         self.remote_status = format!("Connecting to {}…", client.name);
         let (tx, rx) = std::sync::mpsc::channel();
         self.remote_rx = Some(rx);
+        let repaint_ctx = self.egui_ctx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(client.library());
+            // Wake the egui loop so update() drains the result promptly.
+            repaint_ctx.request_repaint();
         });
     }
 
@@ -4710,6 +4689,43 @@ impl eframe::App for App {
             );
             self.library_load_rx = None;
             self.library_generation += 1;
+            ctx.request_repaint();
+        }
+
+        // ── Background remote-library fetch hand-off ────────────────────
+        // Federation peer fetches (start_remote_fetch) deliver over
+        // `remote_rx`. Drain in the main loop, not in a per-screen render:
+        // the result is displayed on the Remotes screen, so draining it only
+        // inside maintenance_screen() left the Remotes screen stuck on
+        // "Connecting…" and busy-looping repaints forever.
+        if let Some(res) = self.remote_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.remote_rx = None;
+            match res {
+                Ok(lib) => {
+                    let n: usize = lib.channels.iter().map(|c| c.videos.len()).sum();
+                    self.remote_status =
+                        format!("{} channels · {} videos", lib.channels.len(), n);
+                    self.remote_library = Some(lib);
+                }
+                Err(e) => {
+                    self.remote_status = format!("Error: {e}");
+                    self.remote_library = None;
+                }
+            }
+            ctx.request_repaint();
+        }
+
+        // ── Background dedup result hand-off ────────────────────────────
+        // Drain in the main loop so the scan completes (and the button
+        // re-enables) even if the user navigated away from Maintenance
+        // while the ffmpeg pass was running.
+        if let Some(res) = self.dedup_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            match res {
+                Ok(groups) => self.dedup_groups = groups,
+                Err(e) => self.dedup_error = Some(e),
+            }
+            self.dedup_running = false;
+            self.dedup_rx = None;
             ctx.request_repaint();
         }
 

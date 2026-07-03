@@ -378,7 +378,7 @@ struct SettingsPayload {
     #[serde(skip_deserializing, default)]
     available_binds: Option<Vec<BindOption>>,
     /// Selected bind mode (localhost, tailscale, lan, all). Clients can send this on POST to change.
-    #[serde(skip_deserializing, default)]
+    #[serde(default)]
     bind_mode: Option<String>,
     /// Whether a password is required for downloads (sent by server only).
     #[serde(skip_deserializing, default)]
@@ -1218,12 +1218,26 @@ async fn auth_middleware(
 }
 
 /// True if the query string carries `token=<expected>` (the feed capability
-/// token). Empty `expected` never matches.
+/// token). Empty `expected` never matches. The token is compared in constant
+/// time so response latency doesn't leak how many leading bytes matched.
 fn query_has_token(query: &str, expected: &str) -> bool {
     if expected.is_empty() { return false; }
     query.split('&').any(|kv| {
-        kv.strip_prefix("token=").is_some_and(|v| v == expected)
+        kv.strip_prefix("token=").is_some_and(|v| ct_eq(v.as_bytes(), expected.as_bytes()))
     })
+}
+
+/// Constant-time byte-slice equality. Avoids the early-exit of `==` so a
+/// network attacker can't binary-search a capability token by timing.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────

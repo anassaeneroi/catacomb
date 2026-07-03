@@ -1329,7 +1329,12 @@ impl Downloader {
         keep_original: bool,
     ) {
         let (tx, rx) = channel();
-        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // ffmpeg writes the encoded stream to `work_out` (a file) and its
+        // diagnostics to stderr (via -loglevel error -stats), so stdout is
+        // never used. Piping it without a reader would let a full 64KB pipe
+        // buffer deadlock ffmpeg against our child.wait() below, so discard
+        // it explicitly.
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         // Spawn before the thread so the watchdog gets a pid (ffmpeg can
         // also hang on a bad input). On spawn failure, surface it.
         let mut child = match cmd.spawn() {

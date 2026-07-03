@@ -224,7 +224,7 @@ fn settings_roundtrip_and_persist() {
         "max_concurrent":5,"use_bundled_ytdlp":false,"use_pot_provider":false,
         "subtitles_enabled":true,"subtitles_auto":false,"subtitles_embed":true,
         "subtitle_langs":"en","subtitle_format":"srt","youtube_player_clients":"tv,mweb",
-        "sponsorblock_mode":"remove",
+        "sponsorblock_mode":"remove","bind_mode":"all",
         "convert_mode":"h264-mp4","convert_crf":28,"convert_preset":"fast",
         "convert_audio_format":"","convert_keep_original":true
     }"#);
@@ -237,12 +237,18 @@ fn settings_roundtrip_and_persist() {
     assert_eq!(field(&body, "youtube_player_clients"), Some("tv,mweb"));
     assert_eq!(field(&body, "sponsorblock_mode"), Some("remove"));
     assert_eq!(field(&body, "subtitle_format"), Some("srt"));
+    assert_eq!(
+        field(&body, "current_bind").map(|s| s.starts_with("0.0.0.0:")),
+        Some(true),
+        "bind_mode POST took effect (current_bind now 0.0.0.0): {body}"
+    );
 
     // …and so does config.toml on disk.
     let cfg = std::fs::read_to_string(s.dir.join("config.toml")).unwrap();
     assert!(cfg.contains("mode = \"h264-mp4\""), "config persisted convert mode:\n{cfg}");
     assert!(cfg.contains("youtube_player_clients = \"tv,mweb\""), "config persisted clients");
     assert!(cfg.contains("sponsorblock_mode = \"remove\""), "config persisted sponsorblock");
+    assert!(cfg.contains("bind = \"0.0.0.0\""), "config persisted resolved bind address:\n{cfg}");
 }
 
 #[test]
