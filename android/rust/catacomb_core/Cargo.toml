@@ -1,0 +1,40 @@
+# Android JNI core for Catacomb (Stage-1 prototype, Phase 4).
+#
+# A thin cdylib that reuses Catacomb's *pure* modules (vtt, error_class,
+# platform) verbatim via `#[path]` includes so the on-device engine stays in
+# lockstep with the desktop/web build instead of forking the logic. It exposes
+# a handful of String-in / String-out JNI entry points the Kotlin layer calls.
+#
+# The empty `[workspace]` table isolates this crate from the desktop package
+# that lives at the repository root (which is a plain package, not a
+# workspace); without it cargo would try to treat the two as one workspace.
+[workspace]
+
+[package]
+name = "catacomb_core"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Android JNI bridge exposing Catacomb's pure Rust modules on-device."
+
+[lib]
+# cdylib → a .so loadable by the JVM via System.loadLibrary("catacomb_core").
+crate-type = ["cdylib"]
+
+[dependencies]
+# Same major as the desktop crate so the shared modules' derives resolve
+# identically.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# JNI bindings. 0.21 is the current stable line and links against the JVM's
+# built-in libjvm at runtime (no extra native dep on device).
+jni = "0.21"
+
+[profile.release]
+# Small, fast .so: LTO + panic=abort (a Rust panic must never unwind across
+# the FFI boundary into the JVM — that's UB; abort is the safe choice, and we
+# also catch panics at each entry point as defense in depth).
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true

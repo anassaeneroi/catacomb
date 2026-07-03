@@ -1,0 +1,14 @@
+# Rust build artifacts
+rust/catacomb_core/target/
+
+# Compiled native libs land here via rust/catacomb_core/build.sh — rebuild
+# rather than commit binaries.
+app/src/main/jniLibs/
+
+# Gradle / Android build outputs (Phase 1, not yet scaffolded here)
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
