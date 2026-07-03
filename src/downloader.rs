@@ -982,7 +982,7 @@ impl Downloader {
         let child_pid = Some(child.id());
 
         thread::spawn(move || {
-            if let Some(stderr) = child.stderr.take() {
+            let stderr_handle = child.stderr.take().map(|stderr| {
                 let tx = tx.clone();
                 let cookies_abs = cookies_abs.clone();
                 thread::spawn(move || {
@@ -990,8 +990,8 @@ impl Downloader {
                         let line = redact_sensitive(&line, &cookies_abs);
                         let _ = tx.send(Msg::Line(format!("[stderr] {line}")));
                     }
-                });
-            }
+                })
+            });
 
             if let Some(stdout) = child.stdout.take() {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -1026,6 +1026,13 @@ impl Downloader {
                 }
                 Err(_) => false,
             };
+            // Wait for the stderr reader to flush all buffered lines before
+            // announcing completion — otherwise Finished can race ahead of
+            // trailing stderr output still in flight, and failure_class gets
+            // computed from an incomplete log (see Job::drain).
+            if let Some(h) = stderr_handle {
+                let _ = h.join();
+            }
             let _ = tx.send(Msg::Finished(ok));
         });
 
@@ -1337,15 +1344,20 @@ impl Downloader {
         };
         let child_pid = Some(child.id());
         thread::spawn(move || {
-            if let Some(stderr) = child.stderr.take() {
+            let stderr_handle = child.stderr.take().map(|stderr| {
                 let tx = tx.clone();
                 thread::spawn(move || {
                     for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                         let _ = tx.send(Msg::Line(format!("[ffmpeg] {line}")));
                     }
-                });
-            }
+                })
+            });
             let ok = matches!(child.wait(), Ok(s) if s.success());
+            // See the analogous join in spawn_job: wait for stderr to finish
+            // flushing before any Finished-triggered classification runs.
+            if let Some(h) = stderr_handle {
+                let _ = h.join();
+            }
             if ok {
                 // File bookkeeping on success.
                 if same_ext {

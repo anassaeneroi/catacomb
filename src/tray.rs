@@ -43,6 +43,15 @@ pub enum TrayEvent {
 /// We just hold the receiver end of the menu-event channel.
 pub struct TrayHandle {
     pub events: Receiver<TrayEvent>,
+    /// Shared slot for the egui context, filled in by [`App`](crate::app::App)
+    /// right after construction. The tray runs on a background thread and
+    /// only pushes events onto `events`; without a way to wake the egui
+    /// event loop, those events sit unread until the next *natural* repaint —
+    /// which never happens while the app is idle or hidden-to-tray, so
+    /// "Show"/"Hide" appear to do nothing. Storing the context here lets the
+    /// tray thread call `request_repaint()` after every send so the main loop
+    /// drains the event on the very next frame.
+    pub ctx: std::sync::Arc<std::sync::OnceLock<eframe::egui::Context>>,
 }
 
 /// Internal tray model implementing `ksni::Tray`. Each method is called
@@ -52,11 +61,26 @@ pub struct TrayHandle {
 #[cfg(target_os = "linux")]
 struct TrayModel {
     tx: std::sync::mpsc::Sender<TrayEvent>,
+    /// Shared egui context (see [`TrayHandle::ctx`]). Used to wake the main
+    /// loop after emitting an event so it's drained immediately.
+    ctx: std::sync::Arc<std::sync::OnceLock<eframe::egui::Context>>,
     /// PNG bytes for the icon, decoded once at construction. ksni asks
     /// for raw ARGB so we keep both forms.
     icon_argb: Vec<u8>,
     icon_w: i32,
     icon_h: i32,
+}
+
+#[cfg(target_os = "linux")]
+impl TrayModel {
+    /// Emit a tray event and wake the egui loop so it's handled on the next
+    /// frame even when the app is idle or hidden to the tray.
+    fn emit(&self, evt: TrayEvent) {
+        let _ = self.tx.send(evt);
+        if let Some(ctx) = self.ctx.get() {
+            ctx.request_repaint();
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -86,7 +110,7 @@ impl ksni::Tray for TrayModel {
     /// Activate fires on left-click of the tray icon. Surfacing the main
     /// window is the most common "what did the user mean" interpretation.
     fn activate(&mut self, _x: i32, _y: i32) {
-        let _ = self.tx.send(TrayEvent::Show);
+        self.emit(TrayEvent::Show);
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::StandardItem;
@@ -94,7 +118,7 @@ impl ksni::Tray for TrayModel {
             StandardItem {
                 label: "Show Catacomb".into(),
                 activate: Box::new(|m: &mut Self| {
-                    let _ = m.tx.send(TrayEvent::Show);
+                    m.emit(TrayEvent::Show);
                 }),
                 ..Default::default()
             }
@@ -102,7 +126,7 @@ impl ksni::Tray for TrayModel {
             StandardItem {
                 label: "Hide window".into(),
                 activate: Box::new(|m: &mut Self| {
-                    let _ = m.tx.send(TrayEvent::Hide);
+                    m.emit(TrayEvent::Hide);
                 }),
                 ..Default::default()
             }
@@ -112,7 +136,7 @@ impl ksni::Tray for TrayModel {
                 label: "Quit".into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|m: &mut Self| {
-                    let _ = m.tx.send(TrayEvent::Quit);
+                    m.emit(TrayEvent::Quit);
                 }),
                 ..Default::default()
             }
@@ -145,8 +169,11 @@ pub fn start(icon_png_bytes: &[u8]) -> Option<TrayHandle> {
     }
 
     let (tx, rx) = std::sync::mpsc::channel();
+    let ctx: std::sync::Arc<std::sync::OnceLock<eframe::egui::Context>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
     let model = TrayModel {
         tx,
+        ctx: ctx.clone(),
         icon_argb: argb,
         icon_w: w as i32,
         icon_h: h as i32,
@@ -176,7 +203,7 @@ pub fn start(icon_png_bytes: &[u8]) -> Option<TrayHandle> {
         })
         .ok()?;
 
-    Some(TrayHandle { events: rx })
+    Some(TrayHandle { events: rx, ctx })
 }
 
 /// Non-Linux stub: there's no StatusNotifierItem tray backend on Windows or

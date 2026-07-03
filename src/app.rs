@@ -429,6 +429,13 @@ impl App {
         };
 
         theme::apply(&cc.egui_ctx, &config.ui.theme);
+        // Hand the tray thread a clone of the egui context so its menu
+        // activations (Show/Hide/Quit) can wake the event loop; otherwise
+        // those events sit unread in the channel while the app is idle or
+        // hidden to tray and appear to do nothing.
+        if let Some(handle) = &tray {
+            let _ = handle.ctx.set(cc.egui_ctx.clone());
+        }
         let theme_accents = theme::accents_for(&config.ui.theme);
         let default_view_mode = ViewMode::from_config(&config.ui.default_view_mode);
         // Typography & spacing baseline: slightly larger base text, more
@@ -2207,19 +2214,6 @@ impl App {
     fn maintenance_screen(&mut self, ctx: &egui::Context) {
         let report = self.health_report.clone().unwrap_or_default();
 
-        // Swap in the library once the deferred startup scan finishes.
-        let loaded_library = self.library_load_rx.as_ref().and_then(|rx| rx.try_recv().ok());
-        if let Some(lib) = loaded_library {
-            self.library = lib;
-            self.status = format!(
-                "{} channels, {} videos",
-                self.library.len(),
-                self.library.iter().map(|c| c.total_videos()).sum::<usize>()
-            );
-            self.library_load_rx = None;
-            ctx.request_repaint();
-        }
-
         // Receive a background remote-library fetch (federation).
         let remote_result = self.remote_rx.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(res) = remote_result {
@@ -3248,6 +3242,13 @@ impl App {
                                         self.config.ui.theme = id.to_string();
                                         theme::apply(ctx, id);
                                         self.theme_accents = theme::accents_for(id);
+                                        // Persist immediately: the theme
+                                        // applies live, so users expect it to
+                                        // stick without also hitting the
+                                        // separate "Apply & Save" button.
+                                        if let Err(e) = self.config.save(&self.config_path) {
+                                            self.status = format!("Error saving config: {e}");
+                                        }
                                     }
                                 }
                             });
@@ -3469,7 +3470,22 @@ impl App {
 
                         ui.label("Download password:");
                         ui.vertical(|ui| {
-                            ui.checkbox(&mut self.settings_password_enabled, "require for web downloads");
+                            // Persist the enable/disable state immediately so
+                            // "whether password is enabled" survives a restart
+                            // even if the user never clicks "Apply & Save".
+                            // "Enabled" isn't stored as a flag — it's derived
+                            // from whether a password_hash row exists — so
+                            // turning it off clears the hash right away.
+                            let toggled = ui
+                                .checkbox(&mut self.settings_password_enabled, "require for web downloads")
+                                .changed();
+                            if toggled && !self.settings_password_enabled {
+                                match self.db.set_setting("password_hash", None) {
+                                    Ok(_) => self.status = "Download password disabled.".to_string(),
+                                    Err(e) => self.status = format!("DB error: {e}"),
+                                }
+                                self.settings_password_input.clear();
+                            }
                             if self.settings_password_enabled {
                                 let hint = if self.settings_password_input.is_empty() {
                                     "leave blank to keep current"
@@ -3482,6 +3498,24 @@ impl App {
                                         .desired_width(220.0)
                                         .hint_text(hint),
                                 );
+                                // A password can only be stored once it's been
+                                // typed and hashed, so offer an explicit commit
+                                // that persists it right away (independent of
+                                // "Apply & Save").
+                                if !self.settings_password_input.is_empty()
+                                    && ui.button("💾 Set password").clicked()
+                                {
+                                    match crate::web::hash_password(&self.settings_password_input) {
+                                        Some(hash) => match self.db.set_setting("password_hash", Some(&hash)) {
+                                            Ok(_) => {
+                                                self.settings_password_input.clear();
+                                                self.status = "Download password set.".to_string();
+                                            }
+                                            Err(e) => self.status = format!("DB error: {e}"),
+                                        },
+                                        None => self.status = "Error hashing password".to_string(),
+                                    }
+                                }
                             }
                         });
                         ui.end_row();
@@ -4659,6 +4693,24 @@ impl eframe::App for App {
                 let _ = self.config.save(&self.config_path);
                 self.scale_save_at = None;
             }
+        }
+
+        // ── Deferred library-scan hand-off ──────────────────────────────
+        // The startup library scan runs on a background thread and delivers
+        // its result over `library_load_rx`. Drain it here in the main loop
+        // so the library populates on whatever screen is showing — the
+        // default is Library, so draining only inside maintenance_screen()
+        // left the library empty until the user pressed Rescan.
+        if let Some(lib) = self.library_load_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.library = lib;
+            self.status = format!(
+                "{} channels, {} videos",
+                self.library.len(),
+                self.library.iter().map(|c| c.total_videos()).sum::<usize>()
+            );
+            self.library_load_rx = None;
+            self.library_generation += 1;
+            ctx.request_repaint();
         }
 
         // ── System-tray event drain ─────────────────────────────────────

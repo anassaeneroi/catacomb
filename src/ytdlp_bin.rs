@@ -27,7 +27,13 @@ use std::process::Command;
 
 /// Root directory holding everything bundled — venv + bin.
 pub fn bundled_root() -> PathBuf {
+    // Native Windows shells generally don't set `HOME`; fall back to
+    // `USERPROFILE` there so the bundled install has a stable location
+    // instead of silently relocating to the current working directory.
     let home = std::env::var_os("HOME")
+        .or_else(|| {
+            if cfg!(windows) { std::env::var_os("USERPROFILE") } else { None }
+        })
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".local").join("share").join("catacomb")
