@@ -5,14 +5,15 @@ rust/catacomb_core/target/
 # rather than commit binaries.
 app/src/main/jniLibs/
 
-# Manual APK build outputs (APK, signing artifacts, debug keystore) — build
-# products, never committed.
+# Manual APK build outputs (demo/)
 demo/out/
 
-# Gradle / Android build outputs (Phase 1, not yet scaffolded here)
+# Gradle / Android build outputs
 .gradle/
 build/
 app/build/
 local.properties
+debug.keystore
 *.iml
 .idea/
+captures/
