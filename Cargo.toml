@@ -75,6 +75,14 @@ codegen-units = 1
 # runtime; those are less informative without symbols but usable with
 # addr2line against the unstripped build artifact.
 strip = "debuginfo"
+# No unwinding tables/landing pads: smaller binary, marginally faster hot
+# paths. The crash handler (crash.rs panic hook) still fires before the
+# abort, so crash logging is preserved. Cargo forces `panic=unwind` for
+# test/bench harnesses automatically, so `cargo test --release` and the
+# #[cfg(test)] catch_unwind in crash.rs are unaffected. Tradeoff: a panic
+# in a parallel scan worker aborts the process instead of one worker —
+# acceptable, those workers treat all fallible I/O with .ok() already.
+panic = "abort"
 
 # ── Debian / Ubuntu package (cargo-deb) ──────────────────────────────────────
 # `cargo deb` reads this to build a .deb. Runtime deps mirror the PKGBUILD:

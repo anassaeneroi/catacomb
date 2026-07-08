@@ -12,6 +12,18 @@ scripts/package.sh appimage
 The script builds the release binary once and reuses it for every
 format. Output lands in `dist/` (gitignored).
 
+> **Building for your own machine?** Distributed packages must stay
+> portable, so the repo never sets `target-cpu`. If you compile locally
+> and only run the binary on the build host, you can opt into
+> host-specific SIMD (helps the ffmpeg-adjacent hot paths like the
+> perceptual-dedup hashing):
+>
+> ```sh
+> RUSTFLAGS="-C target-cpu=native" cargo build --release
+> ```
+>
+> Don't ship that binary — it will SIGILL on any older CPU.
+
 ## Linux formats
 
 ### .deb (Debian / Ubuntu / Mint)

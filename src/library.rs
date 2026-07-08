@@ -449,6 +449,10 @@ fn collect_raw_videos(entries: impl Iterator<Item = std::fs::DirEntry>) -> Vec<R
 }
 
 fn enrich_with_cache(raws: Vec<RawVideo>, cache: Option<&Database>) -> Vec<Video> {
+    // Cache misses are collected here and flushed in ONE transaction after
+    // the loop (`info_cache_put_many`). On a cold cache every video is a
+    // miss, so per-row autocommitted upserts would pay one commit per video.
+    let mut cache_misses: Vec<(String, u64, Option<f64>, bool, Option<String>)> = Vec::new();
     let mut videos: Vec<Video> = raws.into_iter().map(|raw| {
         // Parse info.json once for both duration and chapter presence.
         // The cache (if provided) lets us skip the read+JSON parse when
@@ -485,8 +489,8 @@ fn enrich_with_cache(raws: Vec<RawVideo>, cache: Option<&Database>) -> Vec<Video
                         (dur, chap, date)
                     })
                     .unwrap_or((None, false, None));
-                if let (Some(mt), Some(db)) = (mtime, cache) {
-                    db.info_cache_put(&path_str, mt, parsed.0, parsed.1, parsed.2.as_deref());
+                if let (Some(mt), Some(_)) = (mtime, cache) {
+                    cache_misses.push((path_str.into_owned(), mt, parsed.0, parsed.1, parsed.2.clone()));
                 }
                 parsed
             })
@@ -516,7 +520,11 @@ fn enrich_with_cache(raws: Vec<RawVideo>, cache: Option<&Database>) -> Vec<Video
             upload_date,
         }
     }).collect();
-    videos.sort_by_key(|v| v.title.to_lowercase());
+    if let Some(db) = cache {
+        db.info_cache_put_many(&cache_misses);
+    }
+    // sort_by_cached_key: lowercase each title once, not once per comparison.
+    videos.sort_by_cached_key(|v| v.title.to_lowercase());
     videos
 }
 

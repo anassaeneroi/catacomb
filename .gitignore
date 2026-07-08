@@ -32,4 +32,7 @@ cookies.txt
 config.toml
 
 # Runtime database (watched status, positions, password hash) — never commit
+# (+ the WAL/shm sidecars SQLite creates under journal_mode=WAL)
 catacomb.db
+catacomb.db-wal
+catacomb.db-shm

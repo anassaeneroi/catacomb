@@ -138,7 +138,25 @@ impl Database {
     /// hash and resume positions aren't readable by other local users. A
     /// best-effort: failure is logged but doesn't abort startup.
     pub fn open(path: &Path) -> Result<Self> {
-        let manager = SqliteConnectionManager::file(path);
+        // Per-connection pragmas. `synchronous`, `busy_timeout` and
+        // `foreign_keys` are connection-scoped in SQLite, so they must run on
+        // every pooled connection (`with_init`), not once at open.
+        // - WAL: write throughput + readers don't block the writer. Persists
+        //   in the file header; re-asserting per connection is idempotent.
+        //   Creates `catacomb.db-wal`/`-shm` sidecars (gitignored).
+        // - synchronous=NORMAL: safe with WAL, drops the per-commit fsync.
+        // - busy_timeout: the parallel scanner's concurrent writers wait for
+        //   the lock instead of failing SQLITE_BUSY immediately.
+        // - foreign_keys: enforcement is per-connection; without this, only
+        //   whichever connection ran init_schema had it on.
+        let manager = SqliteConnectionManager::file(path).with_init(|conn| {
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous = NORMAL;
+                 PRAGMA busy_timeout = 5000;
+                 PRAGMA foreign_keys = ON;",
+            )
+        });
         let pool = Pool::builder()
             .max_size(FILE_POOL_SIZE)
             .build(manager)
@@ -168,7 +186,14 @@ impl Database {
     /// is capped at 1 connection here. Otherwise each `get()` would hand back
     /// a fresh, empty database and our schema/data would vanish between calls.
     pub fn open_in_memory() -> Result<Self> {
-        let manager = SqliteConnectionManager::memory();
+        // Same per-connection pragmas as `open`, minus WAL/synchronous —
+        // journaling pragmas are meaningless for an in-memory database.
+        let manager = SqliteConnectionManager::memory().with_init(|conn| {
+            conn.execute_batch(
+                "PRAGMA busy_timeout = 5000;
+                 PRAGMA foreign_keys = ON;",
+            )
+        });
         let pool = Pool::builder()
             .max_size(1)
             .build(manager)
@@ -406,8 +431,7 @@ impl Database {
     /// "Unfiled".
     pub fn delete_folder(&self, id: i64) -> Result<()> {
         let conn = self.conn();
-        // Enable FK cascade for this connection — SQLite has it off by default.
-        conn.execute("PRAGMA foreign_keys = ON", [])?;
+        // FK cascade is on for every pooled connection (see `with_init`).
         conn.execute("DELETE FROM folders WHERE id = ?1", [id])?;
         Ok(())
     }
@@ -750,7 +774,9 @@ impl Database {
         mtime_unix: u64,
     ) -> Option<(Option<f64>, bool, Option<String>)> {
         let conn = self.conn();
-        let mut stmt = conn.prepare(
+        // prepare_cached: this runs once per video per scan — reuse the
+        // compiled statement instead of re-parsing the SQL each call.
+        let mut stmt = conn.prepare_cached(
             "SELECT mtime_unix, duration_secs, has_chapters, upload_date \
              FROM info_cache WHERE path = ?1",
         ).ok()?;
@@ -766,30 +792,39 @@ impl Database {
         Some((dur, chap != 0, date))
     }
 
-    /// Upsert a parsed info.json result into the cache. Called on miss
-    /// by the library scanner. Errors are swallowed — a cache miss next
-    /// time costs the same as no cache at all.
-    pub fn info_cache_put(
+    /// Bulk upsert of parsed info.json results in a single transaction.
+    /// Called with the scanner's cache misses (`enrich_with_cache`).
+    ///
+    /// A cold-cache scan misses on every video; committing each row
+    /// individually costs one WAL append per video. Wrapping the batch in
+    /// one transaction commits once per channel instead. Errors are
+    /// swallowed — a lost cache write only means a re-parse next scan.
+    pub fn info_cache_put_many(
         &self,
-        path: &str,
-        mtime_unix: u64,
-        duration_secs: Option<f64>,
-        has_chapters: bool,
-        upload_date: Option<&str>,
+        rows: &[(String, u64, Option<f64>, bool, Option<String>)],
     ) {
-        let conn = self.conn();
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO info_cache \
-                (path, mtime_unix, duration_secs, has_chapters, upload_date) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                path,
-                mtime_unix as i64,
-                duration_secs,
-                has_chapters as i64,
-                upload_date,
-            ],
-        );
+        if rows.is_empty() {
+            return;
+        }
+        let mut conn = self.conn();
+        let Ok(tx) = conn.transaction() else { return };
+        {
+            let Ok(mut stmt) = tx.prepare_cached(
+                "INSERT OR REPLACE INTO info_cache \
+                    (path, mtime_unix, duration_secs, has_chapters, upload_date) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            ) else { return };
+            for (path, mtime, dur, chap, date) in rows {
+                let _ = stmt.execute(rusqlite::params![
+                    path,
+                    *mtime as i64,
+                    dur,
+                    *chap as i64,
+                    date.as_deref(),
+                ]);
+            }
+        }
+        let _ = tx.commit();
     }
 
     /// Idempotently merge another catacomb database into this one.
@@ -1228,6 +1263,39 @@ pub struct RestoreSummary {
     pub folders_added: u64,
     pub assignments_added: u64,
     pub notes_added: u64,
+}
+
+#[cfg(test)]
+mod info_cache_tests {
+    use super::*;
+
+    #[test]
+    fn put_many_roundtrip_and_mtime_gate() {
+        let db = Database::open_in_memory().unwrap();
+        let rows = vec![
+            ("/lib/a.info.json".to_string(), 100u64, Some(12.5), true, Some("20260101".to_string())),
+            ("/lib/b.info.json".to_string(), 200u64, None, false, None),
+            ("/lib/c.info.json".to_string(), 300u64, Some(0.0), false, Some("20251231".to_string())),
+        ];
+        db.info_cache_put_many(&rows);
+
+        assert_eq!(
+            db.info_cache_get("/lib/a.info.json", 100),
+            Some((Some(12.5), true, Some("20260101".to_string())))
+        );
+        assert_eq!(db.info_cache_get("/lib/b.info.json", 200), Some((None, false, None)));
+        // Stale mtime and unknown path both miss.
+        assert_eq!(db.info_cache_get("/lib/a.info.json", 101), None);
+        assert_eq!(db.info_cache_get("/lib/nope.info.json", 100), None);
+
+        // Re-put with a new mtime replaces the row (INSERT OR REPLACE).
+        db.info_cache_put_many(&[("/lib/a.info.json".to_string(), 101u64, Some(99.0), false, None)]);
+        assert_eq!(db.info_cache_get("/lib/a.info.json", 101), Some((Some(99.0), false, None)));
+        assert_eq!(db.info_cache_get("/lib/a.info.json", 100), None);
+
+        // Empty batch is a no-op, not an error.
+        db.info_cache_put_many(&[]);
+    }
 }
 
 #[cfg(test)]

@@ -938,7 +938,9 @@ impl App {
         }
 
         match self.sort_mode {
-            SortMode::Title => cards.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+            // sort_by_cached_key lowercases each element once instead of
+            // twice per comparison (O(n) allocations, not O(n log n)).
+            SortMode::Title => cards.sort_by_cached_key(|c| c.title.to_lowercase()),
             SortMode::DurationAsc => cards.sort_by(|a, b| {
                 a.duration_secs.unwrap_or(0.0)
                     .partial_cmp(&b.duration_secs.unwrap_or(0.0))
@@ -977,9 +979,8 @@ impl App {
                 cards.sort_by(|a, b| a.mtime_unix.unwrap_or(u64::MAX).cmp(&b.mtime_unix.unwrap_or(u64::MAX)));
             }
             SortMode::ChannelAsc => {
-                cards.sort_by(|a, b| {
-                    a.channel_name.to_lowercase().cmp(&b.channel_name.to_lowercase())
-                        .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+                cards.sort_by_cached_key(|c| {
+                    (c.channel_name.to_lowercase(), c.title.to_lowercase())
                 });
             }
         }
