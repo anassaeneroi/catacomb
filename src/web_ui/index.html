@@ -1,8 +1,16 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Catacomb</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#16213e">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Catacomb">
 <!-- Embedded UI fonts (base64 below, offline-safe — no CDN): Instrument Serif
      by Rodrigo Fuenzalida and Hanken Grotesk by Alfredo Marco Pradil, both
      under the SIL Open Font License 1.1. -->
@@ -167,71 +175,9 @@
   .dl-new-flags label{display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap}
   .preview-thumb{width:100%;max-width:280px;aspect-ratio:16/9;object-fit:cover;border-radius:4px;background:#000;flex-shrink:0}
   .empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:40px;font-size:13px}
-  @media(max-width:640px){
-    body{padding-bottom:calc(env(safe-area-inset-bottom) + 4px)}
-    #menu-btn{display:block}
-    aside{position:fixed;top:0;left:0;height:100%;z-index:50;transform:translateX(-100%);width:240px}
-    aside.open{transform:translateX(0)}
-    #sidebar-overlay.open{display:block}
-    /* Hide non-essential header chrome on mobile. The remaining
-       buttons — menu, search, ⟳ rescan, 🎲 shuffle, ⚙ settings —
-       are the ones users actually reach for. */
-    #hdr-stats,#sort,#agpl-notice{display:none}
-    header h1{display:none}
-    header{padding:6px 8px;gap:6px;position:sticky;top:0;z-index:20}
-    #search{order:3;flex-basis:100%;width:100%;min-width:0}
-    header button{min-width:34px;min-height:34px;padding:4px 7px;font-size:14px}
-    .filters{overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
-    .filters::-webkit-scrollbar{display:none}
-    .toolbar{gap:6px}
-    .toolbar > *{min-width:0}
-    /* Bigger tap targets on cards. The five-button card-foot reflows
-       to a comfortable height instead of cramming icons together. */
-    .grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
-    .card-foot{padding:6px 6px 8px;gap:4px;flex-wrap:wrap}
-    .card-foot button{font-size:13px;padding:6px 8px;min-height:34px}
-    .card-foot button:not(.play){min-width:34px}
-    .card-title{min-height:0}
-    .card-meta{font-size:10px;line-height:1.3}
-    /* Modals go full-screen so the cramped 10px page-margin we use on
-       desktop doesn't eat the iPhone safe area. */
-    .modal-bg{padding:0}
-    .modal{max-width:100vw;max-height:100dvh;height:100dvh;border-radius:0;border:none;overflow-y:auto;padding:12px 12px calc(12px + env(safe-area-inset-bottom))}
-    .modal-body{flex-direction:column;gap:8px;overflow-y:auto}
-    .modal video{max-height:55vh}
-    .vctrl{padding:6px;gap:6px}
-    .vctrl .vseek{order:3;flex-basis:100%;min-width:0}
-    .vctrl .vtime{margin-left:auto}
-    .settings-row{flex-direction:column;align-items:flex-start;gap:4px}
-    .meta-grid{grid-template-columns:1fr}
-    .det-head{flex-direction:column;gap:4px}
-    .det-actions{width:100%}
-    .det-actions button{flex:1 1 calc(50% - 4px)}
-    #details{max-height:min(45vh,220px);padding:8px 10px}
-    .chapters-pane{display:none}
-    .transcript-pane{display:none !important}
-    section#content{padding:8px}
-    /* Modal "new download" form stacks vertically on small screens so
-       the URL + button + quality picker don't squeeze each other. */
-    .dl-new-row{flex-direction:column;align-items:stretch}
-    .dl-new-row input[type="url"]{width:100%;min-width:0}
-    .dl-new-row select{width:100%}
-    /* Bulk-mode actions stack vertically when active. */
-    .toolbar{flex-wrap:wrap}
-    #bulk-actions{flex-wrap:wrap;gap:4px}
-    #bulk-actions button{padding:6px 8px;min-height:32px;font-size:12px}
-    /* Job rows: hide the last-line preview on small screens; the
-       progress bar + label are the only things that fit anyway. */
-    .job{padding:4px 10px;font-size:11px}
-    .job .last-line{display:none}
-  }
-  @media(max-width:380px){
-    /* Single-column on very narrow phones. */
-    .grid{grid-template-columns:1fr;gap:6px}
-    .card-foot{flex-direction:column;align-items:stretch}
-    .card-foot button{width:100%;min-width:0}
-    .det-actions button{flex-basis:100%}
-  }
+  /* Mobile layout rules live at the BOTTOM of this stylesheet (after the
+     design layer) — media queries add no specificity, so they must come
+     last in source order to override the design layer's base rules. */
 
   /* ───────────────────────────────────────────────────────────────────────
      Design layer — "private cinematheque" reskin. Appended on purpose so it
@@ -543,6 +489,121 @@
   .cp-action-btn{background:color-mix(in srgb,var(--card) 55%,transparent);border:1px solid var(--hair);color:var(--text);padding:5px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:11px;transition:background .12s,border-color .12s}
   .cp-action-btn:hover{background:color-mix(in srgb,var(--accent) 15%,transparent);border-color:var(--accent);color:var(--accent)}
 
+  /* ───────────────────────────────────────────────────────────────────────
+     Mobile layout. MUST stay at the bottom of the stylesheet: media queries
+     add no specificity, so these only beat the design-layer rules above by
+     source order. (They used to sit before the design layer, which silently
+     re-broke header padding, video heights, etc. on phones.)
+     ─────────────────────────────────────────────────────────────────────── */
+  @media(max-width:640px){
+    body{padding-bottom:calc(env(safe-area-inset-bottom) + 4px)}
+    #menu-btn{display:block}
+    /* animation:none is load-bearing: the design layer's uiDrop entry
+       animation has fill-mode:both, and animation fill overrides the static
+       transform below — leaving the drawer stuck open over the content. */
+    aside{position:fixed;top:0;left:0;height:100%;z-index:50;transform:translateX(-100%);width:240px;padding-left:env(safe-area-inset-left);animation:none}
+    aside.open{transform:translateX(0)}
+    #sidebar-overlay.open{display:block}
+    /* Hide non-essential header chrome on mobile. The remaining
+       buttons — menu, search, ⟳ rescan, 🎲 shuffle, ⚙ settings —
+       are the ones users actually reach for. */
+    #hdr-stats,#sort,#agpl-notice{display:none}
+    header h1{display:none}
+    header{padding:6px max(8px,env(safe-area-inset-right)) 6px max(8px,env(safe-area-inset-left));gap:6px;position:sticky;top:0;z-index:20}
+    #search{order:3;flex-basis:100%;width:100%;min-width:0}
+    header button{min-width:34px;min-height:34px;padding:4px 7px;font-size:14px}
+    /* 16px inputs: anything smaller makes iOS Safari zoom the whole page
+       when the field is focused — the classic mobile "scaling bug". */
+    #search,#sort,select,textarea,.t-search,.cp-input,
+    input[type="url"],input[type="text"],input[type="number"],input[type="search"],input[type="password"]{font-size:16px}
+    .filters{overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
+    .filters::-webkit-scrollbar{display:none}
+    .toolbar{gap:6px}
+    .toolbar > *{min-width:0}
+    /* Bigger tap targets on cards. The five-button card-foot reflows
+       to a comfortable height instead of cramming icons together. */
+    .grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+    .card-foot{padding:6px 6px 8px;gap:4px;flex-wrap:wrap}
+    .card-foot button{font-size:13px;padding:6px 8px;min-height:34px}
+    .card-foot button:not(.play){min-width:34px}
+    .card-title{min-height:0}
+    .card-meta{font-size:10px;line-height:1.3}
+    /* Modals go full-screen so the cramped 10px page-margin we use on
+       desktop doesn't eat the iPhone safe area. */
+    .modal-bg{padding:0}
+    .modal{max-width:100vw;max-height:100dvh;height:100dvh;border-radius:0;border:none;overflow-y:auto;
+      padding:12px calc(12px + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left))}
+    .modal-body{flex-direction:column;gap:8px;overflow-y:auto}
+    .modal video{max-height:55vh}
+    .modal-hdr h2,.modal h2{font-size:1.2rem}
+    .vid-wrap{flex:0 0 auto}
+    .vctrl{padding:6px;gap:6px}
+    .vctrl .vseek{order:3;flex-basis:100%;min-width:0}
+    .vctrl .vtime{margin-left:auto}
+    .settings-row{flex-direction:column;align-items:flex-start;gap:4px}
+    .meta-grid{grid-template-columns:1fr}
+    .det-head{flex-direction:column;gap:4px}
+    .det-actions{width:100%}
+    .det-actions button{flex:1 1 calc(50% - 4px)}
+    #details{max-height:min(45vh,220px);padding:8px 10px}
+    .chapters-pane{display:none}
+    .transcript-pane{display:none !important}
+    section#content{padding:8px max(8px,env(safe-area-inset-right)) 8px max(8px,env(safe-area-inset-left))}
+    /* Modal "new download" form stacks vertically on small screens so
+       the URL + button + quality picker don't squeeze each other. */
+    .dl-new-row{flex-direction:column;align-items:stretch}
+    .dl-new-row input[type="url"]{width:100%;min-width:0}
+    .dl-new-row select{width:100%}
+    /* Bulk-mode actions stack vertically when active. */
+    .toolbar{flex-wrap:wrap}
+    #bulk-actions{flex-wrap:wrap;gap:4px}
+    #bulk-actions button{padding:6px 8px;min-height:32px;font-size:12px}
+    /* Job rows: hide the last-line preview on small screens; the
+       progress bar + label are the only things that fit anyway. */
+    .job{padding:4px 10px;font-size:11px}
+    .job .last-line{display:none}
+    /* Command palette becomes a full-height sheet instead of a floating
+       card 60px down a 640px column. */
+    .cp-container{max-width:none;margin:0;height:100dvh;border-radius:0;border:none;
+      padding-top:env(safe-area-inset-top)}
+    .cp-results{flex:1 1 auto;max-height:none}
+    .cp-input-wrap{padding:12px 14px}
+    .cp-actions{padding-bottom:calc(10px + env(safe-area-inset-bottom))}
+    /* Stats dashboard: the display-serif numerals are sized for desktop
+       and overflow 150px metric cards on phones. */
+    .sx-hero{grid-column:1/-1}
+    .sx-hero .sx-v{font-size:2.6rem}
+    .sx-card .sx-v{font-size:1.7rem}
+    .sx-cols{gap:4px}
+    .mx-verdict{font-size:1.6rem}
+    .mx-hero{padding:12px 14px;gap:12px}
+    /* Custom player chrome: phones have hardware volume buttons and no
+       hover — drop the slider, keep the rest. */
+    .pl-vol{display:none}
+    .pl-time{font-size:12px;margin:0 3px}
+  }
+  @media(max-width:350px){
+    /* Single-column on genuinely narrow phones (~320px class). Anything
+       wider — 360px Androids, 375pt iPhones — fits two 150px+ columns;
+       a 380px breakpoint used to catch ALL of those and blow the cards
+       up to comical full-width. */
+    .grid{grid-template-columns:1fr;gap:6px}
+    .card-foot{flex-direction:column;align-items:stretch}
+    .card-foot button{width:100%;min-width:0}
+    .det-actions button{flex-basis:100%}
+    .sx-metrics{grid-template-columns:1fr 1fr}
+  }
+  @media(pointer:coarse){
+    /* Touch ergonomics regardless of viewport width (tablets too). The
+       hover-revealed seek thumb is always shown and the scrub strip grows
+       to a comfortable finger target. */
+    .pl-controls button{font-size:18px;padding:8px 9px}
+    .pl-track{height:30px}
+    .pl-hover{bottom:26px}
+    .pl-thumb{transform:translateY(-50%) scale(1)}
+    .vctrl .vbtn{font-size:18px;padding:8px 10px}
+    .chip,.chip-toggle,.chip-clear{padding:6px 10px}
+  }
   @media(prefers-reduced-motion:reduce){*{animation:none!important;transition-duration:.001ms!important}}
 </style>
 </head>
@@ -2242,7 +2303,11 @@ function switchMetaTab(tab,which){tab.parentElement.querySelectorAll('.meta-tab'
 
 /* ── Settings ───────────────────────────────────────────────────── */
 const THEMES=[['dark','Dark'],['light','Light'],['dracula','Dracula'],['trans','Trans'],['emo-nocturnal','Emo: Nocturnal'],['emo-coffin','Emo: Coffin'],['emo-scene-queen','Emo: Scene Queen'],['solarized','Solarized'],['nord','Nord'],['amoled','AMOLED']];
-function applyTheme(t){document.body.className=t==='dark'?'':'theme-'+t;localStorage.setItem('theme',t)}
+function applyTheme(t){document.body.className=t==='dark'?'':'theme-'+t;localStorage.setItem('theme',t);
+  // Keep the browser/OS chrome (Android status bar, installed-PWA title bar)
+  // in step with the active theme's panel colour.
+  const tc=document.querySelector('meta[name=theme-color]');
+  if(tc)tc.content=getComputedStyle(document.body).getPropertyValue('--panel').trim()||'#16213e';}
 
 async function logout(){try{await fetch('/api/logout',{method:'POST'});location.reload()}catch{}}
 
@@ -3490,6 +3555,10 @@ loadFilterPresets();
 })();
 loadRemotes();
 loadSourceNotice();
+// PWA: register the (deliberately minimal) service worker — see sw.js for
+// exactly what it does and does not intercept. Requires a secure context
+// (https or localhost); elsewhere navigator.serviceWorker is undefined.
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 </script>
 </body>
 </html>

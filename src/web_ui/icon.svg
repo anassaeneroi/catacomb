@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Catacomb app icon: a crypt archway sheltering a play wedge, in the
+       UI's default palette (bg #1a1a2e / accent #e94560). Full-bleed
+       background with all strokes inside the central maskable safe zone,
+       so the same art serves purpose:any and purpose:maskable.
+       Regenerate the PNGs after editing:
+         rsvg-convert -w 512 -h 512 icon.svg -o icon-512.png
+         rsvg-convert -w 192 -h 192 icon.svg -o icon-192.png
+         rsvg-convert -w 180 -h 180 icon.svg -o apple-touch-icon.png -->
+  <defs>
+    <radialGradient id="bg" cx="30%" cy="12%" r="130%">
+      <stop offset="0" stop-color="#272747"/>
+      <stop offset="1" stop-color="#131322"/>
+    </radialGradient>
+    <linearGradient id="arch" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff5f7d"/>
+      <stop offset="1" stop-color="#cc2b4d"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <!-- doorway interior: faint accent glow so the opening reads as depth -->
+  <path d="M192 396 V240 a64 64 0 0 1 128 0 V396 Z" fill="#e94560" opacity="0.16"/>
+  <!-- arch -->
+  <path d="M154 396 V240 a102 102 0 0 1 204 0 V396" fill="none"
+        stroke="url(#arch)" stroke-width="28" stroke-linecap="round"/>
+  <!-- floor (solid colour: a zero-height bounding box degenerates the
+       objectBoundingBox gradient and rsvg drops the stroke entirely) -->
+  <path d="M118 396 H394" stroke="#cc2b4d" stroke-width="28" stroke-linecap="round"/>
+  <!-- play wedge in the doorway -->
+  <path d="M233 282 l60 34 -60 34 Z" fill="#ff5f7d"/>
+</svg>

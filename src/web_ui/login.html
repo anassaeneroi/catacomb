@@ -1,8 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Catacomb — Sign in</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#16213e">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
   /* Standalone page (the SPA's embedded fonts aren't available here), so the
      display face is a system serif stack — editorial without extra bytes. The
@@ -34,7 +38,7 @@
   .tag{font-family:var(--font-display);font-style:italic;font-size:.95rem;color:var(--muted);text-align:center;margin:-4px 0 6px}
   .field{position:relative;display:flex;flex-direction:column;gap:0}
   input{width:100%;background:color-mix(in srgb,var(--card) 70%,#000);border:1px solid var(--border);color:var(--text);
-    padding:11px 13px;border-radius:9px;font-size:14px;font-family:var(--font-body);transition:border-color .15s,box-shadow .15s}
+    padding:11px 13px;border-radius:9px;font-size:16px;font-family:var(--font-body);transition:border-color .15s,box-shadow .15s}
   input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 45%,transparent)}
   button{background:var(--accent);border:1px solid var(--accent);color:#fff;padding:11px;border-radius:9px;cursor:pointer;
     font-size:14px;font-weight:600;font-family:var(--font-body);letter-spacing:.02em;

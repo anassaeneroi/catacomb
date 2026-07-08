@@ -473,3 +473,43 @@ fn perceptual_dedup_groups_reencodes() {
     assert!(body.contains("bbb"), "group should contain the re-encode: {body}");
     assert!(!body.contains("ccc"), "unrelated video must not be grouped: {body}");
 }
+
+#[test]
+fn pwa_assets_served_and_ungated() {
+    if !have_curl() { eprintln!("skip: no curl"); return; }
+    let s = Server::start();
+    s.wait_ready();
+
+    // The SPA advertises the manifest + registers the service worker.
+    let (_, idx) = s.get("/");
+    assert!(idx.contains("manifest.webmanifest"), "index links the manifest");
+    assert!(idx.contains("serviceWorker"), "index registers the service worker");
+
+    let (code, body) = s.get("/manifest.webmanifest");
+    assert_eq!(code, 200);
+    assert!(body.contains("\"name\": \"Catacomb\""), "manifest body: {body}");
+    let (code, body) = s.get("/sw.js");
+    assert_eq!(code, 200);
+    assert!(body.contains("catacomb-shell"), "sw body: {body}");
+    assert_eq!(s.get("/icons/icon-192.png").0, 200);
+    assert_eq!(s.get("/icons/icon-512.png").0, 200);
+    assert_eq!(s.get("/apple-touch-icon.png").0, 200);
+    assert_eq!(s.get("/icons/nope.png").0, 404);
+
+    // Setting a password must NOT gate the PWA statics: the browser fetches
+    // the manifest/icons during install without a session, and the login
+    // page itself links them.
+    let (code, _) = s.post("/api/settings", &format!(
+        r#"{{"transcode":false,"scheduler_enabled":false,"scheduler_interval_hours":24,
+            "max_concurrent":3,"use_bundled_ytdlp":false,"use_pot_provider":false,
+            "subtitles_enabled":false,"subtitles_auto":false,"subtitles_embed":false,
+            "subtitle_langs":"","subtitle_format":"","youtube_player_clients":"",
+            "sponsorblock_mode":"mark","convert_mode":"","convert_crf":23,"convert_preset":"",
+            "convert_audio_format":"","convert_keep_original":false,
+            "new_download_password":"hunter2"}}"#));
+    assert_eq!(code, 200);
+    assert_eq!(s.get("/api/library").0, 401, "API must be gated once a password is set");
+    assert_eq!(s.get("/manifest.webmanifest").0, 200, "manifest stays public");
+    assert_eq!(s.get("/sw.js").0, 200, "service worker stays public");
+    assert_eq!(s.get("/icons/icon-512.png").0, 200, "icons stay public");
+}

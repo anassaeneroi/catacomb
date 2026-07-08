@@ -1160,7 +1160,7 @@ async fn security_headers(req: Request, next: Next) -> Response {
                img-src 'self' data: blob: https:; \
                media-src 'self' blob:; \
                connect-src 'self'; \
-               font-src 'self'; \
+               font-src 'self' data:; \
                object-src 'none'; \
                base-uri 'self'; \
                frame-ancestors 'none'";
@@ -1185,6 +1185,19 @@ async fn auth_middleware(
     }
     let path = req.uri().path();
     if path == "/api/login" {
+        return next.run(req).await;
+    }
+    // PWA static assets. Browsers fetch the manifest/icons during install
+    // (not always with credentials) and must reach the service worker script
+    // to register it from the login page's origin. All of these are
+    // compile-time constants with nothing user- or library-specific, so
+    // serving them pre-auth leaks nothing.
+    if req.method().as_str() == "GET"
+        && (path == "/manifest.webmanifest"
+            || path == "/sw.js"
+            || path == "/apple-touch-icon.png"
+            || path.starts_with("/icons/"))
+    {
         return next.run(req).await;
     }
     if is_authed(&state, req.headers()) {
@@ -3303,6 +3316,10 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
 
     let app = Router::new()
         .route("/", get(get_index))
+        .route("/manifest.webmanifest", get(get_manifest))
+        .route("/sw.js", get(get_sw))
+        .route("/icons/:name", get(get_icon))
+        .route("/apple-touch-icon.png", get(get_apple_touch_icon))
         .route("/api/library", get(get_library))
         .route("/api/progress", get(get_progress))
         .route("/ws/progress", get(ws_progress))
@@ -3439,3 +3456,60 @@ const LOGIN_HTML: &str = include_str!("web_ui/login.html");
 /// Main library UI. Single-page app with embedded styles and JS — see the
 /// architecture notes at the top of `web_ui/index.html`.
 const HTML_UI: &str = include_str!("web_ui/index.html");
+
+/// PWA assets, embedded like the HTML. The icon PNGs are rendered from
+/// `web_ui/icon.svg` — see the comment there for the regen commands.
+const MANIFEST: &str = include_str!("web_ui/manifest.webmanifest");
+const SW_JS: &str = include_str!("web_ui/sw.js");
+const ICON_192: &[u8] = include_bytes!("web_ui/icon-192.png");
+const ICON_512: &[u8] = include_bytes!("web_ui/icon-512.png");
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("web_ui/apple-touch-icon.png");
+
+async fn get_manifest() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/manifest+json"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        MANIFEST,
+    )
+}
+
+async fn get_sw() -> impl IntoResponse {
+    // no-store, same reasoning as the HTML: binary upgrades change the
+    // embedded worker without changing the URL, and a stale SW would pin
+    // stale behavior across upgrades.
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        SW_JS,
+    )
+}
+
+async fn get_icon(Path(name): Path<String>) -> Response {
+    let bytes: &'static [u8] = match name.as_str() {
+        "icon-192.png" => ICON_192,
+        "icon-512.png" => ICON_512,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+async fn get_apple_touch_icon() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        APPLE_TOUCH_ICON,
+    )
+}
