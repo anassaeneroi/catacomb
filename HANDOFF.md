@@ -1,7 +1,51 @@
 # Session handoff — Catacomb
 
 > Working notes for continuing this work in another session/agent (Copilot, Codex, etc.).
-> Updated 2026-06-19. Delete or update freely; this is not a tracked spec.
+> Updated 2026-07-08. Delete or update freely; this is not a tracked spec.
+
+## Current work (2026-07-08): desktop row virtualization — DONE, ready to commit
+
+- `main` is at `d4bed01` (perf pass phase 1: WAL pragmas, prepare_cached,
+  batched scan writes, sort_by_cached_key, panic=abort) — committed + pushed.
+- **`src/app.rs`: desktop row virtualization** (the follow-up the perf spec
+  deferred; spec at
+  `docs/superpowers/specs/2026-07-07-runtime-performance-pass-design.md`):
+  - List/Card/Grid all render through `ScrollArea::show_rows` — only the
+    visible row range is laid out per frame.
+  - Row heights are enforced by fixed-size cells
+    (`allocate_ui_with_layout` + `set_min_size`), built from
+    `row_text_block_height(ui)` + density-scaled thumb height. Titles
+    truncate to one line (`wrap_mode = Truncate`, full title on hover) —
+    required for the fixed lattice.
+  - List separator is a painted hline inside the cell (the old
+    `ui.separator()` added unpredictable height). Grid is a manual
+    horizontal run of `cols` fixed cells per lattice row (egui::Grid can't
+    be windowed); `cols` is computed before `show_rows` from available width.
+- **Verified (live GUI, screenshots in session scratchpad):**
+  - List @ 2000 — windowed rendering, uniform lattice, both-direction scroll,
+    stable-sort interleave, selection + details pane; @ 24 — exact bottom
+    termination, single-line ellipsis truncation.
+  - Card — uniform fixed-height cards, single-line truncation, hover ring.
+  - Grid — 2 cols @1400px window, 3 cols @1500px, uniform lattice, no clip,
+    truncated titles, full button rows. `cols` computed to fit (conservative;
+    never overcommits/clips off-screen).
+  - `cargo build --release` clean; `cargo test --release` = 134 unit + 12
+    integration, 0 failures.
+- **Known pre-existing issue (NOT this change):** at the ~1000px window
+  minimum width, the central panel's content origin shifts left and underlaps
+  the ~290px sidebar (column 1 / card left edge clipped), because the top
+  header/toolbar row overflows and shoves the layout. Confirmed **identical on
+  the pre-virtualization binary** (git-stash test), so it's not a regression.
+  Root cause is the non-wrapping header `ui.horizontal`; a real fix would make
+  that row wrap or clip. Left as a separate follow-up.
+- **GUI screenshot recipe on this box (Wayland/KWin):** winit defaults to a
+  native Wayland surface that xdotool/`import` can't see. Launch with
+  `env -u WAYLAND_DISPLAY WINIT_UNIX_BACKEND=x11 DISPLAY=:0` to force XWayland,
+  then `xdotool search --pid`, `windowsize`, and `import -window <wid> out.png`
+  all work. The window has a hard min size ~1000px (xdotool can't shrink
+  below it). Foreground `sleep` is blocked by the harness Bash tool — put
+  launch+settle+capture in a script file and run that. `spectacle -b -a` was
+  flaky here; `import -window <wid>` is reliable.
 
 ## TL;DR — where things are
 

@@ -4308,27 +4308,96 @@ impl App {
 
         let density = self.card_density;
         let view_mode = self.view_mode_for(&self.sidebar_view);
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            match view_mode {
-                ViewMode::List | ViewMode::Card => {
-                    self.render_video_rows(ui, ctx, &cards, density, show_channel, view_mode == ViewMode::Card);
-                }
-                ViewMode::Grid => {
-                    self.render_video_grid(ui, ctx, &cards, density, show_channel);
-                }
+        // Virtualized rendering: every mode goes through `show_rows`, which
+        // lays out only the visible slice of a fixed-height row lattice, so
+        // frame cost tracks the viewport, not the library size. Row heights
+        // are enforced by allocating fixed-size cells (titles truncate to a
+        // single line inside them — see render_row_body), never measured
+        // from content, so the scrollbar geometry stays exact.
+        let thumb_h = (99.0 * density).round();
+        let text_h = Self::row_text_block_height(ui);
+        match view_mode {
+            ViewMode::List | ViewMode::Card => {
+                let as_card = view_mode == ViewMode::Card;
+                // Card mode wraps the row in a Frame: 8px inner margin and
+                // 3px outer margin top+bottom. List draws a bottom hairline.
+                let row_h = if as_card {
+                    thumb_h.max(text_h) + 2.0 * 8.0 + 2.0 * 3.0
+                } else {
+                    thumb_h.max(text_h) + 6.0
+                };
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
+                    ui,
+                    row_h,
+                    cards.len(),
+                    |ui, range| {
+                        self.render_video_rows(
+                            ui, ctx, &cards, range, row_h, density, show_channel, as_card,
+                        );
+                    },
+                );
             }
-        });
+            ViewMode::Grid => {
+                let thumb_w = (176.0 * density).round();
+                // A grid cell is as wide as its widest line, and that is the
+                // action-button row (Play/Details/flags ≈ 300px at default
+                // fonts), not the thumbnail, whenever density is small. Size
+                // the lattice to the real footprint or the columns drift
+                // past the computed count and the last one clips off-screen.
+                let cell_w = (thumb_w + 8.0).max(310.0);
+                let gap_x = ui.spacing().item_spacing.x;
+                // Column count must be fixed before show_rows (it defines
+                // the row lattice), so compute it from the width available
+                // here rather than inside the scroll closure.
+                let avail = ui.available_width();
+                let cols = (((avail + gap_x) / (cell_w + gap_x)).floor() as usize).max(1);
+                let grid_rows = cards.len().div_ceil(cols);
+                let cell_h = thumb_h + text_h;
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
+                    ui,
+                    cell_h,
+                    grid_rows,
+                    |ui, range| {
+                        self.render_video_grid(
+                            ui, ctx, &cards, range, cols, cell_w, cell_h, density, show_channel,
+                        );
+                    },
+                );
+            }
+        }
         self.cards_cache = cards;
+    }
+
+    /// Fixed height of the text block beside/under a thumbnail: truncated
+    /// title line + meta line + button row + the item spacing between them.
+    /// Derived from live style metrics so theme/font changes stay correct.
+    /// Every virtualized cell height is built from this — the content is
+    /// then laid out inside a cell of exactly that size, which is what lets
+    /// `show_rows` trust the row lattice.
+    fn row_text_block_height(ui: &egui::Ui) -> f32 {
+        let title_h = ui.fonts(|f| f.row_height(&egui::FontId::proportional(14.0)));
+        let body_h = ui.text_style_height(&egui::TextStyle::Body);
+        let button_h = body_h + 2.0 * ui.spacing().button_padding.y;
+        let gap = ui.spacing().item_spacing.y;
+        // title (selectable_label pads like a button) + meta labels + buttons
+        (title_h + 2.0 * ui.spacing().button_padding.y) + body_h + button_h + 2.0 * gap
     }
 
     /// Row-based render path shared by List and Card modes. When `as_card`
     /// is true, each row is wrapped in a rounded faint-bg card with a hover
     /// accent ring; otherwise the row is rendered flat (legacy List style).
+    ///
+    /// Virtualized: called by `show_rows` with the visible `range` only, and
+    /// each row is allocated exactly `row_h` tall regardless of content so
+    /// the scroll geometry the lattice promised holds.
+    #[allow(clippy::too_many_arguments)]
     fn render_video_rows(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         cards: &[Card],
+        range: std::ops::Range<usize>,
+        row_h: f32,
         density: f32,
         show_channel: bool,
         as_card: bool,
@@ -4337,7 +4406,7 @@ impl App {
         let thumb_h = (99.0 * density).round();
         let thumb_size = egui::vec2(thumb_w, thumb_h);
 
-        for card in cards {
+        for card in &cards[range] {
             let selected = self.selected_video.as_deref() == Some(card.id.as_str());
             let is_playing = self.currently_playing.as_deref() == Some(card.id.as_str());
             let bulk_checked = self.bulk_selected.contains(&card.id);
@@ -4348,41 +4417,52 @@ impl App {
             // mutate `self.flags` + DB without fighting the borrow checker.
             let mut toggle_flag_card: Option<&'static str> = None;
 
-            // Wrap each row in a Frame when rendering as a Card.
+            // Fixed-size cell: content lays out inside exactly `row_h`, so
+            // the parent advances by the same height show_rows promised.
+            let cell_w = ui.available_width();
             let mut card_rect: Option<egui::Rect> = None;
-            if as_card {
-                let frame = egui::Frame::default()
-                    .fill(ui.visuals().faint_bg_color)
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        ui.visuals().widgets.noninteractive.bg_stroke.color,
-                    ))
-                    .rounding(egui::Rounding::same(8.0))
-                    .inner_margin(egui::Margin::same(8.0))
-                    .outer_margin(egui::Margin::symmetric(0.0, 3.0));
-                let resp = frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        self.render_row_body(
-                            ui, ctx, card, density, thumb_size, show_channel,
-                            selected, is_playing, bulk_checked,
-                            &mut clicked_card, &mut play_card,
-                            &mut toggle_watched_card, &mut toggle_flag_card,
-                        );
-                    });
-                }).response;
-                if resp.hovered() {
-                    card_rect = Some(resp.rect);
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    self.render_row_body(
-                        ui, ctx, card, density, thumb_size, show_channel,
-                        selected, is_playing, bulk_checked,
-                        &mut clicked_card, &mut play_card,
-                        &mut toggle_watched_card, &mut toggle_flag_card,
-                    );
-                });
-            }
+            let cell = ui.allocate_ui_with_layout(
+                egui::vec2(cell_w, row_h),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_size(egui::vec2(cell_w, row_h));
+                    if as_card {
+                        // Wrap the row in a rounded faint-bg card.
+                        let frame = egui::Frame::default()
+                            .fill(ui.visuals().faint_bg_color)
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                ui.visuals().widgets.noninteractive.bg_stroke.color,
+                            ))
+                            .rounding(egui::Rounding::same(8.0))
+                            .inner_margin(egui::Margin::same(8.0))
+                            .outer_margin(egui::Margin::symmetric(0.0, 3.0));
+                        let resp = frame.show(ui, |ui| {
+                            ui.set_min_width(cell_w - 2.0 * 8.0);
+                            ui.horizontal(|ui| {
+                                self.render_row_body(
+                                    ui, ctx, card, density, thumb_size, show_channel,
+                                    selected, is_playing, bulk_checked,
+                                    &mut clicked_card, &mut play_card,
+                                    &mut toggle_watched_card, &mut toggle_flag_card,
+                                );
+                            });
+                        }).response;
+                        if resp.hovered() {
+                            card_rect = Some(resp.rect);
+                        }
+                    } else {
+                        ui.horizontal(|ui| {
+                            self.render_row_body(
+                                ui, ctx, card, density, thumb_size, show_channel,
+                                selected, is_playing, bulk_checked,
+                                &mut clicked_card, &mut play_card,
+                                &mut toggle_watched_card, &mut toggle_flag_card,
+                            );
+                        });
+                    }
+                },
+            );
 
             if let Some(rect) = card_rect {
                 ui.painter().rect_stroke(
@@ -4391,36 +4471,48 @@ impl App {
                     egui::Stroke::new(1.5, self.theme_accents.accent),
                 );
             }
+            if !as_card {
+                // The old per-row ui.separator() would add unpredictable
+                // height; paint the divider inside the fixed cell instead.
+                let r = cell.response.rect;
+                ui.painter().hline(
+                    r.x_range(),
+                    r.bottom() - 1.0,
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+            }
 
             self.apply_card_actions(
                 card, clicked_card, play_card, toggle_watched_card, toggle_flag_card,
             );
-            ui.separator();
         }
     }
 
     /// Grid mode: YouTube/Plex-style vertical cards in a responsive grid.
+    ///
+    /// Virtualized: `show_rows` hands us the visible *grid-row* range; each
+    /// grid row is a horizontal run of `cols` fixed-size cells. (egui::Grid
+    /// can't be windowed, so the lattice is laid out manually.)
+    #[allow(clippy::too_many_arguments)]
     fn render_video_grid(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         cards: &[Card],
+        range: std::ops::Range<usize>,
+        cols: usize,
+        cell_w: f32,
+        cell_h: f32,
         density: f32,
         show_channel: bool,
     ) {
         let thumb_w = (176.0 * density).round();
         let thumb_h = (99.0 * density).round();
-        let card_w = thumb_w + 8.0;
-        let avail = ui.available_width();
-        let cols = ((avail / card_w).floor() as usize).max(1);
 
-        // Grid mode renders one cell at a time but still uses the deferred-
-        // flags pattern: actions are applied per-card right after its cell.
-        egui::Grid::new("video_grid")
-            .num_columns(cols)
-            .spacing([8.0, 8.0])
-            .show(ui, |ui| {
-                for card in cards {
+        for grid_row in range {
+            ui.horizontal(|ui| {
+                let start = grid_row * cols;
+                for card in cards.iter().skip(start).take(cols) {
                     let selected = self.selected_video.as_deref() == Some(card.id.as_str());
                     let is_playing = self.currently_playing.as_deref() == Some(card.id.as_str());
                     let bulk_checked = self.bulk_selected.contains(&card.id);
@@ -4429,23 +4521,37 @@ impl App {
                     let mut toggle_watched_card = false;
                     let mut toggle_flag_card: Option<&'static str> = None;
 
-                    ui.vertical(|ui| {
-                        // `render_row_body` owns the thumbnail + rings + clicks,
-                        // so the grid just lays out title/meta below it.
-                        self.render_row_body(
-                            ui, ctx, card, density, egui::vec2(thumb_w, thumb_h), show_channel,
-                            selected, is_playing, bulk_checked,
-                            &mut clicked_card, &mut play_card,
-                            &mut toggle_watched_card, &mut toggle_flag_card,
-                        );
-                    });
+                    // Hard-allocate the cell rect so the parent advances by
+                    // exactly cell_w whatever the content lays out to (a
+                    // soft allocate_ui grows with the widest child — button
+                    // rows and truncating labels then drift the lattice
+                    // wider than the column count assumed). The child ui is
+                    // clipped to the cell so nothing bleeds into a neighbor.
+                    let (cell_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(cell_w, cell_h),
+                        egui::Sense::hover(),
+                    );
+                    let mut cell_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(cell_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    cell_ui.set_clip_rect(cell_rect.intersect(ui.clip_rect()));
+                    // `render_row_body` owns the thumbnail + rings + clicks;
+                    // the grid just stacks title/meta below.
+                    self.render_row_body(
+                        &mut cell_ui, ctx, card, density, egui::vec2(thumb_w, thumb_h), show_channel,
+                        selected, is_playing, bulk_checked,
+                        &mut clicked_card, &mut play_card,
+                        &mut toggle_watched_card, &mut toggle_flag_card,
+                    );
 
                     self.apply_card_actions(
                         card, clicked_card, play_card, toggle_watched_card, toggle_flag_card,
                     );
-                    ui.end_row();
                 }
             });
+        }
     }
 
     /// The thumbnail + metadata + flag-button body shared by List/Card/Grid.
@@ -4528,6 +4634,9 @@ impl App {
         }
 
         ui.vertical(|ui| {
+            // Truncate, never wrap: the virtualized cells are fixed-height,
+            // so a long title must clamp to one line. Full title on hover.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             let title_color = if card.watched {
                 ui.visuals().weak_text_color()
             } else {
@@ -4541,6 +4650,7 @@ impl App {
                         .size(14.0)
                         .color(title_color),
                 )
+                .on_hover_text(&card.title)
                 .clicked()
             {
                 *clicked_card = true;
