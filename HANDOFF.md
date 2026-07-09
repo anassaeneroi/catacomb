@@ -3,9 +3,35 @@
 > Working notes for continuing this work in another session/agent (Copilot, Codex, etc.).
 > Updated 2026-07-08. Delete or update freely; this is not a tracked spec.
 
-## Current work (2026-07-08): desktop row virtualization — DONE, ready to commit
+## Current work (2026-07-09): narrow-window layout fix — DONE, committed
 
-- `main` is at `d4bed01` (perf pass phase 1: WAL pragmas, prepare_cached,
+- `23ed80a` (desktop row virtualization, below) is committed + pushed.
+- **Narrow-window layout fix** (the follow-up noted below, now RESOLVED): the
+  real root cause was NOT the top bar shoving the central panel — the sort
+  bar's `right_to_left` chip group inside `video_list`'s toolbar row overflows
+  LEFT when the panel is narrow, and egui advances the parent's vertical
+  cursor from the overflowed rect, shifting every row below it under the
+  sidebar. Fix in `src/app.rs`:
+  - `video_list`: sort chips are defined once in `SORT_CHIPS` (visual order);
+    `sort_chip_row_width(ui)` measures the group via font metrics and the RTL
+    right-aligned layout is used only when it fits (`sort_inline`), otherwise
+    the chips render on their own `horizontal_wrapped` row below. Wide-window
+    look unchanged.
+  - Top bar: `ui.horizontal` → `ui.horizontal_wrapped` (nav buttons wrap to a
+    second line instead of going off-screen); the right-aligned status label
+    is width-guarded the same way with a truncating-label fallback (an
+    overflowing RTL layout spills left over the buttons).
+  - `SortMode` now derives `Copy`.
+  - Verified by live GUI screenshots at 1000×700 and 1400×800 (scratchpad
+    `final2-1000.png` / `final-1400.png`); 134+12 tests pass.
+  - Screenshot-harness gotcha: egui renders on events; after `xdotool
+    windowsize` you must `windowactivate` + `windowraise` + a couple of
+    `mousemove --window` nudges or the capture races a stale frame (the
+    "empty second toolbar line" ghost).
+
+## Previous work (2026-07-08): desktop row virtualization — committed as `23ed80a`
+
+- `main` was at `d4bed01` (perf pass phase 1: WAL pragmas, prepare_cached,
   batched scan writes, sort_by_cached_key, panic=abort) — committed + pushed.
 - **`src/app.rs`: desktop row virtualization** (the follow-up the perf spec
   deferred; spec at
@@ -31,13 +57,10 @@
     never overcommits/clips off-screen).
   - `cargo build --release` clean; `cargo test --release` = 134 unit + 12
     integration, 0 failures.
-- **Known pre-existing issue (NOT this change):** at the ~1000px window
-  minimum width, the central panel's content origin shifts left and underlaps
-  the ~290px sidebar (column 1 / card left edge clipped), because the top
-  header/toolbar row overflows and shoves the layout. Confirmed **identical on
-  the pre-virtualization binary** (git-stash test), so it's not a regression.
-  Root cause is the non-wrapping header `ui.horizontal`; a real fix would make
-  that row wrap or clip. Left as a separate follow-up.
+- **Known pre-existing issue — FIXED in the 2026-07-09 session (see top):** at
+  the ~1000px window minimum width the central panel content underlapped the
+  sidebar. Root cause was the sort bar's overflowing `right_to_left` group,
+  not the top header as originally guessed.
 - **GUI screenshot recipe on this box (Wayland/KWin):** winit defaults to a
   native Wayland surface that xdotool/`import` can't see. Launch with
   `env -u WAYLAND_DISPLAY WINIT_UNIX_BACKEND=x11 DISPLAY=:0` to force XWayland,

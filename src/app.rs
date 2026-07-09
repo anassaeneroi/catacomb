@@ -62,7 +62,7 @@ struct SimGroup {
     videos: Vec<SimVideo>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum SortMode {
     Title,
     DurationAsc,
@@ -1517,7 +1517,10 @@ impl App {
     fn top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(2.0);
-            ui.horizontal(|ui| {
+            // Wrapped so narrow windows push buttons onto a second line
+            // instead of off-screen (the row is wider than the ~1000px
+            // window minimum).
+            ui.horizontal_wrapped(|ui| {
                 ui.heading("Catacomb");
                 ui.separator();
                 ui.label("🔍");
@@ -1629,9 +1632,26 @@ impl App {
                         self.current_screen = Screen::Settings;
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(&self.status).weak());
-                });
+                // Right-align the status only when it fits in the remaining
+                // row width — an overflowing right_to_left layout spills LEFT
+                // over the nav buttons. Otherwise show it truncated in flow.
+                let status = egui::RichText::new(&self.status).weak();
+                let status_w = egui::WidgetText::from(status.clone())
+                    .into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Body,
+                    )
+                    .size()
+                    .x;
+                if ui.available_width() >= status_w + 8.0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(status);
+                    });
+                } else {
+                    ui.add(egui::Label::new(status).truncate());
+                }
             });
             ui.add_space(2.0);
         });
@@ -4169,6 +4189,35 @@ impl App {
     }
 
     fn video_list(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        // Toolbar sort chips in left-to-right visual order.
+        const SORT_CHIPS: [(SortMode, &str); 10] = [
+            (SortMode::DownloadDesc, "Recent DL"),
+            (SortMode::DownloadAsc, "Oldest DL"),
+            (SortMode::DateDesc, "Newest"),
+            (SortMode::DateAsc, "Oldest"),
+            (SortMode::Title, "Title"),
+            (SortMode::ChannelAsc, "Channel"),
+            (SortMode::DurationAsc, "Shortest"),
+            (SortMode::DurationDesc, "Longest"),
+            (SortMode::SizeAsc, "Smallest"),
+            (SortMode::SizeDesc, "Largest"),
+        ];
+        /// Measured width the inline sort group needs on the toolbar row.
+        fn sort_chip_row_width(ui: &egui::Ui) -> f32 {
+            let spacing = ui.spacing().item_spacing.x;
+            let pad = ui.spacing().button_padding.x * 2.0;
+            let text_w = |s: &str, style: egui::TextStyle| {
+                egui::WidgetText::from(s)
+                    .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, style)
+                    .size()
+                    .x
+            };
+            let chips: f32 = SORT_CHIPS
+                .iter()
+                .map(|(_, label)| text_w(label, egui::TextStyle::Button) + pad + spacing)
+                .sum();
+            chips + text_w("Sort:", egui::TextStyle::Body) + spacing + 8.0
+        }
         if self.sidebar_view == SidebarView::Channels {
             self.channel_grid(ctx, ui);
             return;
@@ -4205,6 +4254,7 @@ impl App {
         }
 
         // Bulk mode toolbar
+        let mut sort_inline = true;
         ui.horizontal(|ui| {
             let label_text = if self.bulk_mode {
                 format!("{} videos", cards.len())
@@ -4254,20 +4304,31 @@ impl App {
                 }
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.selectable_value(&mut self.sort_mode, SortMode::SizeDesc, "Largest");
-                ui.selectable_value(&mut self.sort_mode, SortMode::SizeAsc, "Smallest");
-                ui.selectable_value(&mut self.sort_mode, SortMode::DurationDesc, "Longest");
-                ui.selectable_value(&mut self.sort_mode, SortMode::DurationAsc, "Shortest");
-                ui.selectable_value(&mut self.sort_mode, SortMode::ChannelAsc, "Channel");
-                ui.selectable_value(&mut self.sort_mode, SortMode::Title, "Title");
-                ui.selectable_value(&mut self.sort_mode, SortMode::DateAsc, "Oldest");
-                ui.selectable_value(&mut self.sort_mode, SortMode::DateDesc, "Newest");
-                ui.selectable_value(&mut self.sort_mode, SortMode::DownloadAsc, "Oldest DL");
-                ui.selectable_value(&mut self.sort_mode, SortMode::DownloadDesc, "Recent DL");
-                ui.label(egui::RichText::new("Sort:").weak());
-            });
+            // Right-align the sort chips only when they actually fit in the
+            // remaining row width. A right_to_left layout that runs out of
+            // room overflows LEFT past the panel edge, and egui then advances
+            // the vertical cursor from that overflowed rect — shifting every
+            // row below it under the sidebar. So measure first; when narrow,
+            // the chips move to their own wrapped row below instead.
+            let needed = sort_chip_row_width(ui);
+            sort_inline = ui.available_width() >= needed;
+            if sort_inline {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    for (mode, label) in SORT_CHIPS.iter().rev() {
+                        ui.selectable_value(&mut self.sort_mode, *mode, *label);
+                    }
+                    ui.label(egui::RichText::new("Sort:").weak());
+                });
+            }
         });
+        if !sort_inline {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Sort:").weak());
+                for (mode, label) in SORT_CHIPS {
+                    ui.selectable_value(&mut self.sort_mode, mode, label);
+                }
+            });
+        }
 
         ui.separator();
 
