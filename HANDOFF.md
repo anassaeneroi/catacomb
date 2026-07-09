@@ -1,9 +1,67 @@
 # Session handoff — Catacomb
 
 > Working notes for continuing this work in another session/agent (Copilot, Codex, etc.).
-> Updated 2026-07-08. Delete or update freely; this is not a tracked spec.
+> Updated 2026-07-09. Delete or update freely; this is not a tracked spec.
 
-## Current work (2026-07-09): narrow-window layout fix — DONE, committed
+## ACTIVE BUG (2026-07-09, unresolved): GUI launches with empty library until manual Rescan
+
+User report: every desktop-GUI launch shows an empty library; pressing
+⟳ Rescan populates it. Investigation so far (systematic-debugging, phase 1):
+
+- **Launch environment**: the daily GUI is the packaged `/usr/bin/catacomb`
+  (pacman pkg `catacomb d4bed01-1`, i.e. includes the perf pass), launched
+  with **CWD = /home/luna**, which has its own `/home/luna/config.toml`
+  pointing at `/mnt/InannaBeloved/youtube-backup/` (real 73 MB DB). Config is
+  correct — rescan works against the right library.
+- **Code path**: `app.rs::new()` spawns the `catacomb-libscan` thread
+  (scan → apply options/folders → `sync_search_index` → `send(library)` →
+  `request_repaint`); `update()` drains `library_load_rx` (~app.rs:4855).
+  Small scratch libraries populate fine (verified live during the layout-fix
+  work), so the mechanism works — this is timing/contention-dependent on the
+  big real library.
+- **Smoking gun in the user's own launch** (`journalctl --user`, pid 609582,
+  launched 03:39:37): `search index sync failed: database is locked` at
+  03:40:54 — i.e. the scan took ~77 s and then the FTS sync hit SQLITE_BUSY
+  **despite `busy_timeout = 5000`** (present and correct in `database.rs`).
+  So some writer held the DB write lock > 5 s during startup. Prime suspect:
+  the dedup fingerprint pass (`dedup_enabled = true` in the user's config)
+  or another batched writer running concurrently with the libscan thread.
+- **Open question**: `sync_search_index` failing is handled (eprintln,
+  continue) and `send(library)` comes after it, so that error alone should
+  NOT leave the library empty. Either the scan itself returns empty/partial
+  under the same lock contention (check `scan_channels_with_cache`'s
+  info_cache read/write error handling — the perf pass batched those writes),
+  or the send/drain has a separate failure mode. `try_recv().ok()` at
+  app.rs:4855 swallows a Disconnected (dead thread) silently — worth making
+  that surface an error status.
+- **Repro gotcha**: don't launch `/usr/bin/catacomb` under the XWayland
+  screenshot recipe — the wgpu backend panics with `Surface::configure:
+  Invalid surface` (panic=abort → SIGABRT). That crash is environmental, NOT
+  this bug. The repo `target/release` binary renders fine under XWayland.
+- **Next steps**: (1) read `scan_channels_with_cache` + batched-write error
+  handling for "return empty on DB error" paths; (2) instrument or add a
+  status line when the libscan thread dies/errors; (3) reproduce with the
+  real library — run the GUI on Wayland natively (no XWayland forcing) with
+  stderr captured, or add temporary eprintln timing to the libscan thread;
+  (4) check what else writes to the DB in the first ~90 s (fingerprint sync
+  runs at startup? scheduler?).
+- The user's live instance (pid 609582) was left running; a stray
+  `--version`-launched instance from the investigation was killed.
+
+## Feature in flight: in-UI federation remote editor (brainstorming stage)
+
+Roadmap 3.5 follow-up chosen as next feature. Brainstorming (superpowers)
+started; decision so far: **editor lives in Settings, in both UIs** (web
+Settings modal section + desktop Settings screen section) — matches every
+other config value and stays discoverable when no remotes exist (nav/sidebar
+hide remotes when the list is empty). Still to design: API shape (peers are
+positional `/api/remotes/:id`; WebState.remotes is an immutable
+`Vec<Arc<RemoteClient>>` built at startup — needs to become mutable or
+rebuildable), live-apply semantics, whether to add a test-connection button,
+and whether GET settings should echo peer passwords back to the browser.
+No spec written yet.
+
+## Shipped this session (2026-07-09): narrow-window layout fix — committed `2c9031b`, pushed
 
 - `23ed80a` (desktop row virtualization, below) is committed + pushed.
 - **Narrow-window layout fix** (the follow-up noted below, now RESOLVED): the
@@ -220,9 +278,9 @@ harness screenshot. Built into the running `:8081` binary.
 
 ## Suggested next steps (pick up here)
 
-1. **Push** — `c12de9c` (command palette) is committed but not yet pushed.
-2. Any rough edges from real daily use (the player + palette especially — both
-   verified via harness screenshots, not live click-through).
+1. **The ACTIVE BUG at the top** — empty library at GUI launch (root cause
+   not yet confirmed; evidence + next steps recorded there).
+2. **Resume the remote-editor brainstorm** (see "Feature in flight" above).
 3. A fresh web-UI surface to reskin/upgrade, or a roadmap item below.
 
 Roadmap "surpass" items still open (see [ROADMAP.md](ROADMAP.md) §3):
