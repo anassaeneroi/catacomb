@@ -236,9 +236,8 @@ Roadmap "surpass" items still open (see [ROADMAP.md](ROADMAP.md) §3):
 
 ## Watch-outs / open questions
 
-- The video player's seek/speed/captions are verified by code-path review +
-  static chrome screenshot, NOT live playback (no headless video). Worth a real
-  click-through in the app.
+- The video player's seek/speed/captions: verified in real daily use as of
+  2026-07-09 (user confirmed) — retired as a watch-out.
 - After the rename + session-persistence work, the user's existing browser cookie
   predates both, so they must **log in once more**; logins after that survive
   restarts. A download password may or may not be set (toggled during testing) —
