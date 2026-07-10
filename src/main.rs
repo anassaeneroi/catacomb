@@ -26,6 +26,7 @@ mod feed;
 mod fingerprint;
 mod library;
 mod maintenance;
+mod peertube;
 mod platform;
 mod plex;
 mod pot_provider;
