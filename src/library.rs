@@ -22,6 +22,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::database::Database;
 use crate::download_options::DownloadOptions;
 use crate::platform::{self, Platform};
@@ -31,7 +33,7 @@ const AUDIO_EXTS: &[&str] = &["mp3", "m4a", "opus", "flac", "ogg", "wav", "aac"]
 const THUMB_EXTS: &[&str] = &["webp", "jpg", "jpeg", "png"];
 
 /// A single WebVTT subtitle track discovered alongside a video file.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Subtitle {
     /// ISO 639-1/2 language code extracted from the `.lang.vtt` filename suffix.
     pub lang: String,
@@ -53,38 +55,52 @@ pub struct Track {
 }
 
 /// A fully enriched video entry, ready to serve to the UI.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Video {
     /// yt-dlp video ID (the part inside `[…]` in the filename).
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     #[allow(dead_code)]
     pub stem: String,
+    #[serde(default)]
     pub video_path: Option<PathBuf>,
+    #[serde(default)]
     pub thumb_path: Option<PathBuf>,
+    #[serde(default)]
     pub description_path: Option<PathBuf>,
     /// Path to the `.info.json` sidecar — used to read duration, chapters, etc.
+    #[serde(default)]
     pub info_path: Option<PathBuf>,
+    #[serde(default)]
     pub subtitles: Vec<Subtitle>,
+    #[serde(default)]
     pub has_live_chat: bool,
     /// Duration read from `info.json`; `None` if the sidecar is missing.
+    #[serde(default)]
     pub duration_secs: Option<f64>,
     /// Whether `info.json` lists a non-empty `chapters` array. Cached at scan
     /// time so the web layer needn't re-read and parse the sidecar per request.
+    #[serde(default)]
     pub has_chapters: bool,
     /// Size of the video file on disk; `None` if the video file is missing.
+    #[serde(default)]
     pub file_size: Option<u64>,
     /// Filesystem mtime of the video file as a UNIX timestamp (seconds).
     /// Used by the activity feed to surface recent additions. `None` if the
     /// video file is missing or the system clock returned an error.
+    #[serde(default)]
     pub mtime_unix: Option<u64>,
     /// Upload date as `YYYYMMDD` (yt-dlp's native format from info.json).
     /// `None` if the info.json sidecar is missing or lacks the field.
+    #[serde(default)]
     pub upload_date: Option<String>,
 }
 
 /// A sub-directory inside a channel that contains videos (treated as a playlist).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
     #[allow(dead_code)]
@@ -93,7 +109,7 @@ pub struct Playlist {
 }
 
 /// Channel-level metadata pulled from the first available `info.json`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelMeta {
     pub subscriber_count: Option<u64>,
     pub channel_url: Option<String>,
@@ -101,34 +117,45 @@ pub struct ChannelMeta {
 }
 
 /// A top-level channel directory with all its videos and playlists.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Channel {
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub path: PathBuf,
     /// Source platform — drives sidebar grouping and the re-check URL.
+    #[serde(default)]
     pub platform: Platform,
     /// Originating URL read from the `.source-url` sidecar. Falls back to a
     /// folder-name heuristic for legacy YouTube libraries that predate it.
+    #[serde(default)]
     pub source_url: Option<String>,
     /// Videos stored directly inside the channel directory (not in a sub-folder).
+    #[serde(default)]
     pub videos: Vec<Video>,
     /// Sub-directories that contain at least one video.
+    #[serde(default)]
     pub playlists: Vec<Playlist>,
+    #[serde(default)]
     pub meta: Option<ChannelMeta>,
     /// Cached sum of `videos.len() + playlists[*].videos.len()`.
+    #[serde(default)]
     pub total_videos_cached: usize,
     /// Cached sum of all video file sizes.
+    #[serde(default)]
     pub total_size_cached: u64,
     /// Per-channel download-option overrides loaded from the SQLite
     /// `channel_options` table. Empty by default, meaning "use globals".
     /// The scanner leaves this as `default()`; callers populate it after the
     /// scan by reading the DB once via
     /// [`crate::database::Database::get_all_channel_options`].
+    #[serde(default)]
     pub download_options: DownloadOptions,
     /// Optional folder grouping. `None` means the channel is "Unfiled" and
     /// appears under its platform's heading. Populated post-scan by
     /// [`apply_channel_folders`] from the
     /// [`crate::database::Database::get_all_channel_assignments`] map.
+    #[serde(default)]
     pub folder_id: Option<i64>,
 }
 

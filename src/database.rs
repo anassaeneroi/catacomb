@@ -313,6 +313,11 @@ impl Database {
                 video_id      TEXT NOT NULL,
                 duration_secs REAL,
                 hashes        TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS library_snapshot (
+                root      TEXT PRIMARY KEY,
+                json      TEXT NOT NULL,
+                saved_at  INTEGER NOT NULL
             );",
         )?;
 
@@ -825,6 +830,40 @@ impl Database {
             }
         }
         let _ = tx.commit();
+    }
+
+    /// Persist the scanned library as a JSON blob keyed by its root path, so the
+    /// desktop GUI can render it instantly on the next launch before the (slow,
+    /// disk-bound) rescan finishes. Error-swallowing: a failure just means no
+    /// fresh snapshot next launch — non-fatal, like `info_cache_put_many`.
+    pub fn save_library_snapshot(&self, root: &std::path::Path, library: &[crate::library::Channel]) {
+        let Ok(json) = serde_json::to_string(library) else { return };
+        let root = root.display().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let conn = self.conn();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO library_snapshot (root, json, saved_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![root, json, now],
+        );
+    }
+
+    /// Load the last-persisted library for `root`. Returns `None` if there is no
+    /// snapshot row or the stored JSON no longer deserializes (e.g. after a
+    /// struct change) — callers fall back to the scanning state.
+    pub fn load_library_snapshot(&self, root: &std::path::Path) -> Option<Vec<crate::library::Channel>> {
+        let root = root.display().to_string();
+        let conn = self.conn();
+        let json: String = conn
+            .query_row(
+                "SELECT json FROM library_snapshot WHERE root = ?1",
+                rusqlite::params![root],
+                |r| r.get(0),
+            )
+            .ok()?;
+        serde_json::from_str(&json).ok()
     }
 
     /// Idempotently merge another catacomb database into this one.
@@ -1657,3 +1696,86 @@ fn pool_init_to_rusqlite(e: r2d2::Error) -> rusqlite::Error {
 // unused-import warning when no caller references it directly.
 #[allow(dead_code)]
 type _SilenceConnectionImport = Connection;
+
+#[cfg(test)]
+mod library_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn library_snapshot_round_trips() {
+        use crate::library::{Channel, Playlist, Video};
+        use crate::platform::Platform;
+        let db = Database::open_in_memory().unwrap();
+        let root = std::path::Path::new("/tmp/lib-root");
+
+        let video = Video {
+            id: "abc123".into(),
+            title: "Test Video".into(),
+            stem: "Test Video [abc123]".into(),
+            video_path: Some("/tmp/lib-root/channels/Chan/Test [abc123].mp4".into()),
+            thumb_path: None,
+            description_path: None,
+            info_path: None,
+            subtitles: vec![],
+            has_live_chat: false,
+            duration_secs: Some(42.0),
+            has_chapters: true,
+            file_size: Some(1024),
+            mtime_unix: Some(1_700_000_000),
+            upload_date: Some("20250101".into()),
+        };
+        let chan = Channel {
+            name: "Chan".into(),
+            path: "/tmp/lib-root/channels/Chan".into(),
+            platform: Platform::YouTube,
+            source_url: Some("https://youtube.com/@chan".into()),
+            videos: vec![video.clone()],
+            playlists: vec![Playlist {
+                name: "PL".into(),
+                path: "/tmp/lib-root/channels/Chan/PL".into(),
+                videos: vec![video.clone()],
+            }],
+            meta: None,
+            total_videos_cached: 2,
+            total_size_cached: 2048,
+            download_options: Default::default(),
+            folder_id: Some(7),
+        };
+
+        let library = vec![chan];
+        db.save_library_snapshot(root, &library);
+        let loaded = db.load_library_snapshot(root).expect("snapshot present");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Chan");
+        assert_eq!(loaded[0].videos.len(), 1);
+        assert_eq!(loaded[0].videos[0].id, "abc123");
+        assert_eq!(loaded[0].playlists[0].videos[0].duration_secs, Some(42.0));
+        assert_eq!(loaded[0].folder_id, Some(7));
+    }
+
+    #[test]
+    fn library_snapshot_missing_root_is_none() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db
+            .load_library_snapshot(std::path::Path::new("/nope"))
+            .is_none());
+    }
+
+    #[test]
+    fn library_snapshot_garbage_json_is_none() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            // The in-memory pool is size 1; release this connection before
+            // load_library_snapshot checks one out, or it deadlocks the pool.
+            let conn = db.conn();
+            conn.execute(
+                "INSERT INTO library_snapshot (root, json, saved_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["/tmp/bad", "{not valid json", 0i64],
+            )
+            .unwrap();
+        }
+        assert!(db
+            .load_library_snapshot(std::path::Path::new("/tmp/bad"))
+            .is_none());
+    }
+}
