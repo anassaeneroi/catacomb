@@ -39,10 +39,27 @@ pub struct RemoteSection {
     /// Base URL of the peer's web server, e.g. `http://woofbox:8081` or
     /// `https://archive.example`. No trailing slash needed.
     pub url: String,
+    /// Peer kind — a catacomb federation peer (default) or a PeerTube target.
+    #[serde(default)]
+    pub kind: RemoteKind,
+    /// Username for PeerTube OAuth2. `None` for catacomb peers / public
+    /// PeerTube instances.
+    #[serde(default)]
+    pub username: Option<String>,
     /// Password for the peer, if it has one set. `None`/absent = open peer
     /// (e.g. bound to a trusted tailnet). Stored plaintext like `cookies`.
     #[serde(default)]
     pub password: Option<String>,
+}
+
+/// Which kind of peer a `[[remote]]` is. Defaults to a catacomb peer so
+/// pre-existing config.toml entries keep working unchanged.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteKind {
+    #[default]
+    Catacomb,
+    Peertube,
 }
 
 /// `[convert]` table — global post-download format-conversion defaults.
@@ -342,5 +359,41 @@ mod tests {
         let s = toml::to_string(&ui).unwrap();
         let back: UiSection = toml::from_str(&s).unwrap();
         assert_eq!(back.default_view_mode, "grid");
+    }
+
+    #[test]
+    fn remote_kind_defaults_to_catacomb() {
+        // A legacy [[remote]] with no `kind`/`username` still parses. `[backup]`
+        // has no serde default (directory is required), so include a minimal one.
+        let toml = r#"
+            [backup]
+            directory = "/tmp/lib"
+
+            [[remote]]
+            name = "peer"
+            url = "http://peer:8081"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.remotes.len(), 1);
+        assert_eq!(cfg.remotes[0].kind, RemoteKind::Catacomb);
+        assert!(cfg.remotes[0].username.is_none());
+    }
+
+    #[test]
+    fn remote_kind_parses_peertube_and_username() {
+        let toml = r#"
+            [backup]
+            directory = "/tmp/lib"
+
+            [[remote]]
+            name = "frama"
+            url = "https://framatube.org"
+            kind = "peertube"
+            username = "alice"
+            password = "secret"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.remotes[0].kind, RemoteKind::Peertube);
+        assert_eq!(cfg.remotes[0].username.as_deref(), Some("alice"));
     }
 }
