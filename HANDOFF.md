@@ -3,10 +3,36 @@
 > Working notes for continuing this work in another session/agent (Copilot, Codex, etc.).
 > Updated 2026-07-09. Delete or update freely; this is not a tracked spec.
 
-## ACTIVE BUG (2026-07-09, unresolved): GUI launches with empty library until manual Rescan
+## RESOLVED (2026-07-09): GUI launches with empty library until manual Rescan
 
-User report: every desktop-GUI launch shows an empty library; pressing
-⟳ Rescan populates it. Investigation so far (systematic-debugging, phase 1):
+**Root cause (confirmed by reproduction against the real library):** not a data
+or render bug — the cold-cache startup scan takes **~64 s** (vs ~96 ms warm) on
+the LUKS+btrfs+zstd `/mnt/InannaBeloved` volume, dominated by the directory walk
++ `std::fs::metadata` stat of ~11k sidecar/video files. `info_cache` only saves
+JSON *parsing*, not the stats, so it can't shorten a cold scan. The library did
+populate on its own after ~64 s (the drain delivers all 89 channels), but the
+content area looked empty during the wait, so the user hit ⟳ Rescan — which
+appeared to fix it only because the OS cache was warm by then. The old
+"database is locked" log line is a separate benign symptom (the web server on
+:8081 contends on the same FTS write; `sync_search_index` failing is caught).
+
+**Fixes shipped this session (committed, on `main`):**
+- `843fee5` **Scanning state** — `video_list` shows a centered spinner +
+  "Scanning library…" while the initial scan is in flight
+  (`library_load_rx.is_some() && library.is_empty()`), so a cold scan no longer
+  looks broken. Verified live.
+- `5a55c15` + `3e6bcfb` **Persistent library snapshot (instant startup)** — the
+  scanned `Vec<Channel>` is serialized to a JSON blob in a new
+  `library_snapshot(root, json, saved_at)` table after every scan; desktop
+  `App::new()` seeds `self.library` from it before spawning the scan thread, so
+  a warm launch renders the full library **within ~2 s** (status
+  "N videos (refreshing…)") while the authoritative rescan runs and swaps in.
+  Deleting the snapshot row falls back to the scanning spinner. Spec +
+  plan in `docs/superpowers/specs|plans/2026-07-09-library-snapshot-*`.
+  Serde derives added to `Subtitle/Video/Playlist/ChannelMeta/Channel`
+  (`#[serde(default)]` for forward-compat).
+
+Original investigation notes (kept for reference):
 
 - **Launch environment**: the daily GUI is the packaged `/usr/bin/catacomb`
   (pacman pkg `catacomb d4bed01-1`, i.e. includes the perf pass), launched
