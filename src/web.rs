@@ -824,6 +824,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn merge_keeps_blank_password_by_url() {
+        use crate::config::{RemoteKind, RemoteSection};
+        let existing = vec![RemoteSection {
+            name: "old".into(), url: "http://p:8081".into(),
+            kind: RemoteKind::Catacomb, username: None, password: Some("SECRET".into()),
+        }];
+        let inputs = vec![
+            RemoteInput { name: "renamed".into(), url: "http://p:8081".into(),
+                kind: RemoteKind::Catacomb, username: None, password: None }, // blank → keep
+            RemoteInput { name: "new".into(), url: "http://q:8081".into(),
+                kind: RemoteKind::Catacomb, username: None, password: Some("TYPED".into()) },
+        ];
+        let out = merge_remote_passwords(&inputs, &existing);
+        assert_eq!(out[0].password.as_deref(), Some("SECRET")); // preserved by URL
+        assert_eq!(out[0].name, "renamed");
+        assert_eq!(out[1].password.as_deref(), Some("TYPED"));
+    }
+
+    #[test]
     fn cookie_freshness_flags_expired_auth_cookie() {
         let now = 1_700_000_000;
         // SID expired (past), LOGIN_INFO valid (future). Earliest = SID → expired.
@@ -2246,6 +2265,99 @@ async fn get_maintenance_scan(State(state): State<Arc<WebState>>) -> impl IntoRe
     Json(report)
 }
 
+/// One peer as sent by the editor. Password is write-only: `None`/empty means
+/// "keep the stored secret" (resolved by URL in `merge_remote_passwords`).
+#[derive(serde::Deserialize)]
+pub struct RemoteInput {
+    pub name: String,
+    pub url: String,
+    #[serde(default)]
+    pub kind: crate::config::RemoteKind,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// Resolve write-only passwords: keep the typed password if non-empty, else
+/// adopt the stored password of the existing remote with the same URL, else
+/// None. Trims URLs so whitespace can't defeat the match.
+pub fn merge_remote_passwords(
+    inputs: &[RemoteInput],
+    existing: &[crate::config::RemoteSection],
+) -> Vec<crate::config::RemoteSection> {
+    inputs
+        .iter()
+        .map(|i| {
+            let url = i.url.trim().to_string();
+            let password = match i.password.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+                Some(p) => Some(p.to_string()),
+                None => existing
+                    .iter()
+                    .find(|e| e.url.trim() == url)
+                    .and_then(|e| e.password.clone()),
+            };
+            let username = i.username.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(String::from);
+            crate::config::RemoteSection {
+                name: i.name.trim().to_string(),
+                url,
+                kind: i.kind.clone(),
+                username,
+                password,
+            }
+        })
+        .collect()
+}
+
+/// `PUT /api/remotes` — replace the whole peer list (live-apply).
+async fn put_remotes(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<Vec<RemoteInput>>,
+) -> impl IntoResponse {
+    let merged = {
+        let mut cfg = state.config.lock_recover();
+        let merged = merge_remote_passwords(&body, &cfg.remotes);
+        cfg.remotes = merged.clone();
+        if let Err(e) = cfg.save(&state.config_path) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("save failed: {e}")).into_response();
+        }
+        merged
+    }; // config lock dropped here
+    let rebuilt: Vec<std::sync::Arc<crate::remote::RemoteClientKind>> = merged
+        .iter()
+        .map(|r| std::sync::Arc::new(crate::remote::RemoteClientKind::from_section(r)))
+        .collect();
+    *state.remotes.write().unwrap() = rebuilt;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// `POST /api/remotes/test` — reachability check for a (possibly unsaved) peer.
+async fn test_remote(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<RemoteInput>,
+) -> impl IntoResponse {
+    // Resolve a blank password from the stored remote with the same URL.
+    let section = {
+        let cfg = state.config.lock_recover();
+        merge_remote_passwords(std::slice::from_ref(&body), &cfg.remotes)
+            .into_iter()
+            .next()
+            .unwrap()
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        match crate::remote::RemoteClientKind::from_section(&section) {
+            crate::remote::RemoteClientKind::Catacomb(c) => c.library_json().map(|_| None::<usize>),
+            crate::remote::RemoteClientKind::Peertube(p) => p.list_channels().map(|ch| Some(ch.len())),
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(channels)) => Json(serde_json::json!({ "ok": true, "channels": channels })).into_response(),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e })).into_response(),
+        Err(_) => Json(serde_json::json!({ "ok": false, "error": "test task failed" })).into_response(),
+    }
+}
+
 /// `GET /api/remotes` — list configured federation peers for the UI switcher.
 async fn get_remotes(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let list: Vec<_> = state
@@ -3386,7 +3498,8 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/maintenance/remove", post(post_maintenance_remove))
         .route("/api/autotag/suggest", get(get_autotag_suggest))
         .route("/api/autotag/apply", post(post_autotag_apply))
-        .route("/api/remotes", get(get_remotes))
+        .route("/api/remotes", get(get_remotes).put(put_remotes))
+        .route("/api/remotes/test", post(test_remote))
         .route("/api/remotes/:id/library", get(get_remote_library))
         .route("/api/maintenance/dedup/scan", post(post_dedup_scan))
         .route("/api/maintenance/dedup/status", get(get_dedup_status))

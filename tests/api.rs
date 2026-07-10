@@ -113,6 +113,17 @@ impl Server {
     fn delete(&self, path: &str) -> (u16, String) {
         curl(&self.req_args(path, "DELETE"), None).expect("curl DELETE")
     }
+
+    fn put(&self, path: &str, json: &str) -> (u16, String) {
+        let mut a = self.req_args(path, "PUT");
+        let url = a.pop().unwrap();
+        a.extend([
+            "-H".into(), "Content-Type: application/json".into(),
+            "--data-binary".into(), "@-".into(),
+        ]);
+        a.push(url);
+        curl(&a, Some(json)).expect("curl PUT")
+    }
 }
 
 impl Drop for Server {
@@ -512,4 +523,41 @@ fn pwa_assets_served_and_ungated() {
     assert_eq!(s.get("/manifest.webmanifest").0, 200, "manifest stays public");
     assert_eq!(s.get("/sw.js").0, 200, "service worker stays public");
     assert_eq!(s.get("/icons/icon-512.png").0, 200, "icons stay public");
+}
+
+#[test]
+fn remotes_editor_put_get_roundtrip() {
+    if !have_curl() { eprintln!("skip: no curl"); return; }
+    let s = Server::start();
+
+    // Replace the (empty) peer list with a catacomb + a peertube remote.
+    let body = r#"[
+        {"name":"peerA","url":"http://a:8081","kind":"catacomb","password":"secret"},
+        {"name":"frama","url":"https://framatube.org","kind":"peertube"}
+    ]"#;
+    let (code, _) = s.put("/api/remotes", body);
+    assert_eq!(code, 200, "PUT /api/remotes should succeed");
+
+    let (code, list) = s.get("/api/remotes");
+    assert_eq!(code, 200);
+    assert!(list.contains("\"kind\":\"catacomb\""), "catacomb kind present: {list}");
+    assert!(list.contains("\"kind\":\"peertube\""), "peertube kind present: {list}");
+    assert!(list.contains("\"name\":\"peerA\""), "peerA present: {list}");
+    assert!(list.contains("\"name\":\"frama\""), "frama present: {list}");
+    assert!(list.contains("\"has_password\":true"), "peerA has_password true: {list}");
+    // Passwords are write-only: the plaintext must never be echoed back.
+    assert!(!list.contains("secret"), "GET must not leak the password: {list}");
+
+    // It persisted to config.toml too.
+    let cfg = std::fs::read_to_string(s.dir.join("config.toml")).unwrap();
+    assert!(cfg.contains("framatube.org"), "peertube remote saved to config: {cfg}");
+    assert!(cfg.contains("peertube"), "kind saved to config: {cfg}");
+
+    // Removing one entry via PUT drops it from GET.
+    let (code, _) = s.put("/api/remotes", r#"[{"name":"peerA","url":"http://a:8081","kind":"catacomb"}]"#);
+    assert_eq!(code, 200);
+    let (_, list) = s.get("/api/remotes");
+    assert!(!list.contains("frama"), "removed peer gone from GET: {list}");
+    // The blank-password edit of peerA kept its stored secret.
+    assert!(list.contains("\"has_password\":true"), "peerA password preserved on blank edit: {list}");
 }
