@@ -74,17 +74,36 @@ Original investigation notes (kept for reference):
 - The user's live instance (pid 609582) was left running; a stray
   `--version`-launched instance from the investigation was killed.
 
-## Feature in flight: in-UI federation remote editor (brainstorming stage)
+## Feature in flight: federation editor + PeerTube (3-phase project)
 
-Roadmap 3.5 follow-up chosen as next feature. Brainstorming (superpowers)
-started; decision so far: **editor lives in Settings, in both UIs** (web
-Settings modal section + desktop Settings screen section) — matches every
-other config value and stays discoverable when no remotes exist (nav/sidebar
-hide remotes when the list is empty). Still to design: API shape (peers are
-positional `/api/remotes/:id`; WebState.remotes is an immutable
-`Vec<Arc<RemoteClient>>` built at startup — needs to become mutable or
-rebuildable), live-apply semantics, whether to add a test-connection button,
-and whether GET settings should echo peer passwords back to the browser.
+Roadmap 3.5 follow-up. What began as an in-UI editor for catacomb peers grew
+(user wants PeerTube interop) into a **3-phase project**, decomposed during
+brainstorming:
+
+- **Phase 1 — PeerTube client + multi-kind config (backend). DONE + pushed
+  (`bf3f2b0`, `e69ebc7`, `f7f36d9`, `00ae19e`).** `config::RemoteKind`
+  (catacomb|peertube) + `username` field on `RemoteSection` (non-breaking,
+  `#[serde(default)]`). New `src/peertube.rs`: blocking `PeerTubeClient` with
+  OAuth2 (password grant + refresh-token renewal, anonymous when no creds),
+  `list_channels` / `channel_videos(handle, page)` / `video_media(uuid)` (direct
+  MP4, `None` for HLS-only) / `watch_url`. URL parsing detects instance / `/c/`
+  channel / `/a/` account targets. Pure mapping fns fixture-tested; HTTP is
+  manual-verify. `#[allow(dead_code)]` until phases 2–3 construct it. Spec +
+  plan: `docs/superpowers/specs|plans/2026-07-10-peertube-client-backend*`.
+- **Phase 2 — kind-aware remote editor (both UIs). NOT STARTED.** The editor
+  spec is written (`docs/superpowers/specs/2026-07-10-federation-remote-editor-design.md`,
+  commit `112a109`) but predates the kind decision — it must gain a `kind`
+  selector + `username` field, and this is where the `RemoteSource` trait
+  (catacomb vs peertube dispatch) gets extracted. Editor decisions already
+  locked: lives in Settings both UIs; **live-apply** (web needs
+  `WebState.remotes` → `RwLock<Vec<Arc<RemoteClient>>>`); **masked/write-only**
+  passwords on web (kept-by-URL on blank save), shown in clear on desktop;
+  **test-connection** button. Re-brainstorm the editor spec to fold in `kind`
+  before writing its plan.
+- **Phase 3 — PeerTube browse UI + archive action (both UIs). NOT STARTED.**
+  Two-level lazy nav (list channels → click → paginated videos), inline play
+  via `video_media` (HLS-only = browse-only), and a per-video "Archive" button
+  handing `watch_url` to the downloader.
 No spec written yet.
 
 ## Shipped this session (2026-07-09): narrow-window layout fix — committed `2c9031b`, pushed
