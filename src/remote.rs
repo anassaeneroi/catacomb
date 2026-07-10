@@ -151,6 +151,42 @@ impl RemoteClient {
         let v = self.library_json()?;
         Ok(parse_library(&v))
     }
+
+    /// Whether a password is configured (used by the editor's `has_password`
+    /// indicator; never echoes the secret itself).
+    pub fn has_password(&self) -> bool {
+        self.password.is_some()
+    }
+}
+
+/// A live federation client of either kind. Held by both front-ends' remotes
+/// lists so catacomb peers and PeerTube targets coexist.
+pub enum RemoteClientKind {
+    Catacomb(RemoteClient),
+    Peertube(crate::peertube::PeerTubeClient),
+}
+
+impl RemoteClientKind {
+    pub fn from_section(cfg: &crate::config::RemoteSection) -> Self {
+        match cfg.kind {
+            crate::config::RemoteKind::Catacomb => Self::Catacomb(RemoteClient::new(cfg)),
+            crate::config::RemoteKind::Peertube => {
+                Self::Peertube(crate::peertube::PeerTubeClient::new(cfg))
+            }
+        }
+    }
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Catacomb(c) => &c.name,
+            Self::Peertube(p) => &p.name,
+        }
+    }
+    pub fn kind(&self) -> crate::config::RemoteKind {
+        match self {
+            Self::Catacomb(_) => crate::config::RemoteKind::Catacomb,
+            Self::Peertube(_) => crate::config::RemoteKind::Peertube,
+        }
+    }
 }
 
 /// Whether a relative URL points at peer media the read-only feed token grants
@@ -273,5 +309,24 @@ mod tests {
         assert_eq!(lib.channels.len(), 1);
         assert_eq!(lib.channels[0].videos.len(), 2);
         assert_eq!(lib.channels[0].videos[1].id, "b");
+    }
+
+    #[test]
+    fn client_kind_from_section_dispatches() {
+        use crate::config::{RemoteKind, RemoteSection};
+        let cat = RemoteSection {
+            name: "c".into(), url: "http://p:8081".into(),
+            kind: RemoteKind::Catacomb, username: None, password: None,
+        };
+        let pt = RemoteSection {
+            name: "p".into(), url: "https://framatube.org".into(),
+            kind: RemoteKind::Peertube, username: None, password: None,
+        };
+        let a = RemoteClientKind::from_section(&cat);
+        let b = RemoteClientKind::from_section(&pt);
+        assert_eq!(a.kind(), RemoteKind::Catacomb);
+        assert_eq!(a.name(), "c");
+        assert_eq!(b.kind(), RemoteKind::Peertube);
+        assert_eq!(b.name(), "p");
     }
 }

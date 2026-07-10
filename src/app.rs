@@ -260,8 +260,8 @@ pub struct App {
     /// Auto-tag grouping suggestions, recomputed when the Maintenance screen
     /// opens and after a group is applied. Empty when there's nothing to suggest.
     autotag_suggestions: Vec<crate::autotag::GroupSuggestion>,
-    // Federation (read-only remote libraries).
-    remotes: Vec<std::sync::Arc<crate::remote::RemoteClient>>,
+    // Federation (read-only remote libraries — catacomb + PeerTube).
+    remotes: Vec<std::sync::Arc<crate::remote::RemoteClientKind>>,
     /// Currently-selected peer index, if the Remotes screen is showing one.
     remote_selected: Option<usize>,
     /// Last fetched remote library; `None` until a peer is loaded.
@@ -547,8 +547,8 @@ impl App {
         downloader.fetch_comments = config.backup.fetch_comments;
         downloader.dedup_enabled = config.backup.dedup_enabled;
         // Federation peers, built once from config (read-only remote libraries).
-        let remotes: Vec<std::sync::Arc<crate::remote::RemoteClient>> = config.remotes.iter()
-            .map(|r| std::sync::Arc::new(crate::remote::RemoteClient::new(r)))
+        let remotes: Vec<std::sync::Arc<crate::remote::RemoteClientKind>> = config.remotes.iter()
+            .map(|r| std::sync::Arc::new(crate::remote::RemoteClientKind::from_section(r)))
             .collect();
         downloader.convert_defaults = config.convert.clone();
         let config_bind = config.web.bind.clone();
@@ -2524,15 +2524,27 @@ impl App {
         let Some(client) = self.remotes.get(idx).cloned() else { return };
         self.remote_selected = Some(idx);
         self.remote_library = None;
-        self.remote_status = format!("Connecting to {}…", client.name);
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.remote_rx = Some(rx);
-        let repaint_ctx = self.egui_ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(client.library());
-            // Wake the egui loop so update() drains the result promptly.
-            repaint_ctx.request_repaint();
-        });
+        match client.as_ref() {
+            crate::remote::RemoteClientKind::Catacomb(_) => {
+                self.remote_status = format!("Connecting to {}…", client.name());
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.remote_rx = Some(rx);
+                let repaint_ctx = self.egui_ctx.clone();
+                std::thread::spawn(move || {
+                    let res = match client.as_ref() {
+                        crate::remote::RemoteClientKind::Catacomb(c) => c.library(),
+                        _ => unreachable!(),
+                    };
+                    let _ = tx.send(res);
+                    // Wake the egui loop so update() drains the result promptly.
+                    repaint_ctx.request_repaint();
+                });
+            }
+            crate::remote::RemoteClientKind::Peertube(_) => {
+                self.remote_status =
+                    "PeerTube browsing arrives in a later update".to_string();
+            }
+        }
     }
 
     /// Launch the configured player on a remote (absolute, tokenized) URL.
@@ -2567,7 +2579,7 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 for (i, r) in self.remotes.iter().enumerate() {
                     let sel = self.remote_selected == Some(i);
-                    if ui.selectable_label(sel, format!("🌐 {}", r.name)).clicked() {
+                    if ui.selectable_label(sel, format!("🌐 {}", r.name())).clicked() {
                         select_remote = Some(i);
                     }
                 }

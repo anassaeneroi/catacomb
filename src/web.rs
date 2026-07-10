@@ -148,10 +148,10 @@ pub struct WebState {
     /// GET access to `/feed*` and the media mounts even when a password is
     /// set. Persisted in the `feed_token` setting; stable until regenerated.
     pub feed_token: String,
-    /// Federation peers (read-only remote libraries), built once from
-    /// `config.remotes` at startup. Indexed by position for the `/api/remotes`
-    /// endpoints. Empty when no `[[remote]]` is configured.
-    pub remotes: Vec<std::sync::Arc<crate::remote::RemoteClient>>,
+    /// Federation peers (catacomb + PeerTube). Rebuilt wholesale by the editor's
+    /// `PUT /api/remotes` (behind the `RwLock` for live-apply). Indexed by
+    /// position for the `/api/remotes` endpoints.
+    pub remotes: std::sync::RwLock<Vec<std::sync::Arc<crate::remote::RemoteClientKind>>>,
 }
 
 /// Live state for the background perceptual-dedup job (see
@@ -2250,9 +2250,21 @@ async fn get_maintenance_scan(State(state): State<Arc<WebState>>) -> impl IntoRe
 async fn get_remotes(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let list: Vec<_> = state
         .remotes
+        .read()
+        .unwrap()
         .iter()
         .enumerate()
-        .map(|(i, r)| serde_json::json!({ "id": i, "name": r.name, "url": r.base_url() }))
+        .map(|(i, r)| {
+            let (url, has_password) = match r.as_ref() {
+                crate::remote::RemoteClientKind::Catacomb(c) => (c.base_url().to_string(), c.has_password()),
+                crate::remote::RemoteClientKind::Peertube(p) => (p.base_url().to_string(), p.has_password()),
+            };
+            let kind = match r.kind() {
+                crate::config::RemoteKind::Catacomb => "catacomb",
+                crate::config::RemoteKind::Peertube => "peertube",
+            };
+            serde_json::json!({ "id": i, "name": r.name(), "url": url, "kind": kind, "has_password": has_password })
+        })
         .collect();
     Json(list)
 }
@@ -2265,13 +2277,26 @@ async fn get_remote_library(
     State(state): State<Arc<WebState>>,
     Path(id): Path<usize>,
 ) -> Response {
-    let Some(remote) = state.remotes.get(id).cloned() else {
+    let remote = state.remotes.read().unwrap().get(id).cloned();
+    let Some(remote) = remote else {
         return (StatusCode::NOT_FOUND, "no such remote").into_response();
     };
-    match tokio::task::spawn_blocking(move || remote.library_json()).await {
-        Ok(Ok(v)) => Json(v).into_response(),
-        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, format!("remote error: {e}")).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "remote task failed").into_response(),
+    match remote.as_ref() {
+        crate::remote::RemoteClientKind::Catacomb(_) => {
+            match tokio::task::spawn_blocking(move || match remote.as_ref() {
+                crate::remote::RemoteClientKind::Catacomb(c) => c.library_json(),
+                _ => unreachable!(),
+            })
+            .await
+            {
+                Ok(Ok(v)) => Json(v).into_response(),
+                Ok(Err(e)) => (StatusCode::BAD_GATEWAY, format!("remote error: {e}")).into_response(),
+                Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "remote task failed").into_response(),
+            }
+        }
+        crate::remote::RemoteClientKind::Peertube(_) => {
+            (StatusCode::NOT_IMPLEMENTED, "PeerTube browsing arrives in a later update").into_response()
+        }
     }
 }
 
@@ -3211,10 +3236,10 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
     // get a Lagged error and just resubscribe).
     let (progress_tx, _initial_rx) = tokio::sync::broadcast::channel::<String>(16);
     // Build the federation peers from config before `config` is moved in.
-    let remotes: Vec<std::sync::Arc<crate::remote::RemoteClient>> = config
+    let remotes: Vec<std::sync::Arc<crate::remote::RemoteClientKind>> = config
         .remotes
         .iter()
-        .map(|r| std::sync::Arc::new(crate::remote::RemoteClient::new(r)))
+        .map(|r| std::sync::Arc::new(crate::remote::RemoteClientKind::from_section(r)))
         .collect();
     let state = Arc::new(WebState {
         library: Mutex::new(library),
@@ -3237,7 +3262,7 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         library_body_cache: Mutex::new(None),
         dedup: std::sync::Arc::new(DedupState::default()),
         feed_token,
-        remotes,
+        remotes: std::sync::RwLock::new(remotes),
     });
 
     // Broadcast progress snapshots to WebSocket subscribers. Ticks fast

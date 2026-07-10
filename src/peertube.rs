@@ -96,6 +96,17 @@ impl PeerTubeClient {
         }
     }
 
+    /// API base (`scheme://host`), for the editor's remote listing.
+    pub fn base_url(&self) -> &str {
+        &self.api_base
+    }
+
+    /// Whether OAuth credentials are configured (editor `has_password`
+    /// indicator; never echoes the secret).
+    pub fn has_password(&self) -> bool {
+        self.password.is_some()
+    }
+
     /// Canonical watch URL for a video, handed to the downloader (phase 3).
     pub fn watch_url(&self, uuid: &str) -> String {
         format!("{}/w/{}", self.api_base, uuid)
