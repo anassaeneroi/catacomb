@@ -4218,6 +4218,28 @@ impl App {
                 .sum();
             chips + text_w("Sort:", egui::TextStyle::Body) + spacing + 8.0
         }
+        // Initial background scan still running and nothing to show yet. A cold
+        // scan of a large library on encrypted/compressed storage can take a
+        // minute (metadata stat of every sidecar, uncached after a reboot);
+        // without this the content area looks like an empty/broken library and
+        // tempts a pointless Rescan. Show that work is in progress instead.
+        if self.library_load_rx.is_some() && self.library.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.32);
+                ui.add(egui::Spinner::new().size(34.0));
+                ui.add_space(14.0);
+                ui.heading("Scanning library…");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "First launch after a reboot can take a minute on a large library.",
+                    )
+                    .weak(),
+                );
+            });
+            ctx.request_repaint(); // keep frames coming so the drain swaps in promptly
+            return;
+        }
         if self.sidebar_view == SidebarView::Channels {
             self.channel_grid(ctx, ui);
             return;
