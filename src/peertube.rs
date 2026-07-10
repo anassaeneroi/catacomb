@@ -25,6 +25,7 @@ struct OAuthTokens {
 
 /// One channel in a PeerTube target's channel list.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)] // consumed by the browse UI in phase 3
 pub struct RemoteChannelInfo {
     pub handle: String,
     pub display_name: String,
@@ -32,6 +33,7 @@ pub struct RemoteChannelInfo {
     pub avatar_url: Option<String>,
 }
 
+#[allow(dead_code)] // constructed + driven by the editor (phase 2) and browse UI (phase 3)
 pub struct PeerTubeClient {
     pub name: String,
     api_base: String,
@@ -73,6 +75,7 @@ fn parse_target(url: &str) -> (String, Target) {
     (api_base, target)
 }
 
+#[allow(dead_code)] // public API consumed by phases 2-3 (editor + browse UI)
 impl PeerTubeClient {
     pub fn new(cfg: &RemoteSection) -> Self {
         let (api_base, target) = parse_target(&cfg.url);
@@ -96,6 +99,158 @@ impl PeerTubeClient {
     /// Canonical watch URL for a video, handed to the downloader (phase 3).
     pub fn watch_url(&self, uuid: &str) -> String {
         format!("{}/w/{}", self.api_base, uuid)
+    }
+
+    /// Fetch the instance's local OAuth client id/secret (needed for every
+    /// token grant).
+    fn oauth_client(&self) -> Result<(String, String), String> {
+        let oc: Value = self
+            .client
+            .get(format!("{}/api/v1/oauth-clients/local", self.api_base))
+            .send()
+            .map_err(|e| format!("peertube {}: oauth-clients: {e}", self.name))?
+            .json()
+            .map_err(|e| format!("peertube {}: oauth-clients parse: {e}", self.name))?;
+        let id = oc.get("client_id").and_then(Value::as_str).unwrap_or("").to_string();
+        let secret = oc.get("client_secret").and_then(Value::as_str).unwrap_or("").to_string();
+        Ok((id, secret))
+    }
+
+    /// POST a token grant (`form` fields already include client id/secret and
+    /// grant-specific params), cache the result, and return the access token.
+    fn token_grant(&self, form: &[(&str, &str)]) -> Result<String, String> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/users/token", self.api_base))
+            .form(form)
+            .send()
+            .map_err(|e| format!("peertube {}: token: {e}", self.name))?;
+        if !resp.status().is_success() {
+            return Err(format!("peertube {}: token HTTP {}", self.name, resp.status().as_u16()));
+        }
+        let v: Value = resp
+            .json()
+            .map_err(|e| format!("peertube {}: token parse: {e}", self.name))?;
+        let toks = parse_tokens(&v).ok_or_else(|| format!("peertube {}: token missing", self.name))?;
+        let access = toks.access.clone();
+        *self.tokens.lock().unwrap() = Some(toks);
+        Ok(access)
+    }
+
+    /// Obtain (and cache) an access token via the OAuth2 password grant. No-op /
+    /// returns None when no credentials are configured (public browsing).
+    fn ensure_token(&self) -> Result<Option<String>, String> {
+        let (Some(user), Some(pass)) = (&self.username, &self.password) else {
+            return Ok(None);
+        };
+        if let Some(t) = self.tokens.lock().unwrap().as_ref() {
+            return Ok(Some(t.access.clone()));
+        }
+        let (id, secret) = self.oauth_client()?;
+        let access = self.token_grant(&[
+            ("client_id", &id),
+            ("client_secret", &secret),
+            ("grant_type", "password"),
+            ("username", user.as_str()),
+            ("password", pass.as_str()),
+        ])?;
+        Ok(Some(access))
+    }
+
+    /// Exchange the cached refresh token for a fresh access token. Returns
+    /// `Ok(None)` when there's no usable refresh token or the grant is rejected,
+    /// so the caller can fall back to a full password re-grant.
+    fn try_refresh(&self) -> Result<Option<String>, String> {
+        let refresh = match self.tokens.lock().unwrap().as_ref() {
+            Some(t) if !t.refresh.is_empty() => t.refresh.clone(),
+            _ => return Ok(None),
+        };
+        let (id, secret) = self.oauth_client()?;
+        match self.token_grant(&[
+            ("client_id", &id),
+            ("client_secret", &secret),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &refresh),
+        ]) {
+            Ok(access) => Ok(Some(access)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// GET an API path, adding a Bearer token when credentials are set. On a
+    /// 401, refresh via the refresh token, falling back to a full re-grant.
+    fn authed_get(&self, path: &str) -> Result<Value, String> {
+        let url = format!("{}{}", self.api_base, path);
+        let send = |token: &Option<String>| {
+            let mut req = self.client.get(&url);
+            if let Some(t) = token {
+                req = req.bearer_auth(t);
+            }
+            req.send()
+        };
+        let token = self.ensure_token()?;
+        let resp = send(&token).map_err(|e| format!("peertube {}: {path}: {e}", self.name))?;
+        let resp = if resp.status().as_u16() == 401 && token.is_some() {
+            // Try refresh first; on failure clear the cache and re-grant.
+            let next = match self.try_refresh()? {
+                Some(access) => Some(access),
+                None => {
+                    *self.tokens.lock().unwrap() = None;
+                    self.ensure_token()?
+                }
+            };
+            send(&next).map_err(|e| format!("peertube {}: {path}: {e}", self.name))?
+        } else {
+            resp
+        };
+        if !resp.status().is_success() {
+            return Err(format!("peertube {}: {path}: HTTP {}", self.name, resp.status().as_u16()));
+        }
+        resp.json().map_err(|e| format!("peertube {}: {path}: parse {e}", self.name))
+    }
+
+    /// List the target's video channels.
+    pub fn list_channels(&self) -> Result<Vec<RemoteChannelInfo>, String> {
+        let path = match &self.target {
+            Target::Instance => "/api/v1/video-channels?start=0&count=100".to_string(),
+            Target::Account(n) => format!("/api/v1/accounts/{n}/video-channels?start=0&count=100"),
+            Target::Channel(h) => {
+                // Single channel — fetch its object directly and map it alone.
+                let v = self.authed_get(&format!("/api/v1/video-channels/{h}"))?;
+                return Ok(map_channel(&v, &self.api_base).into_iter().collect());
+            }
+        };
+        let v = self.authed_get(&path)?;
+        let data = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+        Ok(data.iter().filter_map(|c| map_channel(c, &self.api_base)).collect())
+    }
+
+    /// Fetch one page (24) of a channel's videos, newest first.
+    pub fn channel_videos(&self, handle: &str, page: usize) -> Result<Vec<RemoteVideo>, String> {
+        let start = page * 24;
+        let path = format!(
+            "/api/v1/video-channels/{handle}/videos?start={start}&count=24&sort=-publishedAt"
+        );
+        let v = self.authed_get(&path)?;
+        let data = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+        Ok(data
+            .iter()
+            .map(|vid| {
+                let channel = vid
+                    .get("channel")
+                    .and_then(|c| c.get("displayName"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(handle)
+                    .to_string();
+                map_video(vid, &self.api_base, &channel)
+            })
+            .collect())
+    }
+
+    /// Resolve a video's directly-playable MP4 URL (None if HLS-only).
+    pub fn video_media(&self, uuid: &str) -> Result<Option<String>, String> {
+        let v = self.authed_get(&format!("/api/v1/videos/{uuid}"))?;
+        Ok(pick_media(&v))
     }
 }
 
