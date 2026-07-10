@@ -482,7 +482,20 @@ impl App {
         // DB lookups that don't depend on the scan, so they stay synchronous.
         let (library_load_tx, library_load_rx) =
             std::sync::mpsc::channel::<Vec<library::Channel>>();
-        let status = "Scanning library…".to_string();
+        // Instant startup: if we persisted the library last run, show it
+        // immediately while the (slow, disk-bound) rescan runs in the
+        // background and swaps in fresh data via `library_load_rx`.
+        let seeded_library: Vec<library::Channel> =
+            db.load_library_snapshot(&channels_root).unwrap_or_default();
+        let status = if seeded_library.is_empty() {
+            "Scanning library…".to_string()
+        } else {
+            format!(
+                "{} channels, {} videos (refreshing…)",
+                seeded_library.len(),
+                seeded_library.iter().map(|c| c.total_videos()).sum::<usize>()
+            )
+        };
         {
             let db = db.clone();
             let channels_root = channels_root.clone();
@@ -502,12 +515,13 @@ impl App {
                     if let Err(e) = db.sync_search_index(&library::build_search_entries(&library)) {
                         eprintln!("search index sync failed: {e}");
                     }
+                    db.save_library_snapshot(&channels_root, &library);
                     let _ = library_load_tx.send(library);
                     ctx.request_repaint(); // wake update() to swap the result in
                 })
                 .ok();
         }
-        let library: Vec<library::Channel> = Vec::new();
+        let library: Vec<library::Channel> = seeded_library;
         let folders = db.list_folders().unwrap_or_default();
         let watched = db.get_watched().unwrap_or_default();
         let flags = db.get_video_flags().unwrap_or_default();
@@ -804,6 +818,7 @@ impl App {
         self.thumb_pending.retain(|p| valid.contains(p));
         // Bump the generation so the card cache recomputes against the new library.
         self.library_generation += 1;
+        self.db.save_library_snapshot(&self.channels_root, &self.library);
         self.status = format!(
             "Rescanned: {} channels, {} videos",
             self.library.len(),
