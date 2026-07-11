@@ -2311,6 +2311,64 @@ function applyTheme(t){document.body.className=t==='dark'?'':'theme-'+t;localSto
 
 async function logout(){try{await fetch('/api/logout',{method:'POST'});location.reload()}catch{}}
 
+/* ── Federation peers editor (Settings) ─────────────────────────── */
+let remotesEdit=[]; // {name,url,kind,username,has_password,password}
+async function renderRemotesEditor(){
+  try{
+    remotesEdit=(await(await api('/api/remotes')).json()).map(x=>({
+      name:x.name,url:x.url,kind:x.kind||'catacomb',
+      username:x.username||'',has_password:!!x.has_password,password:''}));
+  }catch(e){remotesEdit=[];}
+  drawRemotesEditor();
+}
+function drawRemotesEditor(){
+  const box=document.getElementById('remotesRows'); if(!box)return; box.innerHTML='';
+  const inp='background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px';
+  remotesEdit.forEach((rm,i)=>{
+    const row=document.createElement('div');
+    row.style.cssText='display:flex;flex-wrap:wrap;gap:4px;align-items:center;border-bottom:1px solid var(--border);padding:6px 0';
+    row.innerHTML=`
+      <select data-i="${i}" class="rm-kind" style="${inp}">
+        <option value="catacomb"${rm.kind==='catacomb'?' selected':''}>Catacomb</option>
+        <option value="peertube"${rm.kind==='peertube'?' selected':''}>PeerTube</option>
+      </select>
+      <input data-i="${i}" class="rm-name" placeholder="name" value="${esc(rm.name)}" style="${inp};width:90px">
+      <input data-i="${i}" class="rm-url" placeholder="url" value="${esc(rm.url)}" style="${inp};flex:1;min-width:140px">
+      <input data-i="${i}" class="rm-user" placeholder="username" value="${esc(rm.username)}" style="${inp};width:90px;display:${rm.kind==='peertube'?'inline-block':'none'}">
+      <input data-i="${i}" class="rm-pass" type="password" placeholder="${rm.has_password?'set — blank keeps':'password'}" style="${inp};width:110px">
+      <button data-i="${i}" class="rm-test">Test</button>
+      <button data-i="${i}" class="rm-del">✕</button>
+      <span class="rm-result" data-i="${i}" style="font-size:11px;color:var(--muted)"></span>`;
+    box.appendChild(row);
+  });
+  box.querySelectorAll('.rm-kind').forEach(el=>el.onchange=e=>{remotesEdit[+e.target.dataset.i].kind=e.target.value;drawRemotesEditor();});
+  const bind=(cls,f)=>box.querySelectorAll('.'+cls).forEach(el=>el.oninput=e=>{remotesEdit[+e.target.dataset.i][f]=e.target.value;});
+  bind('rm-name','name');bind('rm-url','url');bind('rm-user','username');bind('rm-pass','password');
+  box.querySelectorAll('.rm-del').forEach(el=>el.onclick=e=>{remotesEdit.splice(+e.target.dataset.i,1);drawRemotesEditor();});
+  box.querySelectorAll('.rm-test').forEach(el=>el.onclick=e=>testRemoteRow(+e.target.dataset.i));
+}
+function addRemoteRow(){remotesEdit.push({name:'',url:'',kind:'catacomb',username:'',has_password:false,password:''});drawRemotesEditor();}
+async function testRemoteRow(i){
+  const rm=remotesEdit[i];
+  const out=document.querySelector('.rm-result[data-i="'+i+'"]'); if(out)out.textContent='testing…';
+  try{
+    const j=await(await api('/api/remotes/test',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url:rm.url,kind:rm.kind,username:rm.username||null,password:rm.password||null})})).json();
+    if(out)out.textContent=j.ok?('✓ ok'+(j.channels!=null?` (${j.channels} ch)`:'')):('✗ '+(j.error||'failed'));
+  }catch(e){if(out)out.textContent='✗ '+e;}
+}
+async function saveRemotesEditor(btn){
+  const payload=remotesEdit.map(rm=>({name:rm.name,url:rm.url,kind:rm.kind,
+    username:rm.kind==='peertube'?(rm.username||null):null,
+    password:rm.password?rm.password:null}));
+  const st=document.getElementById('remotes-edit-status'); if(st)st.textContent='saving…';
+  try{
+    await api('/api/remotes',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(st)st.textContent='saved';
+    await renderRemotesEditor(); loadRemotes();
+  }catch(e){if(st)st.textContent='save failed';}
+}
+
 async function openSettings(){
   let cur={transcode:false,source_url:null,current_bind:null,available_binds:[],download_password_required:false};try{cur=await(await api('/api/settings')).json()}catch{}
   const savedTheme=localStorage.getItem('theme')||'dark';
@@ -2534,6 +2592,15 @@ async function openSettings(){
       </div>
       <div id="restore-status" class="settings-hint" style="display:none"></div>
     </div>
+    <hr style="border-color:var(--border);margin:12px 0">
+    <div style="font-weight:700;margin-bottom:8px">🌐 Federation peers</div>
+    <div class="settings-hint" style="margin-bottom:6px">Browse other Catacomb instances, or PeerTube channels, from this one. PeerTube peers can be added now; browsing them arrives in a later update.</div>
+    <div id="remotesRows"></div>
+    <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+      <button onclick="addRemoteRow()">+ Add peer</button>
+      <button class="primary" onclick="saveRemotesEditor(this)">Save peers</button>
+      <span id="remotes-edit-status" style="font-size:11px;color:var(--muted)"></span>
+    </div>
     ${srcRow}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
       ${logoutBtn}
@@ -2542,6 +2609,7 @@ async function openSettings(){
     </div>
   </div>`;
   document.body.appendChild(bg);
+  renderRemotesEditor();
 }
 
 function loadCookieFile(input){
