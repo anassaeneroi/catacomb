@@ -271,6 +271,8 @@ pub struct App {
     /// Receiver for the background fetch of a peer's library (network I/O is
     /// done off the UI thread). `None` when no fetch is in flight.
     remote_rx: Option<Receiver<Result<crate::remote::RemoteLibrary, String>>>,
+    /// Test-connection result for the settings editor: (row index, message).
+    remote_test_rx: Option<Receiver<(usize, String)>>,
     stats_report: Option<crate::stats::StatsReport>,
     // Per-channel download-options dialog state
     show_channel_options: bool,
@@ -699,6 +701,7 @@ impl App {
             remote_library: None,
             remote_status: String::new(),
             remote_rx: None,
+            remote_test_rx: None,
             stats_report: None,
             show_channel_options: false,
             channel_options_target: None,
@@ -2547,6 +2550,30 @@ impl App {
         }
     }
 
+    /// Reachability-test the remote at `self.config.remotes[idx]` on a thread.
+    /// The result is delivered over `remote_test_rx`, drained in `update()`.
+    fn start_remote_test(&mut self, idx: usize) {
+        let Some(section) = self.config.remotes.get(idx).cloned() else { return };
+        self.remote_status = format!("Testing {}…", section.name);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.remote_test_rx = Some(rx);
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let msg = match crate::remote::RemoteClientKind::from_section(&section) {
+                crate::remote::RemoteClientKind::Catacomb(c) => match c.library_json() {
+                    Ok(_) => "✓ reachable".to_string(),
+                    Err(e) => format!("✗ {e}"),
+                },
+                crate::remote::RemoteClientKind::Peertube(p) => match p.list_channels() {
+                    Ok(ch) => format!("✓ {} channels", ch.len()),
+                    Err(e) => format!("✗ {e}"),
+                },
+            };
+            let _ = tx.send((idx, msg));
+            ctx.request_repaint();
+        });
+    }
+
     /// Launch the configured player on a remote (absolute, tokenized) URL.
     /// mpv streams it straight from the peer; no resume tracking (that's local).
     fn play_remote_url(&mut self, url: &str) {
@@ -3850,6 +3877,56 @@ impl App {
                 ui.separator();
                 ui.add_space(4.0);
 
+                ui.heading("🌐 Federation peers");
+                ui.label(egui::RichText::new(
+                    "Browse other Catacomb instances, or PeerTube channels, from this one. \
+                     PeerTube peers can be added now; browsing them arrives in a later update.")
+                    .weak().small());
+                let mut remove: Option<usize> = None;
+                let mut test: Option<usize> = None;
+                for (i, r) in self.config.remotes.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_source(("rm-kind", i))
+                            .selected_text(match r.kind {
+                                crate::config::RemoteKind::Catacomb => "Catacomb",
+                                crate::config::RemoteKind::Peertube => "PeerTube",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut r.kind, crate::config::RemoteKind::Catacomb, "Catacomb");
+                                ui.selectable_value(&mut r.kind, crate::config::RemoteKind::Peertube, "PeerTube");
+                            });
+                        ui.add(egui::TextEdit::singleline(&mut r.name).hint_text("name").desired_width(90.0));
+                        ui.add(egui::TextEdit::singleline(&mut r.url).hint_text("url").desired_width(180.0));
+                        if r.kind == crate::config::RemoteKind::Peertube {
+                            let mut user = r.username.clone().unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut user).hint_text("username").desired_width(90.0)).changed() {
+                                r.username = if user.is_empty() { None } else { Some(user) };
+                            }
+                        }
+                        let mut pass = r.password.clone().unwrap_or_default();
+                        if ui.add(egui::TextEdit::singleline(&mut pass).password(true).hint_text("password").desired_width(90.0)).changed() {
+                            r.password = if pass.is_empty() { None } else { Some(pass) };
+                        }
+                        if ui.button("Test").clicked() { test = Some(i); }
+                        if ui.button("✕").clicked() { remove = Some(i); }
+                    });
+                }
+                if ui.button("+ Add peer").clicked() {
+                    self.config.remotes.push(crate::config::RemoteSection {
+                        name: String::new(), url: String::new(),
+                        kind: crate::config::RemoteKind::Catacomb, username: None, password: None,
+                    });
+                }
+                if let Some(i) = remove { self.config.remotes.remove(i); }
+                if let Some(i) = test { self.start_remote_test(i); }
+                if !self.remote_status.is_empty() {
+                    ui.label(egui::RichText::new(&self.remote_status).weak().small());
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
                 ui.horizontal(|ui| {
                     if ui.button("Apply & Save").clicked() {
                         let new_dir = PathBuf::from(&self.settings_dir);
@@ -3912,6 +3989,12 @@ impl App {
                         self.downloader.fetch_comments = self.config.backup.fetch_comments;
                         self.downloader.dedup_enabled = self.config.backup.dedup_enabled;
                         self.downloader.convert_defaults = self.config.convert.clone();
+                        // Rebuild the live federation clients from the edited list.
+                        self.remotes = self.config.remotes.iter()
+                            .map(|r| std::sync::Arc::new(crate::remote::RemoteClientKind::from_section(r)))
+                            .collect();
+                        self.remote_selected = None;
+                        self.remote_library = None;
                         if dir_changed {
                             self.channels_root = new_dir.clone();
                             self.library_root = new_dir
@@ -4933,6 +5016,13 @@ impl eframe::App for App {
                     self.remote_library = None;
                 }
             }
+            ctx.request_repaint();
+        }
+
+        // Settings editor test-connection result (see start_remote_test).
+        if let Some((_, msg)) = self.remote_test_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.remote_status = msg;
+            self.remote_test_rx = None;
             ctx.request_repaint();
         }
 
