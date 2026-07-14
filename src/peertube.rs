@@ -24,8 +24,7 @@ struct OAuthTokens {
 }
 
 /// One channel in a PeerTube target's channel list.
-#[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)] // consumed by the browse UI in phase 3
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct RemoteChannelInfo {
     pub handle: String,
     pub display_name: String,

@@ -187,6 +187,30 @@ impl RemoteClientKind {
             Self::Peertube(_) => crate::config::RemoteKind::Peertube,
         }
     }
+    pub fn pt_channels(&self) -> Result<Vec<crate::peertube::RemoteChannelInfo>, String> {
+        match self {
+            Self::Peertube(p) => p.list_channels(),
+            Self::Catacomb(_) => Err("not a PeerTube remote".into()),
+        }
+    }
+    pub fn pt_channel_videos(&self, handle: &str, page: usize) -> Result<Vec<RemoteVideo>, String> {
+        match self {
+            Self::Peertube(p) => p.channel_videos(handle, page),
+            Self::Catacomb(_) => Err("not a PeerTube remote".into()),
+        }
+    }
+    pub fn pt_video_media(&self, uuid: &str) -> Result<Option<String>, String> {
+        match self {
+            Self::Peertube(p) => p.video_media(uuid),
+            Self::Catacomb(_) => Err("not a PeerTube remote".into()),
+        }
+    }
+    pub fn pt_watch_url(&self, uuid: &str) -> Result<String, String> {
+        match self {
+            Self::Peertube(p) => Ok(p.watch_url(uuid)),
+            Self::Catacomb(_) => Err("not a PeerTube remote".into()),
+        }
+    }
 }
 
 /// Whether a relative URL points at peer media the read-only feed token grants
@@ -328,5 +352,19 @@ mod tests {
         assert_eq!(a.name(), "c");
         assert_eq!(b.kind(), RemoteKind::Peertube);
         assert_eq!(b.name(), "p");
+    }
+
+    #[test]
+    fn peertube_passthroughs_reject_catacomb() {
+        use crate::config::{RemoteKind, RemoteSection};
+        let cat = RemoteSection {
+            name: "c".into(), url: "http://p:8081".into(),
+            kind: RemoteKind::Catacomb, username: None, password: None,
+        };
+        let k = RemoteClientKind::from_section(&cat);
+        assert!(k.pt_channels().is_err());
+        assert!(k.pt_channel_videos("h", 0).is_err());
+        assert!(k.pt_video_media("u").is_err());
+        assert!(k.pt_watch_url("u").is_err());
     }
 }
