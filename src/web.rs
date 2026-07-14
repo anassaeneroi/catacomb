@@ -2412,6 +2412,97 @@ async fn get_remote_library(
     }
 }
 
+#[derive(Deserialize)]
+struct PageQuery {
+    #[serde(default)]
+    page: usize,
+}
+
+#[derive(Deserialize)]
+struct ArchiveBody {
+    uuid: String,
+}
+
+/// Guard: fetch the remote and require it be a PeerTube kind. Returns the
+/// cloned Arc on success, or the ready-made error Response.
+fn require_peertube(
+    state: &Arc<WebState>,
+    id: usize,
+) -> Result<std::sync::Arc<crate::remote::RemoteClientKind>, Response> {
+    let remote = state.remotes.read().unwrap().get(id).cloned();
+    let Some(remote) = remote else {
+        return Err((StatusCode::NOT_FOUND, "no such remote").into_response());
+    };
+    if remote.kind() != crate::config::RemoteKind::Peertube {
+        return Err((StatusCode::BAD_REQUEST, "not a PeerTube remote").into_response());
+    }
+    Ok(remote)
+}
+
+/// `GET /api/remotes/:id/channels` — a PeerTube peer's channel list.
+async fn get_remote_channels(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<usize>,
+) -> Response {
+    let remote = match require_peertube(&state, id) { Ok(r) => r, Err(e) => return e };
+    match tokio::task::spawn_blocking(move || remote.pt_channels()).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, format!("remote error: {e}")).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "remote task failed").into_response(),
+    }
+}
+
+/// `GET /api/remotes/:id/channels/:handle/videos?page=N` — one page (24) of a
+/// channel's videos. `:handle` may be `name@host` (axum percent-decodes it).
+async fn get_remote_channel_videos(
+    State(state): State<Arc<WebState>>,
+    Path((id, handle)): Path<(usize, String)>,
+    Query(q): Query<PageQuery>,
+) -> Response {
+    let remote = match require_peertube(&state, id) { Ok(r) => r, Err(e) => return e };
+    let page = q.page;
+    match tokio::task::spawn_blocking(move || remote.pt_channel_videos(&handle, page)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, format!("remote error: {e}")).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "remote task failed").into_response(),
+    }
+}
+
+/// `GET /api/remotes/:id/videos/:uuid/media` — resolve a directly-playable MP4.
+/// `204 No Content` when the video is HLS-only.
+async fn get_remote_video_media(
+    State(state): State<Arc<WebState>>,
+    Path((id, uuid)): Path<(usize, String)>,
+) -> Response {
+    let remote = match require_peertube(&state, id) { Ok(r) => r, Err(e) => return e };
+    match tokio::task::spawn_blocking(move || remote.pt_video_media(&uuid)).await {
+        Ok(Ok(Some(url))) => Json(serde_json::json!({ "url": url })).into_response(),
+        Ok(Ok(None)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, format!("remote error: {e}")).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "remote task failed").into_response(),
+    }
+}
+
+/// `POST /api/remotes/:id/archive` `{uuid}` — queue a PeerTube video into the
+/// local library via the shared downloader (lands in `Other`).
+async fn post_remote_archive(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<usize>,
+    Json(body): Json<ArchiveBody>,
+) -> Response {
+    let remote = match require_peertube(&state, id) { Ok(r) => r, Err(e) => return e };
+    let watch_url = match remote.pt_watch_url(&body.uuid) {
+        Ok(u) => u,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let info = classify_url(&watch_url);
+    {
+        let mut dl = state.downloader.lock_recover();
+        dl.start(watch_url, &info, false, DownloadQuality::Best, false, None);
+    }
+    (StatusCode::ACCEPTED, "ok").into_response()
+}
+
 /// `GET /api/autotag/suggest` — heuristic folder-grouping suggestions for
 /// unfiled channels (see [`crate::autotag`]). Pure arithmetic over the
 /// in-memory library, so it's computed on demand rather than as a job.
@@ -3501,6 +3592,10 @@ async fn serve(config: Config, shutdown_rx: std::sync::mpsc::Receiver<()>) {
         .route("/api/remotes", get(get_remotes).put(put_remotes))
         .route("/api/remotes/test", post(test_remote))
         .route("/api/remotes/:id/library", get(get_remote_library))
+        .route("/api/remotes/:id/channels", get(get_remote_channels))
+        .route("/api/remotes/:id/channels/:handle/videos", get(get_remote_channel_videos))
+        .route("/api/remotes/:id/videos/:uuid/media", get(get_remote_video_media))
+        .route("/api/remotes/:id/archive", post(post_remote_archive))
         .route("/api/maintenance/dedup/scan", post(post_dedup_scan))
         .route("/api/maintenance/dedup/status", get(get_dedup_status))
         .route("/api/maintenance/repair/:id", post(post_maintenance_repair))

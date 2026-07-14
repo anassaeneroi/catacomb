@@ -561,3 +561,33 @@ fn remotes_editor_put_get_roundtrip() {
     // The blank-password edit of peerA kept its stored secret.
     assert!(list.contains("\"has_password\":true"), "peerA password preserved on blank edit: {list}");
 }
+
+#[test]
+fn peertube_browse_endpoints_kind_guarded() {
+    if !have_curl() { eprintln!("skip: no curl"); return; }
+    let s = Server::start();
+
+    // A peertube remote pointing at a dead port, and a catacomb remote.
+    let body = r#"[
+        {"name":"pt","url":"http://127.0.0.1:59999","kind":"peertube"},
+        {"name":"cat","url":"http://127.0.0.1:59998","kind":"catacomb"}
+    ]"#;
+    assert_eq!(s.put("/api/remotes", body).0, 200);
+
+    // PeerTube channels endpoint on the peertube remote: route exists, but the
+    // host is unreachable → 502 (NOT 404-route-missing, NOT 400-wrong-kind).
+    let (code, _) = s.get("/api/remotes/0/channels");
+    assert_eq!(code, 502, "unreachable peertube host → bad gateway");
+
+    // Same endpoint on the catacomb remote → 400 (kind guard).
+    let (code, _) = s.get("/api/remotes/1/channels");
+    assert_eq!(code, 400, "channels on a catacomb remote is rejected");
+
+    // Archive on the catacomb remote is also kind-guarded.
+    let (code, _) = s.post("/api/remotes/1/archive", r#"{"uuid":"abc"}"#);
+    assert_eq!(code, 400, "archive on a catacomb remote is rejected");
+
+    // Unknown remote id → 404.
+    let (code, _) = s.get("/api/remotes/9/channels");
+    assert_eq!(code, 404);
+}
