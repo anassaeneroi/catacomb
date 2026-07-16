@@ -665,6 +665,7 @@
     </div>
     <div class="filters" id="filters"></div>
     <div class="grid" id="grid"></div>
+    <div id="ptView" style="display:none;padding:16px;overflow:auto"></div>
   </section>
 </main>
 <div id="details"></div>
@@ -754,6 +755,103 @@ function exitRemote(){
   loadLibrary();
   setStatus('Back to your library');
 }
+/* ── PeerTube browse (lazy two-level nav) ───────────────────────── */
+let ptState={id:null,channel:null,page:0,videos:[],done:false};
+function ptShow(on){
+  const g=document.getElementById('grid');
+  const v=document.getElementById('ptView');
+  if(g)g.style.display=on?'none':'';
+  if(v)v.style.display=on?'':'none';
+}
+async function openPeertube(id){
+  const r=remotes.find(x=>x.id===id);if(!r)return;
+  ptState={id,channel:null,page:0,videos:[],done:false};
+  remoteMode=null;document.body.classList.remove('remote-mode');
+  closeSidebar();renderSidebar();ptShow(true);
+  setStatus('Connecting to '+r.name+'…');
+  document.getElementById('ptView').innerHTML='<div class="muted">Loading channels…</div>';
+  try{
+    const chs=await(await api('/api/remotes/'+id+'/channels')).json();
+    renderPtChannels(r,chs);
+    setStatus('Viewing '+r.name+' (read-only)');
+  }catch(e){document.getElementById('ptView').innerHTML='<div class="muted">Error: '+esc(e.message)+'</div>';}
+}
+function exitPeertube(){
+  ptState={id:null,channel:null,page:0,videos:[],done:false};
+  ptShow(false);libraryEtag=null;renderSidebar();loadLibrary();
+  setStatus('Back to your library');
+}
+function renderPtChannels(r,chs){
+  let h=`<div class="ch-item" onclick="exitPeertube()">← Back to my library</div>`;
+  h+=`<h3 style="margin:8px 0">🌐 ${esc(r.name)} — channels</h3>`;
+  if(!chs.length)h+='<div class="muted">No channels.</div>';
+  // Handle/name are peer-controlled: keep them out of inline JS (an onclick with
+  // the handle interpolated is an XSS vector — a "'"​ in the handle breaks out).
+  // Stash the handle in a data-* attr (esc()'d) and wire the click in JS.
+  chs.forEach((c,i)=>{
+    const n=c.video_count!=null?` (${c.video_count})`:'';
+    h+=`<div class="ch-item pt-chan" data-handle="${esc(c.handle)}">${esc(c.display_name||c.handle)}${esc(n)}</div>`;
+  });
+  const box=document.getElementById('ptView');box.innerHTML=h;
+  box.querySelectorAll('.pt-chan').forEach(el=>el.onclick=()=>openPtChannel(el.dataset.handle));
+}
+async function openPtChannel(handle){
+  ptState.channel=handle;ptState.page=0;ptState.videos=[];ptState.done=false;
+  await loadPtPage(true);
+}
+async function loadPtPage(){
+  const id=ptState.id,handle=ptState.channel;
+  try{
+    const vids=await(await api('/api/remotes/'+id+'/channels/'+encodeURIComponent(handle)+'/videos?page='+ptState.page)).json();
+    ptState.videos.push(...vids);
+    if(vids.length<24)ptState.done=true;else ptState.page++;
+    renderPtVideos();
+  }catch(e){setStatus('Error: '+e.message);}
+}
+function renderPtVideos(){
+  let h=`<div class="ch-item" onclick='openPeertube(${ptState.id})'>← Back to channels</div>`;
+  h+=`<h3 style="margin:8px 0">${esc(ptState.channel)}</h3>`;
+  h+='<div class="pt-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">';
+  ptState.videos.forEach((v,i)=>{
+    const dur=v.duration_secs?fmtDur(v.duration_secs):'';
+    const thumb=v.thumb_url?`<img src="${esc(v.thumb_url)}" style="width:100%;border-radius:6px" loading="lazy">`:'';
+    h+=`<div class="pt-card" data-i="${i}" style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px">
+      ${thumb}
+      <div style="font-weight:600;margin:6px 0;font-size:13px">${esc(v.title)}</div>
+      <div class="muted" style="font-size:11px">${esc(dur)}</div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button class="pt-play" data-i="${i}" data-uuid="${esc(v.id)}">▶ Play</button>
+        <button class="pt-arch" data-uuid="${esc(v.id)}">⬇ Archive</button>
+      </div>
+      <span class="pt-note muted" data-i="${i}" style="font-size:11px"></span>
+    </div>`;
+  });
+  h+='</div>';
+  if(!ptState.done)h+='<div style="margin:12px 0"><button onclick="loadPtPage()">Load more</button></div>';
+  const box=document.getElementById('ptView');box.innerHTML=h;
+  box.querySelectorAll('.pt-play').forEach(b=>b.onclick=()=>ptPlay(b.dataset.uuid,+b.dataset.i));
+  box.querySelectorAll('.pt-arch').forEach(b=>b.onclick=()=>ptArchive(b.dataset.uuid,b));
+}
+async function ptPlay(uuid,i){
+  const note=document.querySelector('.pt-note[data-i="'+i+'"]');
+  const btn=document.querySelector('.pt-play[data-i="'+i+'"]');
+  if(note)note.textContent='resolving…';
+  try{
+    const r=await api('/api/remotes/'+ptState.id+'/videos/'+encodeURIComponent(uuid)+'/media');
+    if(r.status===204){if(note)note.textContent='HLS-only — archive to watch';if(btn)btn.disabled=true;return;}
+    const j=await r.json();
+    if(note)note.textContent='';
+    const v=ptState.videos[i];
+    playVideo(uuid,{id:uuid,title:v.title,video_url:j.url,duration_secs:v.duration_secs,subtitles:[],has_chapters:false});
+  }catch(e){if(note)note.textContent='✗ '+e.message;}
+}
+async function ptArchive(uuid,btn){
+  btn.disabled=true;btn.textContent='⬇ Queued';
+  try{
+    await api('/api/remotes/'+ptState.id+'/archive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid})});
+    setStatus('Archiving — see Downloads');
+  }catch(e){btn.disabled=false;btn.textContent='⬇ Archive';setStatus('Archive failed: '+e.message);}
+}
 async function loadLibrary(){
   if(remoteMode!==null)return;   // a remote is in view; don't clobber it with local polling
   try{
@@ -794,7 +892,7 @@ function renderSidebar(){
   if(remotes.length){
     h+=`<div class="sidebar-label" style="display:flex;align-items:center;gap:6px">🌐 Remotes</div>`;
     if(remoteMode!==null)h+=`<div class="ch-item" onclick="exitRemote()">← Back to my library</div>`;
-    remotes.forEach(r=>{h+=`<div class="ch-item${remoteMode===r.id?' active':''}" onclick="enterRemote(${r.id})" title="${esc(r.url)}">🌐 ${esc(r.name)}</div>`;});
+    remotes.forEach(r=>{const fn=r.kind==='peertube'?'openPeertube':'enterRemote';const act=(remoteMode===r.id||ptState.id===r.id)?' active':'';h+=`<div class="ch-item${act}" onclick="${fn}(${r.id})" title="${esc(r.url)}">🌐 ${esc(r.name)}</div>`;});
   }
   h+=`<div class="sidebar-label">${remoteMode!==null?'Remote library (read-only)':'Library'}</div>`;
   if(contVids.length)h+=`<div class="ch-item${showContinue?' active':''}" onclick="setContinue()">▶ Continue (${contVids.length})</div>`;
@@ -1841,8 +1939,8 @@ function playerKey(e){
   else return;
   plActivity();
 }
-function playVideo(id){
-  const v=findVideo(id);if(!v||!v.video_url)return;
+function playVideo(id,vObj){
+  const v=vObj||findVideo(id);if(!v||!v.video_url)return;
   currentPlayingId=id;
   transcript={cues:[],loaded:false}; // reset for the new video
   const bg=document.createElement('div');bg.className='modal-bg';
