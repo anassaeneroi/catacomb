@@ -273,6 +273,17 @@ pub struct App {
     remote_rx: Option<Receiver<Result<crate::remote::RemoteLibrary, String>>>,
     /// Test-connection result for the settings editor: (row index, message).
     remote_test_rx: Option<Receiver<(usize, String)>>,
+    /// PeerTube browse (desktop two-level nav). `pt_remote` is the selected
+    /// peer index; None means not browsing a PeerTube peer.
+    pt_remote: Option<usize>,
+    pt_channels: Option<Vec<crate::peertube::RemoteChannelInfo>>,
+    pt_channel: Option<String>,
+    pt_videos: Vec<crate::remote::RemoteVideo>,
+    pt_page: usize,
+    pt_done: bool,
+    pt_channels_rx: Option<Receiver<Result<Vec<crate::peertube::RemoteChannelInfo>, String>>>,
+    pt_videos_rx: Option<Receiver<Result<Vec<crate::remote::RemoteVideo>, String>>>,
+    pt_media_rx: Option<Receiver<Result<Option<String>, String>>>,
     stats_report: Option<crate::stats::StatsReport>,
     // Per-channel download-options dialog state
     show_channel_options: bool,
@@ -702,6 +713,15 @@ impl App {
             remote_status: String::new(),
             remote_rx: None,
             remote_test_rx: None,
+            pt_remote: None,
+            pt_channels: None,
+            pt_channel: None,
+            pt_videos: Vec::new(),
+            pt_page: 0,
+            pt_done: false,
+            pt_channels_rx: None,
+            pt_videos_rx: None,
+            pt_media_rx: None,
             stats_report: None,
             show_channel_options: false,
             channel_options_target: None,
@@ -2574,6 +2594,72 @@ impl App {
         });
     }
 
+    /// Begin browsing PeerTube peer `idx`: fetch its channel list on a thread.
+    fn start_pt_browse(&mut self, idx: usize) {
+        let Some(client) = self.remotes.get(idx).cloned() else { return };
+        self.remote_selected = None;
+        self.remote_library = None;
+        self.pt_remote = Some(idx);
+        self.pt_channels = None;
+        self.pt_channel = None;
+        self.pt_videos.clear();
+        self.pt_page = 0;
+        self.pt_done = false;
+        self.remote_status = format!("Connecting to {}…", client.name());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.pt_channels_rx = Some(rx);
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(client.pt_channels());
+            ctx.request_repaint();
+        });
+    }
+
+    /// Fetch one page of the selected channel's videos on a thread. `reset`
+    /// clears the accumulated list (new channel); otherwise it appends.
+    fn start_pt_videos(&mut self, reset: bool) {
+        let (Some(idx), Some(handle)) = (self.pt_remote, self.pt_channel.clone()) else { return };
+        let Some(client) = self.remotes.get(idx).cloned() else { return };
+        if reset { self.pt_videos.clear(); self.pt_page = 0; self.pt_done = false; }
+        let page = self.pt_page;
+        self.remote_status = "Loading videos…".to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.pt_videos_rx = Some(rx);
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(client.pt_channel_videos(&handle, page));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Resolve a video's playable MP4 on a thread; result drained in update().
+    fn start_pt_play(&mut self, uuid: String) {
+        let Some(idx) = self.pt_remote else { return };
+        let Some(client) = self.remotes.get(idx).cloned() else { return };
+        self.remote_status = "Resolving…".to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.pt_media_rx = Some(rx);
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(client.pt_video_media(&uuid));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Queue a PeerTube video into the local library via the shared downloader.
+    fn start_pt_archive(&mut self, uuid: &str) {
+        let Some(idx) = self.pt_remote else { return };
+        let Some(client) = self.remotes.get(idx).cloned() else { return };
+        match client.pt_watch_url(uuid) {
+            Ok(url) => {
+                let info = crate::platform::classify_url(&url);
+                self.downloader.start(url, &info, false, crate::downloader::DownloadQuality::Best, false, None);
+                self.remote_status = "Archiving — see Downloads".to_string();
+            }
+            Err(e) => self.remote_status = e,
+        }
+    }
+
     /// Launch the configured player on a remote (absolute, tokenized) URL.
     /// mpv streams it straight from the peer; no resume tracking (that's local).
     fn play_remote_url(&mut self, url: &str) {
@@ -2587,11 +2673,21 @@ impl App {
     /// Read-only browser for a federated peer's library.
     fn remotes_screen(&mut self, ctx: &egui::Context) {
         // Keep polling while a background fetch is in flight.
-        if self.remote_rx.is_some() {
+        if self.remote_rx.is_some()
+            || self.pt_channels_rx.is_some()
+            || self.pt_videos_rx.is_some()
+            || self.pt_media_rx.is_some()
+        {
             ctx.request_repaint();
         }
         let mut select_remote: Option<usize> = None;
         let mut play_url: Option<String> = None;
+        // PeerTube nav actions, applied after the CentralPanel closure.
+        let mut open_channel: Option<String> = None;
+        let mut load_more = false;
+        let mut pt_play: Option<String> = None;
+        let mut pt_arch: Option<String> = None;
+        let mut back_to_channels = false;
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("← Library").clicked() {
@@ -2600,12 +2696,12 @@ impl App {
                 ui.heading("🌐 Remote libraries");
             });
             ui.label(egui::RichText::new(
-                "Browse another Catacomb instance read-only. Playback streams from the peer.")
+                "Browse a Catacomb or PeerTube peer read-only. Playback streams from the peer.")
                 .weak().small());
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 for (i, r) in self.remotes.iter().enumerate() {
-                    let sel = self.remote_selected == Some(i);
+                    let sel = self.remote_selected == Some(i) || self.pt_remote == Some(i);
                     if ui.selectable_label(sel, format!("🌐 {}", r.name())).clicked() {
                         select_remote = Some(i);
                     }
@@ -2615,39 +2711,87 @@ impl App {
                 ui.label(egui::RichText::new(&self.remote_status).weak().small());
             }
             ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if let Some(lib) = &self.remote_library {
-                    if lib.channels.is_empty() {
-                        ui.label(egui::RichText::new("This peer's library is empty.").weak());
-                    }
-                    for ch in &lib.channels {
-                        egui::CollapsingHeader::new(format!("{} ({})", ch.name, ch.videos.len()))
-                            .show(ui, |ui| {
-                                for v in &ch.videos {
-                                    ui.horizontal(|ui| {
-                                        let playable = v.video_url.is_some();
-                                        if ui.add_enabled(playable, egui::Button::new("▶")).clicked() {
-                                            if let Some(u) = &v.video_url {
-                                                play_url = Some(u.clone());
-                                            }
-                                        }
-                                        let dur = v.duration_secs
-                                            .map(format_duration)
-                                            .unwrap_or_default();
-                                        ui.label(format!("{}  {}", v.title, dur));
-                                    });
+            if self.pt_remote.is_some() {
+                // PeerTube two-level nav (channels → paged videos).
+                egui::ScrollArea::vertical().id_source("pt-scroll").show(ui, |ui| {
+                    if self.pt_channel.is_none() {
+                        match &self.pt_channels {
+                            None => { ui.label(egui::RichText::new("Loading channels…").weak()); }
+                            Some(chs) if chs.is_empty() => { ui.label(egui::RichText::new("No channels.").weak()); }
+                            Some(chs) => {
+                                for c in chs {
+                                    let label = if let Some(n) = c.video_count {
+                                        format!("{} ({})", c.display_name, n)
+                                    } else { c.display_name.clone() };
+                                    if ui.selectable_label(false, label).clicked() {
+                                        open_channel = Some(c.handle.clone());
+                                    }
                                 }
+                            }
+                        }
+                    } else {
+                        if ui.button("← Back to channels").clicked() { back_to_channels = true; }
+                        ui.heading(self.pt_channel.clone().unwrap_or_default());
+                        for v in &self.pt_videos {
+                            ui.horizontal(|ui| {
+                                if ui.button("▶ Play").clicked() { pt_play = Some(v.id.clone()); }
+                                if ui.button("⬇ Archive").clicked() { pt_arch = Some(v.id.clone()); }
+                                let dur = v.duration_secs.map(format_duration).unwrap_or_default();
+                                ui.label(format!("{}  {}", v.title, dur));
                             });
+                        }
+                        if !self.pt_done && !self.pt_videos.is_empty() {
+                            if ui.button("Load more").clicked() { load_more = true; }
+                        }
                     }
-                } else if self.remote_selected.is_none() {
-                    ui.label(egui::RichText::new(
-                        "Pick a peer above to browse its library.").weak());
-                }
-            });
+                });
+            } else {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if let Some(lib) = &self.remote_library {
+                        if lib.channels.is_empty() {
+                            ui.label(egui::RichText::new("This peer's library is empty.").weak());
+                        }
+                        for ch in &lib.channels {
+                            egui::CollapsingHeader::new(format!("{} ({})", ch.name, ch.videos.len()))
+                                .show(ui, |ui| {
+                                    for v in &ch.videos {
+                                        ui.horizontal(|ui| {
+                                            let playable = v.video_url.is_some();
+                                            if ui.add_enabled(playable, egui::Button::new("▶")).clicked() {
+                                                if let Some(u) = &v.video_url {
+                                                    play_url = Some(u.clone());
+                                                }
+                                            }
+                                            let dur = v.duration_secs
+                                                .map(format_duration)
+                                                .unwrap_or_default();
+                                            ui.label(format!("{}  {}", v.title, dur));
+                                        });
+                                    }
+                                });
+                        }
+                    } else if self.remote_selected.is_none() {
+                        ui.label(egui::RichText::new(
+                            "Pick a peer above to browse its library.").weak());
+                    }
+                });
+            }
         });
         if let Some(i) = select_remote {
-            self.start_remote_fetch(i);
+            match self.remotes.get(i).map(|r| r.kind()) {
+                Some(crate::config::RemoteKind::Peertube) => self.start_pt_browse(i),
+                _ => {
+                    self.pt_remote = None;
+                    self.start_remote_fetch(i);
+                }
+            }
         }
+        if let Some(h) = open_channel { self.pt_channel = Some(h); self.start_pt_videos(true); }
+        if back_to_channels { self.pt_channel = None; self.pt_videos.clear(); }
+        // The drain in update() owns page advancement, so Load more just refetches.
+        if load_more { self.start_pt_videos(false); }
+        if let Some(u) = pt_play { self.start_pt_play(u); }
+        if let Some(u) = pt_arch { self.start_pt_archive(&u); }
         if let Some(u) = play_url {
             self.play_remote_url(&u);
         }
@@ -5023,6 +5167,37 @@ impl eframe::App for App {
         if let Some((_, msg)) = self.remote_test_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.remote_status = msg;
             self.remote_test_rx = None;
+            ctx.request_repaint();
+        }
+
+        // ── PeerTube browse result hand-offs ────────────────────────────
+        if let Some(res) = self.pt_channels_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.pt_channels_rx = None;
+            match res {
+                Ok(chs) => { self.remote_status = format!("{} channels", chs.len()); self.pt_channels = Some(chs); }
+                Err(e) => { self.remote_status = format!("Error: {e}"); self.pt_channels = Some(Vec::new()); }
+            }
+            ctx.request_repaint();
+        }
+        if let Some(res) = self.pt_videos_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.pt_videos_rx = None;
+            match res {
+                Ok(vids) => {
+                    if vids.len() < 24 { self.pt_done = true; } else { self.pt_page += 1; }
+                    self.remote_status = format!("{} videos", self.pt_videos.len() + vids.len());
+                    self.pt_videos.extend(vids);
+                }
+                Err(e) => self.remote_status = format!("Error: {e}"),
+            }
+            ctx.request_repaint();
+        }
+        if let Some(res) = self.pt_media_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.pt_media_rx = None;
+            match res {
+                Ok(Some(url)) => { self.remote_status.clear(); self.play_remote_url(&url); }
+                Ok(None) => self.remote_status = "HLS-only — archive to watch".to_string(),
+                Err(e) => self.remote_status = format!("Error: {e}"),
+            }
             ctx.request_repaint();
         }
 
