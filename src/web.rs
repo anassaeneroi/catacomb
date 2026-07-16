@@ -823,6 +823,32 @@ pub fn write_cookies(text: &str) -> Result<usize, String> {
 mod tests {
     use super::*;
 
+    /// The web UI keeps its own hardcoded theme list (a JS `THEMES` array plus
+    /// per-theme CSS `.theme-*` blocks) that has to stay in sync with the
+    /// desktop's `theme::THEMES`. This pins that: every desktop theme must be
+    /// selectable *and* styled in the SPA, so newer themes can't silently go
+    /// missing from the web (as cemetery-moss/vampire/cyberpunk/… once did).
+    #[test]
+    fn web_ui_offers_every_desktop_theme() {
+        for (id, _label) in crate::theme::THEMES {
+            // Present in the JS picker array as `['id',…]` (label formatting
+            // varies — some need JS-escaping — so key on the id token).
+            let entry = format!("['{id}',");
+            assert!(
+                HTML_UI.contains(&entry),
+                "theme '{id}' missing from the web THEMES picker array (expected {entry})"
+            );
+            // Styled: `dark` is the default `:root{{…}}`, the rest are classes.
+            if *id != "dark" {
+                let css = format!(".theme-{id}{{");
+                assert!(
+                    HTML_UI.contains(&css),
+                    "theme '{id}' has no CSS block in the web UI (expected `{css}`)"
+                );
+            }
+        }
+    }
+
     #[test]
     fn merge_keeps_blank_password_by_url() {
         use crate::config::{RemoteKind, RemoteSection};

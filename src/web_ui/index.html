@@ -25,6 +25,19 @@
   .theme-emo-nocturnal{--bg:#0a0a0a;--panel:#0d0d0d;--card:#1a1a1a;--accent:#ff0090;--text:#e8e8e8;--muted:#888;--border:#2a2a2a}
   .theme-emo-coffin{--bg:#0d0009;--panel:#110010;--card:#1a0018;--accent:#cc2222;--text:#c0c0c0;--muted:#666;--border:#3a0030}
   .theme-emo-scene-queen{--bg:#080818;--panel:#0a0a1e;--card:#111128;--accent:#39ff14;--text:#c8c8ff;--muted:#666;--border:#222244}
+  /* Palettes ported from the desktop theme.rs (Catacomb/goth, neon, dev, cozy).
+     Keep this list in sync with theme::THEMES — web::tests::web_ui_offers_every_desktop_theme guards it. */
+  .theme-cemetery-moss{--bg:#1a1f1a;--panel:#1e241e;--card:#242a24;--accent:#7a8a6a;--text:#b8b8a8;--muted:#8a8a7a;--border:#363a30}
+  .theme-vampire{--bg:#0d0006;--panel:#120008;--card:#18000c;--accent:#c9a227;--text:#d8c8a8;--muted:#9a8a6a;--border:#3a0014}
+  .theme-witching-hour{--bg:#0a0a1f;--panel:#0e0e28;--card:#14142e;--accent:#8f77c0;--text:#c0c8e0;--muted:#8a90b0;--border:#2a2a55}
+  .theme-cyberpunk{--bg:#0a0a12;--panel:#0e0e18;--card:#14141f;--accent:#00fff5;--text:#c8c8e0;--muted:#7a7a95;--border:#2a2a3a}
+  .theme-synthwave{--bg:#2b0a3d;--panel:#330a48;--card:#3a1055;--accent:#ff2a6d;--text:#e8c0e0;--muted:#a98ac0;--border:#5a1a7a}
+  .theme-vaporwave{--bg:#1a0033;--panel:#200040;--card:#28004e;--accent:#ff71ce;--text:#e0c0ff;--muted:#a986cc;--border:#4a0070}
+  .theme-gruvbox{--bg:#282828;--panel:#32302f;--card:#3c3836;--accent:#fe8019;--text:#ebdbb2;--muted:#a89984;--border:#504945}
+  .theme-tokyo-night{--bg:#1a1b26;--panel:#20202f;--card:#24253a;--accent:#7aa2f7;--text:#c0caf5;--muted:#787c99;--border:#3b4261}
+  .theme-paper{--bg:#f4ecd8;--panel:#f8f0dc;--card:#efe5cc;--accent:#8b6f3a;--text:#3d2b1f;--muted:#8a7a5a;--border:#c4a86a}
+  .theme-honey{--bg:#fff4e0;--panel:#fff9ec;--card:#ffecc8;--accent:#c78820;--text:#5c3818;--muted:#a8834a;--border:#e2c48a}
+  .theme-candlelight{--bg:#f2e6d0;--panel:#f6ecd9;--card:#ead8b8;--accent:#a8703a;--text:#3a2818;--muted:#8a6a48;--border:#c8a06a}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif;display:flex;flex-direction:column;height:100dvh;min-height:100dvh;overflow:hidden;overscroll-behavior:none}
   header{background:var(--panel);padding:8px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap;position:sticky;top:0;z-index:20}
@@ -2400,7 +2413,9 @@ async function showMetadata(id){
 function switchMetaTab(tab,which){tab.parentElement.querySelectorAll('.meta-tab').forEach(t=>t.classList.remove('active'));tab.classList.add('active');document.getElementById('meta-summary').style.display=which==='summary'?'':'none';document.getElementById('meta-raw').style.display=which==='raw'?'':'none'}
 
 /* ── Settings ───────────────────────────────────────────────────── */
-const THEMES=[['dark','Dark'],['light','Light'],['dracula','Dracula'],['trans','Trans'],['emo-nocturnal','Emo: Nocturnal'],['emo-coffin','Emo: Coffin'],['emo-scene-queen','Emo: Scene Queen'],['solarized','Solarized'],['nord','Nord'],['amoled','AMOLED']];
+// Keep in sync with the desktop theme::THEMES (web::tests::web_ui_offers_every_desktop_theme
+// guards it). solarized + amoled are web-only extras kept at the end.
+const THEMES=[['dark','Dark'],['light','Light'],['dracula','Dracula'],['trans','Trans'],['emo-nocturnal','Emo: Nocturnal'],['emo-coffin','Emo: Coffin'],['emo-scene-queen','Emo: Scene Queen'],['cemetery-moss','Cemetery Moss'],['vampire','Vampire'],['witching-hour','Witching Hour'],['cyberpunk','Cyberpunk'],['synthwave',"Synthwave '84"],['vaporwave','Vaporwave'],['nord','Nord'],['gruvbox','Gruvbox'],['tokyo-night','Tokyo Night'],['paper','Paper'],['honey','Honey'],['candlelight','Candlelight'],['solarized','Solarized'],['amoled','AMOLED']];
 function applyTheme(t){document.body.className=t==='dark'?'':'theme-'+t;localStorage.setItem('theme',t);
   // Keep the browser/OS chrome (Android status bar, installed-PWA title bar)
   // in step with the active theme's panel colour.
