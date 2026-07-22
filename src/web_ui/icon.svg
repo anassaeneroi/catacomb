@@ -1,31 +1,31 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <!-- Catacomb app icon: a crypt archway sheltering a play wedge, in the
-       UI's default palette (bg #1a1a2e / accent #e94560). Full-bleed
-       background with all strokes inside the central maskable safe zone,
-       so the same art serves purpose:any and purpose:maskable.
-       Regenerate the PNGs after editing:
-         rsvg-convert -w 512 -h 512 icon.svg -o icon-512.png
-         rsvg-convert -w 192 -h 192 icon.svg -o icon-192.png
-         rsvg-convert -w 180 -h 180 icon.svg -o apple-touch-icon.png -->
+  <!-- Catacomb app icon: a goth coffin with a play triangle punched out of
+       it (negative space), in the UI's default palette (bg #1a1a2e / accent
+       #e94560). Full-bleed background with the coffin inside the central
+       maskable safe zone, so the same art serves purpose:any and
+       purpose:maskable.
+       Regenerate every derived PNG after editing:
+         rsvg-convert -w 512 -h 512 src/web_ui/icon.svg -o src/web_ui/icon-512.png
+         rsvg-convert -w 192 -h 192 src/web_ui/icon.svg -o src/web_ui/icon-192.png
+         rsvg-convert -w 180 -h 180 src/web_ui/icon.svg -o src/web_ui/apple-touch-icon.png
+         rsvg-convert -w 256 -h 256 src/web_ui/icon.svg -o icon.png   # desktop window / tray / packaging -->
   <defs>
     <radialGradient id="bg" cx="30%" cy="12%" r="130%">
       <stop offset="0" stop-color="#272747"/>
       <stop offset="1" stop-color="#131322"/>
     </radialGradient>
-    <linearGradient id="arch" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="acc" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#ff5f7d"/>
       <stop offset="1" stop-color="#cc2b4d"/>
     </linearGradient>
+    <!-- punch the play wedge out of the solid coffin so the bg shows through -->
+    <mask id="cut">
+      <rect width="512" height="512" fill="white"/>
+      <polygon points="230,206 230,308 312,257" fill="black"/>
+    </mask>
   </defs>
   <rect width="512" height="512" fill="url(#bg)"/>
-  <!-- doorway interior: faint accent glow so the opening reads as depth -->
-  <path d="M192 396 V240 a64 64 0 0 1 128 0 V396 Z" fill="#e94560" opacity="0.16"/>
-  <!-- arch -->
-  <path d="M154 396 V240 a102 102 0 0 1 204 0 V396" fill="none"
-        stroke="url(#arch)" stroke-width="28" stroke-linecap="round"/>
-  <!-- floor (solid colour: a zero-height bounding box degenerates the
-       objectBoundingBox gradient and rsvg drops the stroke entirely) -->
-  <path d="M118 396 H394" stroke="#cc2b4d" stroke-width="28" stroke-linecap="round"/>
-  <!-- play wedge in the doorway -->
-  <path d="M233 282 l60 34 -60 34 Z" fill="#ff5f7d"/>
+  <!-- hexagonal coffin: flat head edge, sharp shoulder, long taper, flat foot -->
+  <polygon points="206,104 306,104 354,172 314,426 198,426 158,172"
+           fill="url(#acc)" mask="url(#cut)"/>
 </svg>
